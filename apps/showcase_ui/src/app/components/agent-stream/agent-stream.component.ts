@@ -20,6 +20,7 @@ import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import { HttpClient } from '@angular/common/http';
 import { AgentService, StartupProgressEvent } from '../../services/agent.service';
+import { SystemService } from '../../services/system.service';
 import { Session, ModelInfo, SessionUsage } from '../../core/models/session.model';
 import { MarkdownSegment, MarkdownLine, NoteMilestone, ParsedNote } from '../../core/models/markdown.model';
 import { OverlayModule, ConnectedPosition } from '@angular/cdk/overlay';
@@ -240,6 +241,7 @@ export type { MarkdownSegment, MarkdownLine, NoteMilestone, ParsedNote, StreamRe
 })
 export class AgentStreamComponent implements AfterViewInit {
   public agentService = inject(AgentService);
+  public systemService = inject(SystemService);
   private http = inject(HttpClient);
   private destroyRef = inject(DestroyRef);
   private zone = inject(NgZone);
@@ -279,6 +281,16 @@ export class AgentStreamComponent implements AfterViewInit {
     const session = this.agentService.currentSession();
     const running = this.agentService.isCurrentSessionRunning();
     return formatElapsed(sessionElapsedSeconds(session, running, this.runInfoClock()));
+  });
+
+  public runInfoSpeed = computed(() => {
+    const session = this.agentService.currentSession();
+    const running = this.agentService.isCurrentSessionRunning();
+    const elapsed = sessionElapsedSeconds(session, running, this.runInfoClock());
+    const usage = this.runUsage();
+    if (!usage || !usage.completion_tokens || elapsed <= 0) return null;
+    const speed = (usage.completion_tokens / elapsed).toFixed(1);
+    return `${speed} tok/s`;
   });
 
   public runInfoTuning = computed(() => {
@@ -2184,6 +2196,30 @@ export class AgentStreamComponent implements AfterViewInit {
       return `Consumed: ${phase.tokens.toLocaleString()} tokens (${phase.promptTokens.toLocaleString()} in / ${phase.completionTokens.toLocaleString()} out)`;
     }
     return `Consumed: ${phase.tokens.toLocaleString()} tokens`;
+  }
+
+  public getPhaseSpeed(phase: PhaseBlock): string | null {
+    if (!phase.tokens || !phase.durationSeconds || phase.durationSeconds <= 0) return null;
+    const tokens = phase.completionTokens || phase.tokens;
+    const tps = tokens / phase.durationSeconds;
+    return `${tps.toFixed(1)} tok/s`;
+  }
+
+  public getPhaseBreakdown(phase: PhaseBlock): { llmSeconds: number; actionSeconds: number } | null {
+    if (!phase.durationSeconds || phase.durationSeconds <= 0) return null;
+    const block = phase.blocks?.[0];
+    const tools = block?.data?.generic_tools;
+    if (!Array.isArray(tools) || tools.length === 0) return null;
+    let actionDuration = 0;
+    for (const t of tools) {
+      if (typeof t?.duration === 'number' && t.duration > 0) {
+        actionDuration += t.duration;
+      }
+    }
+    if (actionDuration <= 0) return null;
+    const actionSeconds = Math.round(actionDuration * 10) / 10;
+    const llmSeconds = Math.max(0, Math.round((phase.durationSeconds - actionSeconds) * 10) / 10);
+    return { llmSeconds, actionSeconds };
   }
 
   public isCurrentSessionActive(): boolean {

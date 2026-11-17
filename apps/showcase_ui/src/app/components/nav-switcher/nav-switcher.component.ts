@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
-import { Component, ChangeDetectionStrategy } from '@angular/core';
-
+import { Component, ChangeDetectionStrategy, inject, OnInit } from '@angular/core';
 import { RouterLink, RouterLinkActive } from '@angular/router';
+import { SystemService } from '../../services/system.service';
 
 @Component({
   selector: 'app-nav-switcher',
@@ -43,9 +43,30 @@ import { RouterLink, RouterLinkActive } from '@angular/router';
         <span class="material-symbols-outlined tab-icon">space_dashboard</span>
         <span class="tab-label">Workspace</span>
       </a>
+
+      @if (systemService.activeModelDisplayName()) {
+        <div class="nav-divider"></div>
+        <a 
+          routerLink="/" 
+          [queryParams]="{tab: 'diagnostics'}"
+          class="nav-model-badge"
+          [title]="'Mô hình AI đang sử dụng: ' + systemService.activeModelDisplayName() + ' (' + systemService.activeModelName() + '). Bấm để xem hoặc cấu hình model.'"
+        >
+          <span class="model-badge-icon">{{ systemService.activeModelBadgeIcon() }}</span>
+          <span class="model-badge-name">{{ systemService.activeModelDisplayName() }}</span>
+        </a>
+      }
     </nav>
   `,
-  changeDetection: ChangeDetectionStrategy.Eager,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   styleUrls: ['./nav-switcher.component.scss']
 })
-export class NavSwitcherComponent {}
+export class NavSwitcherComponent implements OnInit {
+  public systemService = inject(SystemService);
+
+  ngOnInit(): void {
+    if (!this.systemService.modelConfigEnv()) {
+      this.systemService.fetchModelConfigEnv().subscribe();
+    }
+  }
+}

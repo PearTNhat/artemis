@@ -33,6 +33,16 @@ limitations under the License.
         </div>
       }
 
+      @if (successMessage()) {
+        <div class="floating-dock-toast success">
+          <span class="material-symbols-outlined toast-icon">check_circle</span>
+          <span class="toast-text">{{ successMessage() }}</span>
+          <button type="button" class="btn-toast-close" (click)="successMessage.set(null)" aria-label="Close notification">
+            <span class="material-symbols-outlined">close</span>
+          </button>
+        </div>
+      }
+
       <!-- Dock Row (Contains the Main Card and the Separate Stop Button when running) -->
       <div class="floating-dock-row">
         <!-- Floating Dock Main Card -->
@@ -88,14 +98,19 @@ limitations under the License.
           </div>
 
           <!-- Dormant / Capsule Peek View (Visible when mouse is away and input idle) -->
-          <div class="capsule-peek-view">
-            <span class="capsule-placeholder">Start a new task...</span>
+          <div class="capsule-peek-view" [class.is-running]="isTaskRunning()">
+            @if (isTaskRunning()) {
+              <span class="running-pulsing-dot"></span>
+              <span class="capsule-placeholder live-guidance">💬 AI đang chạy · Bấm để gửi chỉ dẫn hoặc can thiệp...</span>
+            } @else {
+              <span class="capsule-placeholder">Start a new task...</span>
+            }
           </div>
 
           <!-- Expanded Full View Content (Visible on hover, focus, or text) -->
           <div class="expanded-card-content">
             <div class="card-main-input-row">
-              <!-- Textarea Container with Dynamic English Placeholder -->
+              <!-- Textarea Container with Dynamic Contextual Placeholder -->
               <div class="input-content-area">
                 <textarea #dockInput [(ngModel)]="taskInput"
                   (input)="onTextareaInput($event)"
@@ -104,9 +119,11 @@ limitations under the License.
                   (blur)="onInputBlur()"
                   rows="1"
                   [disabled]="isSubmitting()"
-                  [placeholder]="selectedProfile() === 'pro' 
-                    ? 'Pro: plans first, checks results and recovers from blocked steps. For long or complex tasks'
-                    : 'Flash: fast single-look loop for everyday app tasks'"
+                  [placeholder]="isTaskRunning()
+                    ? '💬 Nhập chỉ dẫn hoặc can thiệp cho AI đang chạy (ví dụ: bấm nút Yes it\'s me, vuốt lên, chọn Phuc Phan...) rồi nhấn Enter...'
+                    : (selectedProfile() === 'pro' 
+                        ? 'Pro: plans first, checks results and recovers from blocked steps. For long or complex tasks'
+                        : 'Flash: fast single-look loop for everyday app tasks')"
                   class="dock-textarea"
                   spellcheck="false"
                 ></textarea>
@@ -133,17 +150,18 @@ limitations under the License.
 
               <!-- Send Button -->
               <button type="button" class="dock-circle-btn btn-send"
+                [class.is-inject-mode]="isTaskRunning()"
                 [class.has-content]="!!taskInput.trim()"
                 [disabled]="!taskInput.trim() || isSubmitting()"
                 (click)="submitTask()"
-                [title]="isSubmitting() ? 'Starting task...' : 'Start task (Enter)'"
-                aria-label="Start task"
+                [title]="isSubmitting() ? (isTaskRunning() ? 'Đang gửi chỉ dẫn...' : 'Starting task...') : (isTaskRunning() ? 'Gửi chỉ dẫn cho AI (Enter)' : 'Start task (Enter)')"
+                [attr.aria-label]="isTaskRunning() ? 'Gửi chỉ dẫn cho AI' : 'Start task'"
                 >
                 @if (isSubmitting()) {
                   <span class="material-symbols-outlined spinning-icon">sync</span>
                 }
                 @if (!isSubmitting()) {
-                  <span class="material-symbols-outlined">arrow_upward</span>
+                  <span class="material-symbols-outlined">{{ isTaskRunning() ? 'send' : 'arrow_upward' }}</span>
                 }
               </button>
             </div>
@@ -165,6 +183,12 @@ limitations under the License.
                     <span class="material-symbols-outlined pill-icon icon-pro">psychology</span>
                     <span class="pill-label">Pro</span>
                   </button>
+                </div>
+
+                <!-- Active Model Indicator -->
+                <div class="dock-model-pill" [title]="'Mô hình AI: ' + systemService.activeModelDisplayName() + ' (' + systemService.activeModelName() + ')'">
+                  <span class="model-pill-icon">{{ systemService.activeModelBadgeIcon() }}</span>
+                  <span class="model-pill-name">{{ systemService.activeModelDisplayName() }}</span>
                 </div>
               </div>
             </div>

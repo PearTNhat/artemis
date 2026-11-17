@@ -7,13 +7,11 @@
   // 1. Global Default Model (Applied to all sub-agents unless overridden below)
   // ------------------------------------------------------------------------------
   "default": {
-    "provider": "google",
-    "model": "gemini-3.8-flash",
-    "thinking_level": "medium",
+    "provider": "openai",
+    "model": "Qwen3.8-27B-UD-Q4_K_M.gguf:no_think",
     "fallback": {
-      "provider": "google",
-      "model": "gemini-3.7-flash",
-      "thinking_level": "medium"
+      "provider": "openai",
+      "model": "Qwen3.8-27B-UD-Q4_K_M.gguf:no_think"
     }
   },
 
@@ -23,8 +21,8 @@
   "presets": {
     "gemini-flagship": {
       "provider": "google",
-      "model": "gemini-3.8-flash",
-      "fallback": { "provider": "google", "model": "gemini-3.7-flash" }
+      "model": "gemini-3.6-flash",
+      "fallback": { "provider": "google", "model": "gemini-3.5-flash" }
     },
     "gemini-flash": {
       "provider": "google",
@@ -75,10 +73,11 @@
     // To achieve accurate [x, y] point and bounding box localization, this node MUST use specialized Gemini ER (Embodied Reasoning / Robotics) models:
     // e.g., "gemini-robotics-er-2-preview". Non-ER models will fail spatial coordinate detection.
     "object_detector": {
-      "model": "gemini-robotics-er-2-preview",
+      "provider": "openai",
+      "model": "Qwen3.8-27B-UD-Q4_K_M.gguf:no_think",
       "fallback": {
-        "provider": "google",
-        "model": "gemini-robotics-er-2-preview"
+        "provider": "openai",
+        "model": "Qwen3.8-27B-UD-Q4_K_M.gguf:no_think"
       }
     },
 
@@ -95,10 +94,11 @@
 
     // 🔽 Hopper: Fast lightweight package name locator
     "hopper": {
-      "model": "gemini-3.5-flash-lite",
+      "provider": "openai",
+      "model": "Qwen3.8-27B-UD-Q4_K_M.gguf:no_think",
       "fallback": {
-        "provider": "google",
-        "model": "gemini-3.1-flash-lite"
+        "provider": "openai",
+        "model": "Qwen3.8-27B-UD-Q4_K_M.gguf:no_think"
       }
     },
 
@@ -144,7 +144,7 @@
       // Summarizes intermediate steps in background without blocking the runner,
       // replacing images only after strictly objective, high-density summaries are ready.
       "step_summarizer": {
-        "enabled": true, // Whether background step summarization is active
+        "enabled": false, // Whether background step summarization is active (Gemini-only)
         "model": "gemini-3.5-flash-lite", // Lightweight model for fast background inference
         "prune_history_xml": true // Prune outdated heavy XML trees from historical steps
       }
@@ -206,7 +206,7 @@
         // prompt path byte-for-byte (L2/L3 chunk compression rides this same
         // flag). See services/token_meter.py for measured session token usage
         // and cache-hit ratios.
-        "enabled": true,
+        "enabled": false, // off: chunk capsules are Gemini-only
         "context_budget_tokens": 80000,
         // Below start_ratio of the operator's own measured prompt size, closed
         // segments only prepare their summary; the original turns are kept in
@@ -246,7 +246,7 @@
         // call each); milestone closes are exempt, the hard line waives it.
         "min_steps": 3,
         "target_source_tokens": 2000,
-        "model": "gemini-3.8-flash",
+        "model": "gemini-3.6-flash",
         "max_chunks": 8
         // "max_eras": 8 // independent era cap; omitted = follows max_chunks
       },

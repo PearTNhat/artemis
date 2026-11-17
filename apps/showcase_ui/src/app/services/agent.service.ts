@@ -479,6 +479,16 @@ export class AgentService {
   }
 
   /**
+   * Inject real-time instruction / guidance into a currently running task.
+   */
+  public injectInstruction(instruction: string, sessionId?: string): Observable<any> {
+    return this.http.post<any>('/api/inject', {
+      instruction,
+      session_id: sessionId || this.runningSessionId() || this.currentSessionId() || undefined,
+    });
+  }
+
+  /**
    * Stop the currently viewed task (or specified task), and optionally clear queue.
    * Supports stopping any task across any ingress/platform (Web, CLI, MCP, SDK).
    */

@@ -18,6 +18,7 @@ import json
 from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from artemis.core.diagnostics import readiness_engine
 from artemis.runtime import DeviceExecutionLock, device_pool
 
@@ -245,6 +246,70 @@ async def resume_task():
     if resumed:
         return {"status": "resumed"}
     return {"status": "not_paused"}
+
+
+class InjectInstructionRequest(BaseModel):
+    instruction: str = Field(description="Guidance or instruction to inject into the running task")
+    session_id: str | None = Field(default=None, description="Target session ID; defaults to active running session")
+    release_loop: bool = Field(default=False, description="Signal release of monitoring loop")
+
+
+@router.post("/api/inject")
+@router.post("/api/tasks/inject")
+async def inject_instruction_endpoint(request: InjectInstructionRequest):
+    """Inject a runtime instruction / user guidance into the active running task."""
+    instruction = request.instruction.strip()
+    if not instruction:
+        raise HTTPException(status_code=400, detail="Chỉ dẫn không được để trống.")
+
+    target_sid = request.session_id
+    if not target_sid:
+        global_owner = DeviceExecutionLock.get_active_owner()
+        active_owners = DeviceExecutionLock.get_active_owners()
+        running_task = next(
+            (t for t in state.queue_items if isinstance(t, dict) and t.get("status") == "running"), None
+        )
+        target_sid = (
+            (global_owner.session_id if global_owner else None)
+            or state.active_session_id
+            or (running_task.get("session_id") if running_task else None)
+            or (active_owners and list(active_owners.values())[0].session_id)
+        )
+
+    if not target_sid:
+        raise HTTPException(status_code=404, detail="Không có task nào đang chạy để gửi chỉ dẫn.")
+
+    import os, time
+    from artemis.runtime import trace_store
+
+    trace_dir = trace_store.get_trace_dir(str(target_sid))
+    if not os.path.exists(trace_dir):
+        trace_dir = os.path.join(trace_store.TRACES_DIR, str(target_sid))
+
+    if not os.path.exists(trace_dir):
+        raise HTTPException(status_code=404, detail=f"Trace directory không tồn tại cho session {target_sid}")
+
+    instruction_path = os.path.join(trace_dir, "injected_instruction.json")
+    try:
+        with open(instruction_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "instruction": instruction,
+                    "release_loop": bool(request.release_loop),
+                    "timestamp": time.time(),
+                    "status": "pending",
+                },
+                f,
+                indent=2,
+            )
+
+        return {
+            "status": "success",
+            "session_id": str(target_sid),
+            "message": f"Đã gửi chỉ dẫn: '{instruction}'",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi khi ghi chỉ dẫn: {e}")
 
 
 @router.get("/api/status")

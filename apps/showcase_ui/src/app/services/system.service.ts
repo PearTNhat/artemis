@@ -526,6 +526,39 @@ export class SystemService {
 
   public modelConfigEnv = signal<ModelConfigEnvResponse | null>(null);
 
+  public activeModelName = computed(() => this.modelConfigEnv()?.default_model?.model || '');
+  public activeModelProvider = computed(() => this.modelConfigEnv()?.default_model?.provider || '');
+  public activeModelPreset = computed<'fosta' | 'qwen' | 'gemini' | 'custom'>(() => {
+    const model = (this.activeModelName() || '').toLowerCase();
+    const url = (this.modelConfigEnv()?.env_vars?.find(v => v.name === 'OPENAI_BASE_URL')?.preview || '').toLowerCase();
+    const provider = (this.activeModelProvider() || '').toLowerCase();
+
+    if (provider === 'google' || model.includes('gemini')) {
+      return 'gemini';
+    }
+    if (model.includes('qwen') || url.includes('192.168.1.40') || url.includes(':18080')) {
+      return 'qwen';
+    }
+    if (model.includes('gpt-6') || model.includes('fosta') || url.includes('fosta')) {
+      return 'fosta';
+    }
+    return 'custom';
+  });
+  public activeModelDisplayName = computed<string>(() => {
+    const preset = this.activeModelPreset();
+    if (preset === 'fosta') return 'GPT-6.1 Sol (Fosta)';
+    if (preset === 'qwen') return 'Qwen-27B Local';
+    if (preset === 'gemini') return 'Gemini 3.6 Flash';
+    return this.activeModelName() || 'Custom Model';
+  });
+  public activeModelBadgeIcon = computed<string>(() => {
+    const preset = this.activeModelPreset();
+    if (preset === 'fosta') return '⚡';
+    if (preset === 'qwen') return '🏠';
+    if (preset === 'gemini') return '🌟';
+    return '🤖';
+  });
+
   /**
    * Fetch current model configuration (artemis.jsonc) and environment (.env) status
    */
@@ -576,6 +609,92 @@ export class SystemService {
       })
     );
   }
+
+  /**
+   * Switch model configuration preset (e.g. 'fosta', 'qwen', 'gemini')
+   */
+  public switchModelPreset(preset: string): Observable<any> {
+    return this.http.post<any>('/api/system/model-config/switch-preset', { preset }).pipe(
+      tap({
+        next: () => {
+          this.fetchModelConfigEnv().subscribe();
+          this.fetchReadiness(true).subscribe();
+        },
+        error: (err) => {
+          console.error(`Failed to switch preset to ${preset}:`, err);
+        }
+      })
+    );
+  }
+
+  /**
+   * Dynamically update custom model name in artemis.jsonc and credentials in .env
+   */
+  public updateCustomModelConfig(payload: { model: string; api_key?: string; base_url?: string }): Observable<any> {
+    return this.http.post<any>('/api/system/model-config/update-custom', payload).pipe(
+      tap({
+        next: () => {
+          this.fetchModelConfigEnv().subscribe();
+          this.fetchReadiness(true).subscribe();
+        },
+        error: (err) => {
+          console.error('Failed to update custom model config:', err);
+        }
+      })
+    );
+  }
+
+  public cliIntegrations = signal<CliIntegrationsResponse | null>(null);
+  public isConnectingCli = signal<string | null>(null);
+
+  /**
+   * Fetch status of AI CLI integrations (Claude Code, Gemini CLI / Antigravity)
+   */
+  public fetchCliIntegrations(): Observable<CliIntegrationsResponse> {
+    return this.http.get<CliIntegrationsResponse>('/api/system/cli-integrations').pipe(
+      tap({
+        next: (data) => {
+          this.cliIntegrations.set(data);
+        },
+        error: (err) => {
+          console.error('Failed to fetch CLI integrations:', err);
+        }
+      })
+    );
+  }
+
+  /**
+   * Install/merge ARTEMIS MCP configuration and testing rules into target CLI (claude / antigravity)
+   */
+  public installCliMcp(target: string): Observable<any> {
+    this.isConnectingCli.set(target);
+    return this.http.post<any>('/api/system/mcp-install', { client: target }).pipe(
+      tap({
+        next: () => {
+          this.isConnectingCli.set(null);
+          this.fetchCliIntegrations().subscribe();
+        },
+        error: (err) => {
+          this.isConnectingCli.set(null);
+          console.error(`Failed to install MCP for ${target}:`, err);
+        }
+      })
+    );
+  }
+}
+
+export interface CliItem {
+  name: string;
+  bin: string | null;
+  installed: boolean;
+  configured: boolean;
+  command: string;
+  install_cmd: string;
+}
+
+export interface CliIntegrationsResponse {
+  claude: CliItem;
+  antigravity: CliItem;
 }
 
 export interface ModelConfigEnvResponse {

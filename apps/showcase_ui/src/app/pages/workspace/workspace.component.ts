@@ -21,6 +21,7 @@ import { AgentStreamComponent } from '../../components/agent-stream/agent-stream
 import { ChatInterfaceComponent } from '../../components/chat-interface/chat-interface.component';
 import { FloatingVideoPlayerComponent } from '../../components/floating-video-player/floating-video-player.component';
 import { AgentService } from '../../services/agent.service';
+import { SystemService } from '../../services/system.service';
 
 @Component({
   selector: 'app-workspace',
@@ -37,6 +38,7 @@ import { AgentService } from '../../services/agent.service';
 })
 export class WorkspaceComponent implements OnInit {
   public agentService = inject(AgentService);
+  public systemService = inject(SystemService);
   private zone = inject(NgZone);
   private destroyRef = inject(DestroyRef);
 
@@ -55,6 +57,7 @@ export class WorkspaceComponent implements OnInit {
   public set taskInput(value: string) { this.taskInputSignal.set(value); }
   public isSubmitting = signal<boolean>(false);
   public errorMessage = signal<string | null>(null);
+  public successMessage = signal<string | null>(null);
   public selectedProfile = signal<'flash' | 'pro'>('flash');
 
   // Expand States (Signals for 0-latency reactivity)
@@ -69,6 +72,10 @@ export class WorkspaceComponent implements OnInit {
       if (saved === 'flash' || saved === 'pro') {
         this.selectedProfile.set(saved);
       }
+    }
+
+    if (!this.systemService.modelConfigEnv()) {
+      this.systemService.fetchModelConfigEnv().subscribe();
     }
 
     // The global ⌘K/Ctrl+K shortcut is registered outside the Angular zone so
@@ -216,7 +223,7 @@ export class WorkspaceComponent implements OnInit {
   }
 
   /**
-   * Submit a new task instruction
+   * Submit a new task instruction or inject guidance into currently running task
    */
   public submitTask(): void {
     const goal = this.taskInput.trim();
@@ -224,8 +231,40 @@ export class WorkspaceComponent implements OnInit {
       return;
     }
 
+    if (this.isTaskRunning()) {
+      // Live instruction injection into active running task!
+      this.isSubmitting.set(true);
+      this.errorMessage.set(null);
+      this.successMessage.set(null);
+
+      this.agentService.injectInstruction(goal).subscribe({
+        next: (res) => {
+          this.taskInput = '';
+          if (this.dockInputRef?.nativeElement) {
+            this.dockInputRef.nativeElement.style.height = 'auto';
+          }
+          this.isSubmitting.set(false);
+          this.successMessage.set(`✓ Đã gửi chỉ dẫn cho AI: "${goal}" (Sẽ thực thi ở bước kế tiếp)`);
+          setTimeout(() => {
+            this.successMessage.set(null);
+          }, 4500);
+        },
+        error: (err) => {
+          console.error('Failed to inject instruction:', err);
+          this.isSubmitting.set(false);
+          this.errorMessage.set(err.error?.detail || 'Không thể gửi chỉ dẫn vào task đang chạy.');
+          setTimeout(() => {
+            this.errorMessage.set(null);
+          }, 5000);
+        }
+      });
+      return;
+    }
+
+    // Normal task execution
     this.isSubmitting.set(true);
     this.errorMessage.set(null);
+    this.successMessage.set(null);
 
     if (this.dockInputRef?.nativeElement) {
       this.dockInputRef.nativeElement.blur();

@@ -17,6 +17,15 @@ limitations under the License.
 <div class="agent-stream-container">
   <!-- VS Code Style Navigation Header (for responsive small screens) -->
   <header class="vscode-nav-header">
+    <!-- Active Model Indicator on Left -->
+    @if (systemService.activeModelDisplayName()) {
+      <div class="header-model-pill" [title]="'Mô hình AI đang sử dụng: ' + systemService.activeModelDisplayName() + ' (' + systemService.activeModelName() + ')'">
+        <span class="model-pill-icon">{{ systemService.activeModelBadgeIcon() }}</span>
+        <span class="model-pill-label">Model:</span>
+        <span class="model-pill-name">{{ systemService.activeModelDisplayName() }}</span>
+      </div>
+    }
+
     <div class="vscode-tab-container">
       <button
         #taskQueueOrigin="cdkOverlayOrigin"
@@ -402,9 +411,18 @@ limitations under the License.
           (click)="toggleRunInfo($event)"
           >
           <span class="material-symbols-outlined model-icon">{{ getModelIcon(model.name) }}</span>
-          <span class="model-label">Architecture:</span>
+          <span class="model-label">Arch:</span>
           <span class="model-name">{{ getModelDisplayName(model.name) }}</span>
         </button>
+
+        <!-- Active Underlying LLM Model Chip -->
+        @if (systemService.activeModelDisplayName()) {
+          <div class="model-info-chip active-llm-chip" [title]="'Mô hình AI: ' + systemService.activeModelDisplayName() + ' (' + systemService.activeModelName() + ')'">
+            <span class="llm-badge-icon">{{ systemService.activeModelBadgeIcon() }}</span>
+            <span class="model-label">Model:</span>
+            <span class="model-name">{{ systemService.activeModelDisplayName() }}</span>
+          </div>
+        }
 
         <ng-template
           cdkConnectedOverlay
@@ -425,6 +443,11 @@ limitations under the License.
             </div>
 
             <div class="run-info-row">
+              <span class="run-info-label">Active Model</span>
+              <span class="run-info-value">{{ systemService.activeModelDisplayName() }}</span>
+            </div>
+
+            <div class="run-info-row">
               <span class="run-info-label">Elapsed</span>
               <span class="run-info-value">{{ runInfoElapsed() }}</span>
             </div>
@@ -436,6 +459,15 @@ limitations under the License.
                   {{ formatRunTokens(usage.total_tokens) }}
                   <span class="run-info-sub">{{ formatRunTokens(usage.prompt_tokens) }} in · {{ formatRunTokens(usage.completion_tokens) }} out</span>
                 </span>
+              } @else {
+                <span class="run-info-value is-muted">—</span>
+              }
+            </div>
+
+            <div class="run-info-row">
+              <span class="run-info-label">Speed</span>
+              @if (runInfoSpeed(); as speed) {
+                <span class="run-info-value">{{ speed }}</span>
               } @else {
                 <span class="run-info-value is-muted">—</span>
               }
@@ -604,11 +636,22 @@ limitations under the License.
                 [class.first-phase]="first && startupWorkItems().length === 0"
                 >
                 <span class="phase-worked-time">{{ isCheckerPhase(phase) ? 'Checked' : 'Worked' }} for {{ phase.durationSeconds }}s</span>
+                @if (getPhaseBreakdown(phase); as bd) {
+                  <span class="phase-breakdown" title="Chi tiết: LLM suy nghĩ vs ADB thiết bị">
+                    (LLM: {{ bd.llmSeconds }}s · ADB: {{ bd.actionSeconds }}s)
+                  </span>
+                }
                 @if (phase.tokens) {
                   <span class="phase-token-usage" [title]="getTokenTooltip(phase)">
                     <span class="token-dot">·</span>
                     <span class="token-text">{{ formatTokenCount(phase.tokens) }}</span>
                   </span>
+                  @if (getPhaseSpeed(phase); as speed) {
+                    <span class="phase-speed-badge" title="Tốc độ sinh token của AI">
+                      <span class="token-dot">·</span>
+                      <span class="speed-text">{{ speed }}</span>
+                    </span>
+                  }
                 }
               </div>
             }

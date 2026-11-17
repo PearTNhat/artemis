@@ -181,6 +181,49 @@ $rose-dark: #dc2626;
           }
         }
       }
+
+      &.success {
+        background: rgba(236, 253, 245, 0.92);
+        backdrop-filter: blur(20px) saturate(180%);
+        -webkit-backdrop-filter: blur(20px) saturate(180%);
+        border: 1px solid rgba(167, 243, 208, 0.95);
+        color: #065f46;
+        box-shadow: 0 8px 24px -4px rgba(16, 185, 129, 0.2);
+
+        .toast-icon {
+          font-size: 16px;
+          color: #10b981;
+          flex-shrink: 0;
+        }
+
+        .toast-text {
+          flex: 1;
+          line-height: 1.4;
+        }
+
+        .btn-toast-close {
+          background: transparent;
+          border: none;
+          padding: 2px;
+          cursor: pointer;
+          color: #065f46;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border-radius: 4px;
+          opacity: 0.7;
+          transition: opacity 0.15s ease;
+
+          &:hover {
+            opacity: 1;
+            background: rgba(0, 0, 0, 0.05);
+          }
+
+          .material-symbols-outlined {
+            font-size: 15px;
+          }
+        }
+      }
     }
 
     /* Dock Row: Flex container holding Main Card + Standalone Stop Button */
@@ -412,6 +455,17 @@ $rose-dark: #dc2626;
       box-sizing: border-box;
       user-select: none;
 
+      .running-pulsing-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #10b981;
+        margin-right: 7px;
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+        animation: pulseGreen 1.6s infinite cubic-bezier(0.66, 0, 0, 1);
+        flex-shrink: 0;
+      }
+
       .capsule-placeholder {
         color: #475569;
         font-size: 12px;
@@ -419,6 +473,11 @@ $rose-dark: #dc2626;
         letter-spacing: 0.1px;
         white-space: nowrap;
         text-align: center;
+
+        &.live-guidance {
+          color: #0f172a;
+          font-weight: 600;
+        }
       }
     }
 
@@ -653,6 +712,18 @@ $rose-dark: #dc2626;
               }
             }
 
+            &.is-inject-mode:not(:disabled) {
+              background: linear-gradient(135deg, #0284c7, #0369a1) !important;
+              box-shadow: 0 4px 14px rgba(2, 132, 199, 0.35), inset 0 1px 1px rgba(255, 255, 255, 0.4) !important;
+              color: #ffffff !important;
+
+              &:hover {
+                background: linear-gradient(135deg, #0369a1, #075985) !important;
+                transform: scale(1.06);
+                box-shadow: 0 6px 18px rgba(2, 132, 199, 0.45) !important;
+              }
+            }
+
             &:active:not(:disabled) {
               transform: scale(0.95);
             }
@@ -739,6 +810,46 @@ $rose-dark: #dc2626;
                   color: #7c3aed;
                 }
               }
+            }
+          }
+
+          /* Active Model Badge in Dock Footer */
+          .dock-model-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 4.5px;
+            padding: 2.5px 9px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.55);
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
+            border: 1px solid rgba(255, 255, 255, 0.7);
+            box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.8), 0 1px 3px rgba(0, 0, 0, 0.02);
+            font-size: 11px;
+            font-weight: 600;
+            color: #334155;
+            cursor: default;
+            user-select: none;
+            transition: all 0.2s ease;
+
+            .model-pill-icon {
+              font-size: 11.5px;
+              line-height: 1;
+            }
+
+            .model-pill-name {
+              max-width: 170px;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+              font-size: 11px;
+              font-weight: 600;
+              color: #1e293b;
+            }
+
+            &:hover {
+              background: rgba(255, 255, 255, 0.85);
+              border-color: rgba(203, 213, 225, 0.9);
             }
           }
         }
@@ -839,6 +950,21 @@ $rose-dark: #dc2626;
   100% {
     transform: scale(0.95);
     box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+  }
+}
+
+@keyframes pulseGreen {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 6px rgba(16, 185, 129, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
   }
 }
 

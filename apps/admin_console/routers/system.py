@@ -284,6 +284,20 @@ class ValidateCredentialsRequest(BaseModel):
     base_url: str | None = Field(default=None, description="Optional custom base URL")
 
 
+class SwitchPresetRequest(BaseModel):
+    """Payload to switch active configuration preset."""
+
+    preset: str = Field(description="Preset name: fosta, qwen, gemini")
+
+
+class UpdateCustomConfigRequest(BaseModel):
+    """Payload to dynamically update model, api_key, and base_url."""
+
+    model: str = Field(description="Model identifier, e.g. gpt-6.1-sol")
+    api_key: str | None = Field(default=None, description="API Key")
+    base_url: str | None = Field(default=None, description="Base URL")
+
+
 @router.get("/credentials")
 async def get_credentials():
     """Report which providers have an API key configured.
@@ -397,7 +411,22 @@ async def get_model_config_and_env():
     env_path = get_env_file()
 
     # 3. Relevant Env Variables status
+    def read_raw_env_file_val(key_name: str) -> str | None:
+        try:
+            if env_path.exists():
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    clean = line.strip()
+                    if clean.startswith(f"{key_name}="):
+                        val = clean.split("=", 1)[1].strip()
+                        return val if val and not is_placeholder_key(val) else None
+        except Exception:
+            pass
+        return None
+
     def get_real_env_value(key_name: str, provider: str) -> str | None:
+        raw = read_raw_env_file_val(key_name)
+        if raw:
+            return raw
         k = settings.get_api_key(provider)
         if k and not is_placeholder_key(k):
             return k.get_secret_value()
@@ -422,7 +451,7 @@ async def get_model_config_and_env():
     anthropic_real = get_real_env_value("ANTHROPIC_API_KEY", "anthropic")
     openrouter_real = get_real_env_value("OPEN_ROUTER_API_KEY", "openrouter")
     xai_real = get_real_env_value("XAI_API_KEY", "xai")
-    base_url_val = settings.OPENAI_BASE_URL or os.environ.get("OPENAI_BASE_URL")
+    base_url_val = read_raw_env_file_val("OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or settings.OPENAI_BASE_URL
     if base_url_val and is_placeholder_key(base_url_val):
         base_url_val = None
     ocr_real = get_real_env_value("OCR_API_KEY", "ocr") or get_real_env_value(
@@ -491,6 +520,89 @@ async def get_model_config_and_env():
         "env_filename": ".env",
         "env_vars": env_vars,
     }
+
+
+@router.post("/model-config/switch-preset")
+async def switch_model_preset_endpoint(req: SwitchPresetRequest):
+    """Switch active configuration preset between fosta, qwen, and gemini."""
+    preset = req.preset.strip().lower()
+    from artemis.config.paths import get_config_path, get_env_file
+    from artemis.config import settings
+    import shutil, re, os
+
+    cfg_dir = get_config_path("artemis.jsonc").parent
+    preset_file = cfg_dir / f"artemis.{preset}.jsonc"
+    target_file = cfg_dir / "artemis.jsonc"
+
+    if not preset_file.exists():
+        raise HTTPException(status_code=400, detail=f"Preset '{preset}' not found.")
+
+    def set_env_kv(content: str, key: str, value: str) -> str:
+        pattern = rf"^{key}=.*"
+        if re.search(pattern, content, flags=re.MULTILINE):
+            return re.sub(pattern, f"{key}={value}", content, flags=re.MULTILINE)
+        return content.rstrip() + f"\n{key}={value}\n"
+
+    env_file = get_env_file()
+    if env_file.exists():
+        content = env_file.read_text(encoding="utf-8")
+        if preset == "qwen":
+            content = set_env_kv(content, "OPENAI_API_KEY", "aicf_Tm4oFe5upElh1a60eSsU_QEbrDv1K3DI")
+            content = set_env_kv(content, "OPENAI_BASE_URL", "http://192.168.1.40:18080/v1")
+            os.environ["OPENAI_API_KEY"] = "aicf_Tm4oFe5upElh1a60eSsU_QEbrDv1K3DI"
+            os.environ["OPENAI_BASE_URL"] = "http://192.168.1.40:18080/v1"
+            if hasattr(settings, "OPENAI_BASE_URL"):
+                settings.OPENAI_BASE_URL = "http://192.168.1.40:18080/v1"
+        elif preset == "fosta":
+            content = set_env_kv(content, "OPENAI_API_KEY", "sk-00eab046c62fd5b2-jxzbyu1ou83c2enk-6082a1b7")
+            content = set_env_kv(content, "OPENAI_BASE_URL", "https://codex.fosta.app/v1")
+            os.environ["OPENAI_API_KEY"] = "sk-00eab046c62fd5b2-jxzbyu1ou83c2enk-6082a1b7"
+            os.environ["OPENAI_BASE_URL"] = "https://codex.fosta.app/v1"
+            if hasattr(settings, "OPENAI_BASE_URL"):
+                settings.OPENAI_BASE_URL = "https://codex.fosta.app/v1"
+        env_file.write_text(content, encoding="utf-8")
+
+    shutil.copy2(preset_file, target_file)
+    readiness_engine.invalidate_cache()
+    return {"status": "success", "preset": preset, "message": f"Switched to {preset} successfully."}
+
+
+@router.post("/model-config/update-custom")
+async def update_custom_config_endpoint(req: UpdateCustomConfigRequest):
+    """Dynamically update model name in artemis.jsonc and API key / base URL in .env."""
+    from artemis.config.paths import get_config_path, get_env_file
+    from artemis.config import settings
+    import re, os
+
+    target_file = get_config_path("artemis.jsonc")
+    if target_file.exists():
+        content = target_file.read_text(encoding="utf-8")
+        content = re.sub(r'\"model\":\s*\"[^\"]*\"', f'\"model\": \"{req.model}\"', content)
+        target_file.write_text(content, encoding="utf-8")
+
+    def set_env_kv(content: str, key: str, value: str) -> str:
+        pattern = rf"^{key}=.*"
+        if re.search(pattern, content, flags=re.MULTILINE):
+            return re.sub(pattern, f"{key}={value}", content, flags=re.MULTILINE)
+        return content.rstrip() + f"\n{key}={value}\n"
+
+    env_file = get_env_file()
+    if env_file.exists():
+        env_content = env_file.read_text(encoding="utf-8")
+        if req.api_key is not None and req.api_key.strip():
+            k = req.api_key.strip()
+            os.environ["OPENAI_API_KEY"] = k
+            env_content = set_env_kv(env_content, "OPENAI_API_KEY", k)
+        if req.base_url is not None and req.base_url.strip():
+            u = req.base_url.strip()
+            os.environ["OPENAI_BASE_URL"] = u
+            if hasattr(settings, "OPENAI_BASE_URL"):
+                settings.OPENAI_BASE_URL = u
+            env_content = set_env_kv(env_content, "OPENAI_BASE_URL", u)
+        env_file.write_text(env_content, encoding="utf-8")
+
+    readiness_engine.invalidate_cache()
+    return {"status": "success", "message": "Updated custom configuration successfully."}
 
 
 @router.get("/server-status")
@@ -624,3 +736,89 @@ async def shutdown_server_endpoint(request: Request):
         "message": "Artemis server is shutting down.",
         "pid": os.getpid(),
     }
+
+
+class McpInstallRequest(BaseModel):
+    client: str = Field(description="Client target: 'claude', 'antigravity', 'cursor', 'all'")
+
+
+@router.get("/cli-integrations")
+async def get_cli_integrations_status():
+    """Check availability and MCP connection status of Claude Code CLI and Gemini CLI / Antigravity."""
+    import json
+    from pathlib import Path
+    import shutil
+
+    home = Path.home()
+
+    # 1. Claude CLI / Claude Code
+    claude_bin = shutil.which("claude")
+    claude_code_config = home / ".claude.json"
+    claude_configured = False
+    if claude_code_config.exists():
+        try:
+            data = json.loads(claude_code_config.read_text(encoding="utf-8"))
+            claude_configured = "artemis" in data.get("mcpServers", {})
+        except Exception:
+            pass
+
+    # 2. Gemini CLI / Antigravity (agy)
+    agy_bin = shutil.which("agy")
+    gemini_mcp_config = home / ".gemini" / "antigravity" / "mcp_config.json"
+    alt_gemini_config = home / ".gemini" / "config" / "mcp_config.json"
+    gemini_configured = False
+    for p in (gemini_mcp_config, alt_gemini_config):
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if "artemis" in data.get("mcpServers", {}):
+                    gemini_configured = True
+                    break
+            except Exception:
+                pass
+
+    return {
+        "claude": {
+            "name": "Claude Code (Claude CLI)",
+            "bin": claude_bin,
+            "installed": claude_bin is not None,
+            "configured": claude_configured,
+            "command": "claude",
+            "install_cmd": "uv run artemis mcp --install claude",
+        },
+        "antigravity": {
+            "name": "Gemini CLI / Antigravity (agy)",
+            "bin": agy_bin,
+            "installed": agy_bin is not None,
+            "configured": gemini_configured,
+            "command": "agy",
+            "install_cmd": "uv run artemis mcp --install antigravity",
+        },
+    }
+
+
+@router.post("/mcp-install")
+async def install_mcp_integration(payload: McpInstallRequest):
+    """Auto-install ARTEMIS MCP configuration and testing rules into target CLI/IDE."""
+    from pathlib import Path
+    import sys
+
+    from artemis.interfaces.cli.commands.mcp import install_mcp_config, install_rules
+
+    client = payload.client.strip().lower()
+    project_root = str(Path(__file__).resolve().parents[3])
+    venv_py = Path(project_root) / ".venv" / "bin" / "python"
+    python_exe = str(venv_py) if venv_py.exists() else sys.executable
+
+    try:
+        cfg_paths = install_mcp_config(client, python_exe, project_root)
+        rule_paths = install_rules(client, project_root)
+        return {
+            "status": "success",
+            "client": client,
+            "config_paths": cfg_paths,
+            "rule_paths": rule_paths,
+            "message": f"Đã kết nối thành công ARTEMIS MCP với {client}!",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi khi cài đặt MCP: {e}")

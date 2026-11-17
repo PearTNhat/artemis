@@ -129,6 +129,60 @@ export class HomeComponent implements OnInit, OnDestroy {
   // Model & Environment configuration from backend
   public modelConfigEnv = computed(() => this.systemService.modelConfigEnv());
 
+  // Preset model switching state
+  public isSwitchingPreset = signal<string | null>(null);
+  public presetMessage = signal<string | null>(null);
+  public presetError = signal<string | null>(null);
+
+  // Custom model config form state
+  public customModelInput = signal<string>('gpt-6.1-sol');
+  public customBaseUrlInput = signal<string>('https://codex.fosta.app/v1');
+  public customApiKeyInput = signal<string>('');
+  public showCustomApiKey = signal<boolean>(false);
+  public isSavingCustomConfig = signal<boolean>(false);
+  public customConfigMessage = signal<string | null>(null);
+  public customConfigError = signal<string | null>(null);
+  public showCustomEditor = signal<boolean>(true);
+  public isCustomConfigEdited = signal<boolean>(false);
+
+  // Computed active model identification
+  public activeModelName = computed(() => this.modelConfigEnv()?.default_model?.model || '');
+  public activeProvider = computed(() => this.modelConfigEnv()?.default_model?.provider || '');
+  public activeBaseUrl = computed(() => {
+    const vars = this.modelConfigEnv()?.env_vars || [];
+    const found = vars.find(v => v.name === 'OPENAI_BASE_URL');
+    return found?.preview || '';
+  });
+  public activeApiKeyPreview = computed(() => {
+    const vars = this.modelConfigEnv()?.env_vars || [];
+    const found = vars.find(v => v.name === 'OPENAI_API_KEY');
+    return found?.preview || '';
+  });
+  public activeGeminiKeyPreview = computed(() => {
+    const vars = this.modelConfigEnv()?.env_vars || [];
+    const found = vars.find(v => v.name === 'GEMINI_API_KEY');
+    return found?.preview || '';
+  });
+  public activePreset = computed<'fosta' | 'qwen' | 'gemini' | 'custom'>(() => {
+    const model = (this.activeModelName() || '').toLowerCase();
+    const url = (this.activeBaseUrl() || '').toLowerCase();
+    const provider = (this.activeProvider() || '').toLowerCase();
+
+    // 1. Google Gemini
+    if (provider === 'google' || model.includes('gemini')) {
+      return 'gemini';
+    }
+    // 2. Qwen Local LAN
+    if (model.includes('qwen') || url.includes('192.168.1.40') || url.includes(':18080')) {
+      return 'qwen';
+    }
+    // 3. Fosta Codex Proxy
+    if (model.includes('gpt-6') || model.includes('fosta') || url.includes('fosta')) {
+      return 'fosta';
+    }
+    return 'custom';
+  });
+
   // Google Gemini API Key State
   public geminiKeyInput = signal<string>('');
   public showGeminiKey = signal<boolean>(false);
@@ -532,6 +586,17 @@ export class HomeComponent implements OnInit, OnDestroy {
       if (!this.isOcrKeyEdited()) {
         this.ocrKeyInput.set(ocrKey);
       }
+
+      const cfg = this.modelConfigEnv();
+      if (cfg && !this.isCustomConfigEdited()) {
+        if (cfg.default_model?.model) {
+          this.customModelInput.set(cfg.default_model.model);
+        }
+        const bUrl = cfg.env_vars?.find(v => v.name === 'OPENAI_BASE_URL')?.preview;
+        if (bUrl) {
+          this.customBaseUrlInput.set(bUrl);
+        }
+      }
     });
   }
 
@@ -541,6 +606,7 @@ export class HomeComponent implements OnInit, OnDestroy {
     // Initial fetch of system readiness & model configuration
     this.systemService.fetchReadiness().subscribe();
     this.systemService.fetchModelConfigEnv().subscribe();
+    this.systemService.fetchCliIntegrations().subscribe();
     this.systemService.fetchAdbServerStatus().subscribe({
       next: status => {
         if (status.endpoint.mode === 'remote') {
@@ -786,6 +852,134 @@ export class HomeComponent implements OnInit, OnDestroy {
       default:
         return 'Configure your API key or use environment definitions.';
     }
+  }
+
+  public switchPreset(preset: 'fosta' | 'qwen' | 'gemini'): void {
+    this.isSwitchingPreset.set(preset);
+    this.presetMessage.set(null);
+    this.presetError.set(null);
+    this.isCustomConfigEdited.set(false);
+
+    if (preset === 'fosta') {
+      this.customModelInput.set('gpt-6.1-sol');
+      this.customBaseUrlInput.set('https://codex.fosta.app/v1');
+    } else if (preset === 'qwen') {
+      this.customModelInput.set('Qwen3.8-27B-UD-Q4_K_M.gguf:no_think');
+      this.customBaseUrlInput.set('http://192.168.1.40:18080/v1');
+    } else if (preset === 'gemini') {
+      this.customModelInput.set('gemini-3.6-flash');
+      this.customBaseUrlInput.set('');
+    }
+
+    this.systemService.switchModelPreset(preset).subscribe({
+      next: (res) => {
+        this.isSwitchingPreset.set(null);
+        this.presetMessage.set(`✓ Đã kích hoạt ${preset.toUpperCase()} thành công.`);
+        setTimeout(() => this.presetMessage.set(null), 4000);
+      },
+      error: (err) => {
+        this.isSwitchingPreset.set(null);
+        this.presetError.set(err?.error?.detail || err?.message || `Không thể chuyển sang ${preset}.`);
+      }
+    });
+  }
+
+  public toggleCustomApiKeyVisibility(): void {
+    this.showCustomApiKey.update(v => !v);
+  }
+
+  public toggleCustomEditor(): void {
+    this.showCustomEditor.update(v => !v);
+  }
+
+  public onCustomModelChange(val: string): void {
+    this.customModelInput.set(val);
+    this.isCustomConfigEdited.set(true);
+    this.customConfigMessage.set(null);
+    this.customConfigError.set(null);
+  }
+
+  public onCustomBaseUrlChange(val: string): void {
+    this.customBaseUrlInput.set(val);
+    this.isCustomConfigEdited.set(true);
+    this.customConfigMessage.set(null);
+    this.customConfigError.set(null);
+  }
+
+  public onCustomApiKeyChange(val: string): void {
+    this.customApiKeyInput.set(val);
+    this.isCustomConfigEdited.set(true);
+    this.customConfigMessage.set(null);
+    this.customConfigError.set(null);
+  }
+
+  public saveCustomConfig(): void {
+    const model = this.customModelInput().trim();
+    if (!model) {
+      this.customConfigError.set('Model identifier không được để trống.');
+      return;
+    }
+    this.isSavingCustomConfig.set(true);
+    this.customConfigMessage.set(null);
+    this.customConfigError.set(null);
+
+    const isGemini = model.toLowerCase().includes('gemini');
+    const key = this.customApiKeyInput().trim();
+
+    if (isGemini && key) {
+      this.systemService.updateApiKey('google', key, true).subscribe();
+    }
+
+    const payload: { model: string; api_key?: string; base_url?: string } = {
+      model,
+    };
+    if (key && !isGemini) {
+      payload.api_key = key;
+    }
+    if (this.customBaseUrlInput().trim()) {
+      payload.base_url = this.customBaseUrlInput().trim();
+    }
+
+    this.systemService.updateCustomModelConfig(payload).subscribe({
+      next: (res) => {
+        this.isSavingCustomConfig.set(false);
+        this.customConfigMessage.set(res?.message || '✓ Cấu hình đã được lưu và áp dụng thành công.');
+        this.customApiKeyInput.set('');
+        this.isCustomConfigEdited.set(false);
+        setTimeout(() => this.customConfigMessage.set(null), 5000);
+      },
+      error: (err) => {
+        this.isSavingCustomConfig.set(false);
+        this.customConfigError.set(err?.error?.detail || err?.message || 'Lỗi khi lưu cấu hình.');
+      }
+    });
+  }
+
+  public cliIntegrations = computed(() => this.systemService.cliIntegrations());
+  public isConnectingCli = computed(() => this.systemService.isConnectingCli());
+  public cliMessage = signal<string | null>(null);
+  public cliError = signal<string | null>(null);
+
+  public connectCli(target: 'claude' | 'antigravity'): void {
+    this.cliMessage.set(null);
+    this.cliError.set(null);
+    this.systemService.installCliMcp(target).subscribe({
+      next: (res) => {
+        const name = target === 'claude' ? 'Claude Code (Claude CLI)' : 'Gemini CLI / Antigravity (agy)';
+        const modelPreset = target === 'claude' ? 'fosta' : 'gemini';
+        const modelName = target === 'claude' ? 'GPT-6.1 Sol (Fosta)' : 'Gemini 3.6 Flash';
+
+        // Auto-switch model preset to match selected CLI
+        this.switchPreset(modelPreset);
+
+        this.cliMessage.set(`✓ Đã kết nối ARTEMIS với ${name} và kích hoạt model ${modelName}! Bạn có thể mở terminal gõ "${target === 'claude' ? 'claude' : 'agy'}" và ra lệnh ngay.`);
+        setTimeout(() => this.cliMessage.set(null), 8000);
+      },
+      error: (err) => {
+        this.cliError.set(err?.error?.detail || err?.message || `Không thể kết nối với ${target}.`);
+        setTimeout(() => this.cliError.set(null), 6000);
+      }
+    });
   }
 
   public skipCredentialsCheck(): void {

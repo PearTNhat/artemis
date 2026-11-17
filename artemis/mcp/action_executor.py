@@ -51,6 +51,7 @@ from artemis.agents.validator.tool_declarations import (
 )
 from artemis.tools.history import HISTORY_TOOL_NAMES, history_tool_by_name
 from artemis.tools.tool_wrapper import split_multimodal_result
+from artemis.utils.tap_snap import snap_to_named_element
 from artemis.utils.coordinates import (
     compute_smart_swipe_coordinates,
     parse_swipe_parameters,
@@ -193,6 +194,12 @@ class McpActionExecutor:
                     res = ActionResult.success(raw_name, message)
                 else:
                     res = await session.call(wire_name, wire_args)
+                    if res.ok and target_semantics.get("snapped_from"):
+                        res_note = (
+                            f" Snapped from your estimate {target_semantics['snapped_from']}"
+                            f" to the center of '{target_semantics.get('snapped_to_text')}'."
+                        )
+                        res = res.model_copy(update={"message": res.message + res_note})
                     message = finalize(res) if finalize else res.message
 
                 if res.ok or self._observe_despite_failure(raw_name, res):
@@ -418,7 +425,29 @@ class McpActionExecutor:
             return self._resolve_index(int(target), label, state, index_elements=index_elements)
         if isinstance(target, (list, tuple)) and len(target) == 2:
             recorded = self._require_description(args, label)
-            return [int(target[0]), int(target[1])], recorded
+            point = [int(target[0]), int(target[1])]
+            # A model-estimated point is moved to the center of the listed
+            # element its description names, when it lands on or near it.
+            width, height = self._screen_size()
+            snap = snap_to_named_element(
+                point,
+                recorded.get("target_description"),
+                self._index_elements(state, index_elements) if state is not None else index_elements,
+                width,
+                height,
+            )
+            if snap is not None and snap.point != point:
+                logger.info(
+                    f"Snapped {label} {point} -> {snap.point} (center of '{snap.element_text}')"
+                )
+                recorded = {
+                    **recorded,
+                    "snapped_from": point,
+                    "snapped_to_text": snap.element_text,
+                    "target_bounds": snap.element_bounds,
+                }
+                point = snap.point
+            return point, recorded
         raise _ArgError(
             f"Error during {label}: Invalid target format: {raw!r}. Use an element"
             " index from the Visible UI Elements list (e.g. 3) or normalized [x, y]"
