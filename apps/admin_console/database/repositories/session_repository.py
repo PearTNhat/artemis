@@ -398,6 +398,21 @@ class SessionRepository:
         except Exception:
             return None
 
+    def get_recent_steps(self, session_id: str, limit: int = 8) -> list[dict[str, Any]]:
+        """The session's last ``limit`` steps, oldest first (reasoning + action)."""
+        try:
+            with db_session(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT step_number, action_taken, operator_raw_thinking FROM steps"
+                    " WHERE session_id = ? ORDER BY step_number DESC LIMIT ?",
+                    (str(session_id), int(limit)),
+                )
+                rows = [dict(row) for row in cursor.fetchall()]
+        except Exception:
+            return []
+        return list(reversed(rows))
+
     def harvest_orphaned_sessions(self, orphaned_ids: list[str]) -> int:
         if not orphaned_ids:
             return 0

@@ -39,6 +39,7 @@ active window until its turn is chunked, whose user lines then carry it on.
 
 import asyncio
 import base64
+import time
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -81,11 +82,13 @@ from artemis.mcp.action_executor import McpActionExecutor
 from artemis.mcp.observation import observe
 from artemis.memory.transcript import PRO_UI_LIST_MARKER, TranscriptLedger, mark_ephemeral
 from artemis.services.llm import (
+    LLMResumedError,
     RobustChatModelWrapper,
     acomplete,
     get_google_llm,
     get_llm,
     invoke_llm_with_timeout_message,
+    reobserve_on_resume,
 )
 from artemis.tools.history import history_tool_declarations
 from artemis.tools.tool_wrapper import tool_result_messages
@@ -97,6 +100,26 @@ from artemis.utils.coordinates import (
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_MAX_SCROLL_PROBES = 2
+_SCROLL_CHANGE_MIN_DISTANCE = 6
+_MORE_BELOW_NOTICE = (
+    "Report not accepted yet: this page had more content below. The system swiped up"
+    " once and the screen changed, so part of the page was never reviewed. Look at the"
+    " newly visible part (required choices, options, quantities, delivery, payment,"
+    " promotions, notes, totals), keep scrolling to the end if needed, act on anything"
+    " required, then report again with what you found and chose."
+)
+
+_RESUMED_NOTICE = (
+    "--- Execution Resumed ---\n"
+    "The task was paused (the AI provider failed) and has just been resumed. The"
+    " device may have changed while it was paused: the app may have been closed or"
+    " another screen opened. Judge the situation only from this fresh observation,"
+    " not from the screen you saw before the pause. Your earlier history and"
+    " progress still stand: if the app is no longer open, relaunch it and return to"
+    " where you left off."
+)
 
 _NO_TOOL_CALL_NOTICE = (
     "You did not call any tools last turn. Please make progress by calling an"
@@ -726,6 +749,9 @@ class FlashRunner:
                 last_execution_result["error"] = exec_result.text_summary
 
             extra_metadata: dict = {"token_usage": step_token_usage}
+            timing = self._step_timing(exec_result)
+            if timing:
+                extra_metadata["timing"] = timing
             if injected:
                 # Stamped verbatim on the step it reached: the chunk ledger
                 # keeps it as a never-evicted line at every compression level.
@@ -889,9 +915,12 @@ class FlashRunner:
         # Invoke Model. Streaming, live-token UI deltas, classified
         # retries, and pause/resume are all owned by the LLM gateway
         # (acomplete); a typed LLMCallError propagates if it gives up.
-        return await invoke_llm_with_timeout_message(
-            acomplete(bound_llm, messages), timeout_seconds=10, hard_timeout=180
-        )
+        # A resumed pause raises LLMResumedError instead of replaying this
+        # request: the run loop re-observes the device and asks again.
+        with reobserve_on_resume():
+            return await invoke_llm_with_timeout_message(
+                acomplete(bound_llm, messages), timeout_seconds=10, hard_timeout=180
+            )
 
     async def _process_tool_calls(
         self,
@@ -939,6 +968,24 @@ class FlashRunner:
             logger.info(f"Executing Flash tool: {name}({args})")
 
             if name == "report_task_status":
+                probed = await self._probe_unseen_content(
+                    args,
+                    tc_id,
+                    state,
+                    messages,
+                    raw_text,
+                    step_token_usage,
+                    pre_screenshot_bytes,
+                    xml_list,
+                    action_sequence,
+                    turn,
+                    native_text=native_text,
+                )
+                if probed is not None:
+                    # More content was below: the report is deferred and the
+                    # model continues from the scrolled screen.
+                    pre_screenshot_bytes, xml_list, action_sequence = probed
+                    return None, pre_screenshot_bytes, xml_list, action_sequence
                 final_report = await self._finalize_task_report(
                     name,
                     args,
@@ -1007,6 +1054,124 @@ class FlashRunner:
             return current
         return snapshot
 
+    async def _probe_unseen_content(
+        self,
+        args: dict,
+        tc_id: str,
+        state: State,
+        messages: list[BaseMessage],
+        raw_text: str,
+        step_token_usage: dict,
+        pre_screenshot_bytes,
+        xml_list,
+        action_sequence: int,
+        turn: "_TurnRecord",
+        native_text: str | None = None,
+    ):
+        """Before accepting "completed" on a scrollable screen, scroll once.
+
+        Prompt rules alone do not make a model read a whole form or checkout
+        page: a pinned bottom button looks like the end of it. So the system
+        swipes the page up once itself. If the screen changes, there was unseen
+        content: the report is deferred (returns the new screen state) and the
+        model reviews it. If nothing moves, the page was already at its end and
+        the swipe is dropped from the conversation (returns None).
+        """
+        if str(args.get("status", "")).lower() != "completed":
+            return None
+        if getattr(state, "screen_scrollable", None) is not True:
+            return None
+        probes = getattr(self, "_scroll_probes", 0)
+        if probes >= _MAX_SCROLL_PROBES:
+            return None
+        self._scroll_probes = probes + 1
+
+        from artemis.utils.image_hash import dhash_hex, hamming_distance_hex
+
+        before_hash = dhash_hex(pre_screenshot_bytes)
+        mark = len(messages)
+        new_bytes, new_xml, new_sequence = await self._execute_and_record_action(
+            "swipe",
+            {"direction": "up"},
+            tc_id,
+            state,
+            messages,
+            "[system] Checking for unseen content below before accepting completion.",
+            step_token_usage,
+            pre_screenshot_bytes,
+            xml_list,
+            action_sequence,
+            turn,
+            native_text=native_text,
+        )
+        outcome = " ".join(
+            str(getattr(m, "content", "")) for m in messages[mark:] if isinstance(m, ToolMessage)
+        )
+        del messages[mark:]
+        distance = hamming_distance_hex(before_hash, dhash_hex(new_bytes))
+        if distance is None or distance < _SCROLL_CHANGE_MIN_DISTANCE:
+            logger.info("Scroll probe: page already at its end; accepting the report.")
+            return None
+        logger.info(
+            f"Scroll probe: more content below (screen hash distance {distance}); deferring report."
+        )
+        messages.append(
+            ToolMessage(
+                tool_call_id=tc_id,
+                name="report_task_status",
+                content=f"{_MORE_BELOW_NOTICE} ({outcome.strip()})",
+                status="error",
+            )
+        )
+        return new_bytes, new_xml, new_sequence
+
+    def _step_timing(self, exec_result) -> dict:
+        """Timing for one recorded step: the turn's model time goes on the
+        turn's first step only (several actions can share one model call)."""
+        meta = getattr(exec_result, "metadata", None) or {}
+        timing = {
+            k: meta.get(k) for k in ("action_s", "observe_s") if meta.get(k) is not None
+        }
+        if getattr(self, "_turn_timing_pending", False):
+            timing.update(getattr(self, "_turn_timing", {}) or {})
+            self._turn_timing_pending = False
+        else:
+            timing["shared_model_call"] = True
+        self._turn_action_s = getattr(self, "_turn_action_s", 0.0) + float(
+            timing.get("action_s") or 0.0
+        )
+        self._turn_observe_s = getattr(self, "_turn_observe_s", 0.0) + float(
+            timing.get("observe_s") or 0.0
+        )
+        return timing
+
+    def _log_turn_timing(self, turn: int, total_s: float) -> None:
+        """One log line per turn: where the time went."""
+        t = getattr(self, "_turn_timing", {}) or {}
+        action_s = getattr(self, "_turn_action_s", 0.0)
+        observe_s = getattr(self, "_turn_observe_s", 0.0)
+        self._turn_action_s = self._turn_observe_s = 0.0
+        agy = t.get("agy") or {}
+        agy_note = (
+            f" (agy: {agy.get('model_calls')} model calls,"
+            f" screenshot {'opened' if agy.get('opened_screenshot') else 'skipped'})"
+            if agy
+            else ""
+        )
+        logger.info(
+            f"⏱ Turn {turn}: total {total_s:.1f}s = model {t.get('llm_s', 0):.1f}s{agy_note}"
+            f" + actions {action_s:.1f}s + screen capture {observe_s:.1f}s"
+            f" + prompt prep {t.get('prep_s', 0):.1f}s"
+        )
+
+    async def _reobserve_after_resume(self, state: State):
+        """Captures the live screen after a paused LLM call was resumed."""
+        shot_path, img_bytes, xml_list = await capture_screenshot_and_parse_ui(
+            self.ctx, state, self.controller, skip_settling=False
+        )
+        state.latest_screenshot = shot_path
+        return img_bytes, xml_list
+
     async def _prepare_conversation(self, state: State, tools_declaration: list):
         """Installs the static prefix and captures the initial device state."""
         ledger = self._build_ledger()
@@ -1061,6 +1226,7 @@ class FlashRunner:
             turns += 1
             logger.info(f"--- Artemis Flash Turn {turns}{f'/{limit}' if limit else ''} ---")
 
+            turn_started = time.monotonic()
             if self.ctx.data_engine:
                 self.ctx.data_engine.allocate_step_id()
 
@@ -1068,37 +1234,80 @@ class FlashRunner:
             self._commit_turn(ledger, previous_turn)
             previous_turn = None
 
-            # Check for real-time injected instructions: the verbatim text
-            # is stamped on the step, the guidance pair goes to the tail.
-            injected, injected_guidance = await self._read_injected_instruction(
-                ledger.elapsed_label()
-            )
-
             # Tool restriction on the final turn (bounded loops only)
             is_final = limit is not None and turns == limit
-            tail = self._build_tail(
-                ledger,
-                turns,
-                current_pre_screenshot_bytes,
-                current_xml_list,
-                injected=injected_guidance,
-                notices=pending_notices,
-                is_final=is_final,
-                # The ledger judged the turn it just committed: a bare tool
-                # call (or thinking only) earns a one-line reminder, no bounce.
-                previous_turn_silent=bool(getattr(ledger, "last_turn_silent", False)),
-            )
-            pending_notices = []
-
-            # S + F + A + tail: chunk compression and the scrub edge advance here.
-            messages = ledger.render([tail])
-            turn_base = len(messages) - 1
             current_tools = report_only_tools if is_final else tools_declaration
+            previous_turn_silent = bool(getattr(ledger, "last_turn_silent", False))
+            injected: str | None = None
+            injected_texts: list[str] = []
+            guidance = None
+            llm_s = 0.0
+            prep_s = 0.0
+            resumes = 0
 
-            response = await self._invoke_model(llm, current_tools, messages)
+            while True:
+                prep_started = time.monotonic()
+                # Check for real-time injected instructions: the verbatim text
+                # is stamped on the step, the guidance pair goes to the tail.
+                new_injected, injected_guidance = await self._read_injected_instruction(
+                    ledger.elapsed_label()
+                )
+                if new_injected:
+                    injected_texts.append(new_injected)
+                    injected = "\n".join(injected_texts)
+                # Guidance read before a pause still applies to the re-asked turn.
+                guidance = injected_guidance or guidance
+
+                tail = self._build_tail(
+                    ledger,
+                    turns,
+                    current_pre_screenshot_bytes,
+                    current_xml_list,
+                    injected=guidance,
+                    notices=pending_notices,
+                    is_final=is_final,
+                    # The ledger judged the turn it just committed: a bare tool
+                    # call (or thinking only) earns a one-line reminder, no bounce.
+                    previous_turn_silent=previous_turn_silent,
+                )
+                pending_notices = []
+
+                # S + F + A + tail: chunk compression and the scrub edge advance here.
+                messages = ledger.render([tail])
+                turn_base = len(messages) - 1
+
+                llm_started = time.monotonic()
+                prep_s += llm_started - prep_started
+                try:
+                    response = await self._invoke_model(llm, current_tools, messages)
+                    llm_s += time.monotonic() - llm_started
+                    break
+                except LLMResumedError:
+                    llm_s += time.monotonic() - llm_started
+                    resumes += 1
+                    # The task sat paused: the device may have moved on (app
+                    # closed, another screen). Observe it again and re-ask
+                    # instead of acting on the pre-pause screenshot.
+                    logger.info("Resumed after LLM pause; re-observing the device.")
+                    (
+                        current_pre_screenshot_bytes,
+                        current_xml_list,
+                    ) = await self._reobserve_after_resume(state)
+                    pending_notices = [_RESUMED_NOTICE]
 
             if response is None:
                 break
+
+            # Where this turn's time went; stamped on the turn's first step.
+            self._turn_timing = {
+                "prep_s": round(prep_s, 3),
+                "llm_s": round(llm_s, 3),
+                "llm_resumes": resumes,
+            }
+            agy_profile = (getattr(response, "response_metadata", None) or {}).get("agy")
+            if agy_profile:
+                self._turn_timing["agy"] = agy_profile
+            self._turn_timing_pending = True
 
             messages.append(response)
 
@@ -1158,6 +1367,7 @@ class FlashRunner:
             )
             ledger.stage_turn(messages[turn_base:])
             previous_turn = turn
+            self._log_turn_timing(turns, time.monotonic() - turn_started)
             if final_report_from_calls is not None:
                 return final_report_from_calls
 

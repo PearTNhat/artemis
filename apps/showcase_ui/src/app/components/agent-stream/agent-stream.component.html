@@ -424,6 +424,86 @@ limitations under the License.
           </div>
         }
 
+        <!-- Timing: where this session's time went, step by step -->
+        <button
+          type="button"
+          #timingOrigin="cdkOverlayOrigin"
+          cdkOverlayOrigin
+          class="model-info-chip timing-chip"
+          [class.active]="isTimingOpen()"
+          title="Xem từng bước tốn bao lâu: chờ model, thao tác, chụp màn hình"
+          (click)="toggleTiming($event)"
+          >
+          <span class="material-symbols-outlined model-icon">timer</span>
+          <span class="model-name">Thời gian</span>
+        </button>
+
+        <ng-template
+          cdkConnectedOverlay
+          [cdkConnectedOverlayOrigin]="timingOrigin"
+          [cdkConnectedOverlayOpen]="isTimingOpen()"
+          [cdkConnectedOverlayHasBackdrop]="true"
+          cdkConnectedOverlayBackdropClass="cdk-overlay-transparent-backdrop"
+          (backdropClick)="isTimingOpen.set(false)"
+          [cdkConnectedOverlayPositions]="dropdownPositions"
+        >
+          <div class="vscode-dropdown-menu timing-dropdown" role="dialog" aria-label="Step timing">
+            @if (timingError()) {
+              <div class="timing-note">{{ timingError() }}</div>
+            } @else if (!timingReport()) {
+              <div class="timing-note">Đang tải…</div>
+            } @else {
+              @let r = timingReport()!;
+              <div class="timing-summary">
+                <span>Tổng <b>{{ fmtSec(r.totals.wall_s) }}</b></span>
+                <span class="seg seg-llm">Model {{ fmtSec(r.totals.llm_s) }} ({{ timingPct(r.totals.llm_s, r) }}%)</span>
+                <span class="seg seg-action">Thao tác {{ fmtSec(r.totals.action_s) }} ({{ timingPct(r.totals.action_s, r) }}%)</span>
+                <span class="seg seg-observe">Chụp màn hình {{ fmtSec(r.totals.observe_s) }} ({{ timingPct(r.totals.observe_s, r) }}%)</span>
+                <span class="seg">Khác {{ fmtSec(r.totals.other_s) }}</span>
+              </div>
+              @if (!r.has_timing) {
+                <div class="timing-note">Phiên này chạy trước khi có đo chi tiết: chỉ biết tổng thời gian mỗi bước.</div>
+              }
+              <div class="timing-table-wrap">
+                <table class="timing-table">
+                  <thead>
+                    <tr><th>#</th><th>Bước</th><th>Tổng</th><th>Model</th><th>Thao tác</th><th>Chụp</th><th>Token vào/ra</th></tr>
+                  </thead>
+                  <tbody>
+                    @for (s of r.steps; track s.step) {
+                      <tr>
+                        <td>{{ s.step }}</td>
+                        <td class="timing-action" [title]="s.target">
+                          {{ s.action }}<span class="timing-target">{{ s.target }}</span>
+                          @if (s.agy) {
+                            <span class="timing-tag">agy {{ s.agy.model_calls }} lần gọi · {{ s.agy.opened_screenshot ? 'mở ảnh' : 'không mở ảnh' }}</span>
+                          }
+                          @if (s.llm_resumes) {
+                            <span class="timing-tag warn">resume {{ s.llm_resumes }}×</span>
+                          }
+                        </td>
+                        <td>{{ fmtSec(s.wall_s) }}</td>
+                        <td>{{ s.shared_model_call ? '(chung)' : fmtSec(s.llm_s) }}</td>
+                        <td>{{ fmtSec(s.action_s) }}</td>
+                        <td>{{ fmtSec(s.observe_s) }}</td>
+                        <td>{{ s.prompt_tokens ?? '–' }}/{{ s.completion_tokens ?? '–' }}</td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+              @if (r.agents.length) {
+                <div class="timing-agents">
+                  Agent phụ:
+                  @for (a of r.agents; track a.name) {
+                    <span class="timing-tag">{{ a.name }} {{ fmtSec(a.total_s) }}</span>
+                  }
+                </div>
+              }
+            }
+          </div>
+        </ng-template>
+
         <ng-template
           cdkConnectedOverlay
           [cdkConnectedOverlayOrigin]="runInfoOrigin"

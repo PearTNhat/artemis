@@ -1387,6 +1387,18 @@
           "default": true,
           "title": "Hierarchy Ok",
           "type": "boolean"
+        },
+        "scrollable": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scrollable"
         }
       },
       "required": [

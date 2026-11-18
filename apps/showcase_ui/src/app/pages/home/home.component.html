@@ -308,28 +308,31 @@
                   <span class="material-symbols-outlined header-icon">terminal</span>
                   <div class="inspector-header-titles">
                     <span class="inspector-title">AI CLI & Terminal Integrations</span>
-                    <span class="inspector-subtitle">Mở hội thoại ra lệnh cho điện thoại trực tiếp qua Gemini CLI (agy) và Claude Code</span>
+                    <span class="inspector-subtitle">Mở hội thoại ra lệnh cho điện thoại trực tiếp qua Gemini CLI (agy)
+                      và Claude Code</span>
                   </div>
                 </div>
               </div>
 
               <!-- Success/Error Banners -->
               @if (cliMessage()) {
-                <div class="cli-alert-banner success">
-                  <span class="material-symbols-outlined alert-icon">check_circle</span>
-                  <span>{{ cliMessage() }}</span>
-                </div>
+              <div class="cli-alert-banner success">
+                <span class="material-symbols-outlined alert-icon">check_circle</span>
+                <span>{{ cliMessage() }}</span>
+              </div>
               }
               @if (cliError()) {
-                <div class="cli-alert-banner error">
-                  <span class="material-symbols-outlined alert-icon">error</span>
-                  <span>{{ cliError() }}</span>
-                </div>
+              <div class="cli-alert-banner error">
+                <span class="material-symbols-outlined alert-icon">error</span>
+                <span>{{ cliError() }}</span>
+              </div>
               }
 
               <div class="cli-integrations-grid">
                 <!-- 1. Gemini CLI / Antigravity (agy) -->
-                <div class="cli-item-card" [class.is-configured]="cliIntegrations()?.antigravity?.configured" [class.is-active-model]="activePreset() === 'gemini'">
+                <div class="cli-item-card gemini-card" [class.is-configured]="cliIntegrations()?.antigravity?.configured"
+                  [class.is-active-cli]="selectedCli() === 'antigravity'"
+                  (click)="selectCli('antigravity')">
                   <div class="cli-card-header">
                     <div class="cli-icon-wrap gemini-icon">
                       <span class="material-symbols-outlined">smart_toy</span>
@@ -338,75 +341,77 @@
                       <div class="cli-name-row">
                         <span class="cli-name">Gemini CLI / Antigravity</span>
                         <code class="cli-cmd-badge">agy</code>
-                        @if (activePreset() === 'gemini') {
-                          <span class="active-badge">Active Model</span>
+                        @if (selectedCli() === 'antigravity') {
+                        <span class="active-badge gemini-active">ACTIVE CLI</span>
                         }
                       </div>
                       <div class="cli-status-row">
                         @if (cliIntegrations()?.antigravity?.configured) {
-                          <span class="status-chip connected">✓ MCP Đã kết nối</span>
+                        <span class="status-chip connected">✓ MCP Đã kết nối</span>
                         } @else {
-                          <span class="status-chip not-connected">Chưa kết nối MCP</span>
+                        <span class="status-chip not-connected">Chưa kết nối MCP</span>
                         }
                         @if (cliIntegrations()?.antigravity?.installed) {
-                          <span class="sub-chip">Đã cài đặt</span>
+                        <span class="sub-chip">Đã cài đặt</span>
                         }
                       </div>
+                    </div>
+
+                    <div class="cli-select-action" (click)="$event.stopPropagation()">
+                      @if (selectedCli() === 'antigravity') {
+                      <span class="cli-selected-tag gemini-tag">
+                        <span class="material-symbols-outlined check-icon">check_circle</span>
+                        <span>Đang chọn</span>
+                      </span>
+                      } @else {
+                      <button type="button" class="btn-select-cli" (click)="selectCli('antigravity')">
+                        <span>Chọn CLI</span>
+                      </button>
+                      }
                     </div>
                   </div>
 
                   <div class="cli-card-body">
                     <p class="cli-card-desc">
-                      Gõ <code>agy</code> trong terminal hoặc chat trực tiếp trong IDE để mở hội thoại và ra lệnh cho điện thoại.
+                      Gõ <code>agy</code> trong terminal hoặc chat trực tiếp trong IDE để mở hội thoại và ra lệnh cho
+                      điện thoại.
                     </p>
 
                     <div class="cli-code-example">
                       <div class="code-line">
                         <span class="code-prompt">$</span>
-                        <code>agy -p "Mở Telegram nhắn cho Phuc Phan: Alo"</code>
+                        <code>agy -p "Mở Telegram kiểm tra tin nhắn"</code>
                         <button type="button" class="btn-copy-code" [class.copied]="copiedId() === 'agy_cmd'"
-                          (click)="copyToClipboard('agy -p &quot;Mở Telegram kiểm tra tin nhắn&quot;', 'agy_cmd')">
-                          <span class="material-symbols-outlined">{{ copiedId() === 'agy_cmd' ? 'check' : 'content_copy' }}</span>
+                          (click)="$event.stopPropagation(); copyToClipboard('agy -p &quot;Mở Telegram kiểm tra tin nhắn&quot;', 'agy_cmd')">
+                          <span class="material-symbols-outlined">{{ copiedId() === 'agy_cmd' ? 'check' : 'content_copy'
+                            }}</span>
                         </button>
                       </div>
                     </div>
 
                     <div class="cli-actions-row">
-                      <button
-                        type="button"
-                        class="btn-connect-cli"
-                        [disabled]="isConnectingCli() !== null"
-                        (click)="connectCli('antigravity')"
-                        title="Cấu hình hoặc nạp lại MCP vào Gemini CLI / Antigravity"
-                      >
+                      <button type="button" class="btn-connect-cli" [disabled]="isConnectingCli() !== null"
+                        (click)="$event.stopPropagation(); connectCli('antigravity')"
+                        title="Cấu hình hoặc nạp lại MCP vào Gemini CLI / Antigravity">
                         @if (isConnectingCli() === 'antigravity') {
-                          <span class="spinner-small"></span><span>Đang cấu hình...</span>
+                        <span class="spinner-small"></span><span>Đang cấu hình...</span>
                         } @else {
-                          <span class="material-symbols-outlined btn-icon">hub</span>
-                          <span>{{ cliIntegrations()?.antigravity?.configured ? 'Cập nhật kết nối MCP' : 'Kết nối với agy' }}</span>
+                        <span class="material-symbols-outlined btn-icon">hub</span>
+                        <span>{{ cliIntegrations()?.antigravity?.configured ? 'Cập nhật kết nối MCP (agy)' : 'Kết nối với agy' }}</span>
                         }
                       </button>
 
-                      @if (activePreset() !== 'gemini') {
-                        <button
-                          type="button"
-                          class="btn-activate-model"
-                          [disabled]="isSwitchingPreset() !== null"
-                          (click)="switchPreset('gemini')"
-                          title="Chuyển model AI của hệ thống sang Gemini 3.6 Flash"
-                        >
-                          <span class="material-symbols-outlined btn-icon">bolt</span>
-                          <span>Dùng Gemini Model</span>
-                        </button>
-                      } @else {
-                        <span class="model-active-indicator">🌟 Đang dùng Gemini Model</span>
-                      }
+                      <span class="cli-status-indicator" [class.is-active]="selectedCli() === 'antigravity'">
+                        {{ selectedCli() === 'antigravity' ? '🟢 CLI đang kích hoạt' : '⚪ CLI sẵn sàng' }}
+                      </span>
                     </div>
                   </div>
                 </div>
 
                 <!-- 2. Claude Code (Claude CLI) -->
-                <div class="cli-item-card" [class.is-configured]="cliIntegrations()?.claude?.configured" [class.is-active-model]="activePreset() === 'fosta'">
+                <div class="cli-item-card claude-card" [class.is-configured]="cliIntegrations()?.claude?.configured"
+                  [class.is-active-cli]="selectedCli() === 'claude'"
+                  (click)="selectCli('claude')">
                   <div class="cli-card-header">
                     <div class="cli-icon-wrap claude-icon">
                       <span class="material-symbols-outlined">terminal</span>
@@ -415,20 +420,33 @@
                       <div class="cli-name-row">
                         <span class="cli-name">Claude Code (Claude CLI)</span>
                         <code class="cli-cmd-badge">claude</code>
-                        @if (activePreset() === 'fosta') {
-                          <span class="active-badge">Active Model</span>
+                        @if (selectedCli() === 'claude') {
+                        <span class="active-badge claude-active">ACTIVE CLI</span>
                         }
                       </div>
                       <div class="cli-status-row">
                         @if (cliIntegrations()?.claude?.configured) {
-                          <span class="status-chip connected">✓ MCP Đã kết nối</span>
+                        <span class="status-chip connected">✓ MCP Đã kết nối</span>
                         } @else {
-                          <span class="status-chip not-connected">Chưa kết nối MCP</span>
+                        <span class="status-chip not-connected">Chưa kết nối MCP</span>
                         }
                         @if (cliIntegrations()?.claude?.installed) {
-                          <span class="sub-chip">Đã cài đặt</span>
+                        <span class="sub-chip">Đã cài đặt</span>
                         }
                       </div>
+                    </div>
+
+                    <div class="cli-select-action" (click)="$event.stopPropagation()">
+                      @if (selectedCli() === 'claude') {
+                      <span class="cli-selected-tag claude-tag">
+                        <span class="material-symbols-outlined check-icon">check_circle</span>
+                        <span>Đang chọn</span>
+                      </span>
+                      } @else {
+                      <button type="button" class="btn-select-cli" (click)="selectCli('claude')">
+                        <span>Chọn CLI</span>
+                      </button>
+                      }
                     </div>
                   </div>
 
@@ -442,42 +460,27 @@
                         <span class="code-prompt">$</span>
                         <code>claude "Dùng Artemis kiểm tra màn hình điện thoại"</code>
                         <button type="button" class="btn-copy-code" [class.copied]="copiedId() === 'claude_cmd'"
-                          (click)="copyToClipboard('claude &quot;Dùng Artemis mở YouTube trên điện thoại&quot;', 'claude_cmd')">
-                          <span class="material-symbols-outlined">{{ copiedId() === 'claude_cmd' ? 'check' : 'content_copy' }}</span>
+                          (click)="$event.stopPropagation(); copyToClipboard('claude &quot;Dùng Artemis mở YouTube trên điện thoại&quot;', 'claude_cmd')">
+                          <span class="material-symbols-outlined">{{ copiedId() === 'claude_cmd' ? 'check' :
+                            'content_copy' }}</span>
                         </button>
                       </div>
                     </div>
 
                     <div class="cli-actions-row">
-                      <button
-                        type="button"
-                        class="btn-connect-cli"
-                        [disabled]="isConnectingCli() !== null"
-                        (click)="connectCli('claude')"
-                        title="Cấu hình hoặc nạp lại MCP vào Claude Code"
-                      >
+                      <button type="button" class="btn-connect-cli" [disabled]="isConnectingCli() !== null"
+                        (click)="$event.stopPropagation(); connectCli('claude')" title="Cấu hình hoặc nạp lại MCP vào Claude Code">
                         @if (isConnectingCli() === 'claude') {
-                          <span class="spinner-small"></span><span>Đang cấu hình...</span>
+                        <span class="spinner-small"></span><span>Đang cấu hình...</span>
                         } @else {
-                          <span class="material-symbols-outlined btn-icon">hub</span>
-                          <span>{{ cliIntegrations()?.claude?.configured ? 'Cập nhật kết nối MCP' : 'Kết nối với claude' }}</span>
+                        <span class="material-symbols-outlined btn-icon">hub</span>
+                        <span>{{ cliIntegrations()?.claude?.configured ? 'Cập nhật kết nối MCP (claude)' : 'Kết nối với claude' }}</span>
                         }
                       </button>
 
-                      @if (activePreset() !== 'fosta') {
-                        <button
-                          type="button"
-                          class="btn-activate-model"
-                          [disabled]="isSwitchingPreset() !== null"
-                          (click)="switchPreset('fosta')"
-                          title="Chuyển model AI của hệ thống sang GPT-6.1 Sol (Fosta Proxy)"
-                        >
-                          <span class="material-symbols-outlined btn-icon">bolt</span>
-                          <span>Dùng GPT/Claude Model</span>
-                        </button>
-                      } @else {
-                        <span class="model-active-indicator">⚡ Đang dùng GPT-6.1 Sol</span>
-                      }
+                      <span class="cli-status-indicator" [class.is-active]="selectedCli() === 'antigravity'">
+                        {{ selectedCli() === 'antigravity' ? '🟢 CLI đang kích hoạt' : '⚪ CLI sẵn sàng' }}
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -498,6 +501,23 @@
 
               <!-- Presets Grid -->
               <div class="presets-grid">
+                <!-- Preset: Gemini CLI (agy) -->
+                <button type="button" class="preset-tile" [class.is-active]="activePreset() === 'agy'"
+                  [disabled]="isSwitchingPreset() !== null" (click)="switchPreset('agy')">
+                  <div class="preset-tile-header">
+                    <span class="preset-icon">🤖</span>
+                    <span class="preset-name">Gemini CLI (agy)</span>
+                    @if (activePreset() === 'agy') {
+                    <span class="active-badge">Active</span>
+                    }
+                  </div>
+                  <div class="preset-desc">Antigravity CLI trên máy · không cần API key</div>
+                  <div class="preset-meta">
+                    <span class="meta-tag">Local CLI</span>
+                    <span class="meta-tag">~7-10s/step</span>
+                  </div>
+                </button>
+
                 <!-- Preset: Fosta Codex -->
                 <button type="button" class="preset-tile" [class.is-active]="activePreset() === 'fosta'"
                   [disabled]="isSwitchingPreset() !== null" (click)="switchPreset('fosta')">
@@ -1957,15 +1977,119 @@
               </button>
             </div>
 
-            <!-- Active AI Model Badge & Quick Link to Settings -->
-            @if (systemService.activeModelDisplayName()) {
-            <button type="button" class="composer-model-badge" (click)="setTab('diagnostics')"
-              [title]="'Mô hình AI: ' + systemService.activeModelDisplayName() + ' (' + systemService.activeModelName() + '). Bấm để cấu hình hoặc đổi model.'">
-              <span class="model-badge-icon">{{ systemService.activeModelBadgeIcon() }}</span>
-              <span class="model-badge-text">{{ systemService.activeModelDisplayName() }}</span>
-              <span class="material-symbols-outlined badge-edit-icon">tune</span>
-            </button>
-            }
+            <!-- Interactive In-Place Model Switcher Dropdown -->
+            <div class="composer-model-dropdown-container">
+              <button type="button" class="composer-model-badge" 
+                [class.is-open]="isModelDropdownOpen()"
+                (click)="toggleModelDropdown($event)"
+                title="Bấm để chuyển đổi Model AI ngay tại đây">
+                <span class="model-badge-icon">{{ systemService.activeModelBadgeIcon() }}</span>
+                <span class="model-badge-text">{{ systemService.activeModelDisplayName() }}</span>
+                <span class="material-symbols-outlined badge-chevron-icon">
+                  {{ isModelDropdownOpen() ? 'expand_less' : 'expand_more' }}
+                </span>
+              </button>
+
+              @if (isModelDropdownOpen()) {
+              <div class="model-dropdown-menu" (click)="$event.stopPropagation()">
+                <div class="dropdown-header">
+                  <span class="dropdown-title">Chuyển đổi Model AI</span>
+                  <button type="button" class="btn-close-dropdown" (click)="isModelDropdownOpen.set(false)">
+                    <span class="material-symbols-outlined">close</span>
+                  </button>
+                </div>
+
+                <div class="dropdown-presets-list">
+                  <!-- 0. Gemini CLI (agy) -->
+                  <button type="button" class="dropdown-item" 
+                    [class.is-active]="activePreset() === 'agy'"
+                    [disabled]="isSwitchingPreset() !== null"
+                    (click)="selectPresetFromDropdown('agy')">
+                    <span class="item-icon">🤖</span>
+                    <div class="item-info">
+                      <div class="item-name-row">
+                        <span class="item-name">Gemini CLI (agy)</span>
+                        @if (activePreset() === 'agy') {
+                        <span class="active-pill">Đang dùng</span>
+                        }
+                      </div>
+                      <span class="item-desc">Antigravity CLI trên máy · không cần API key</span>
+                    </div>
+                    @if (isSwitchingPreset() === 'agy') {
+                    <span class="spinner-small"></span>
+                    }
+                  </button>
+
+                  <!-- 1. Gemini 3.6 Flash -->
+                  <button type="button" class="dropdown-item" 
+                    [class.is-active]="activePreset() === 'gemini'"
+                    [disabled]="isSwitchingPreset() !== null"
+                    (click)="selectPresetFromDropdown('gemini')">
+                    <span class="item-icon">🌟</span>
+                    <div class="item-info">
+                      <div class="item-name-row">
+                        <span class="item-name">Gemini 3.6 Flash</span>
+                        @if (activePreset() === 'gemini') {
+                        <span class="active-pill">Đang dùng</span>
+                        }
+                      </div>
+                      <span class="item-desc">Google AI Studio · Multimodal Vision</span>
+                    </div>
+                    @if (isSwitchingPreset() === 'gemini') {
+                    <span class="spinner-small"></span>
+                    }
+                  </button>
+
+                  <!-- 2. GPT-6.1 Sol (Fosta) -->
+                  <button type="button" class="dropdown-item" 
+                    [class.is-active]="activePreset() === 'fosta'"
+                    [disabled]="isSwitchingPreset() !== null"
+                    (click)="selectPresetFromDropdown('fosta')">
+                    <span class="item-icon">⚡</span>
+                    <div class="item-info">
+                      <div class="item-name-row">
+                        <span class="item-name">GPT-6.1 Sol</span>
+                        @if (activePreset() === 'fosta') {
+                        <span class="active-pill">Đang dùng</span>
+                        }
+                      </div>
+                      <span class="item-desc">codex.fosta.app · Vision 500k</span>
+                    </div>
+                    @if (isSwitchingPreset() === 'fosta') {
+                    <span class="spinner-small"></span>
+                    }
+                  </button>
+
+                  <!-- 3. Qwen-27B Local -->
+                  <button type="button" class="dropdown-item" 
+                    [class.is-active]="activePreset() === 'qwen'"
+                    [disabled]="isSwitchingPreset() !== null"
+                    (click)="selectPresetFromDropdown('qwen')">
+                    <span class="item-icon">🏠</span>
+                    <div class="item-info">
+                      <div class="item-name-row">
+                        <span class="item-name">Qwen-27B Local</span>
+                        @if (activePreset() === 'qwen') {
+                        <span class="active-pill">Đang dùng</span>
+                        }
+                      </div>
+                      <span class="item-desc">192.168.1.40:18080 · Self-hosted</span>
+                    </div>
+                    @if (isSwitchingPreset() === 'qwen') {
+                    <span class="spinner-small"></span>
+                    }
+                  </button>
+                </div>
+
+                <div class="dropdown-footer">
+                  <button type="button" class="btn-more-settings" (click)="isModelDropdownOpen.set(false); setTab('diagnostics')">
+                    <span class="material-symbols-outlined">tune</span>
+                    <span>Tùy chỉnh model & API key khác...</span>
+                  </button>
+                </div>
+              </div>
+              }
+            </div>
           </div>
 
           <div class="bar-right">

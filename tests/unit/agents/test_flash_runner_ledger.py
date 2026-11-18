@@ -684,3 +684,130 @@ def test_turn_record_reports_the_first_failure_of_a_multi_action_turn():
         ]
     )
     assert record.result()["error"] == "click rejected: coordinates out of bounds"
+
+
+@pytest.mark.asyncio
+async def test_resumed_pause_reobserves_and_keeps_history(mock_context):
+    """After a paused LLM call is resumed, the turn is re-asked on a fresh
+    screenshot (the user may have left the app meanwhile) with a resume notice,
+    while the earlier turns stay in the conversation."""
+    from artemis.agents.flash.runner import _RESUMED_NOTICE
+    from artemis.services.llm import LLMResumedError
+
+    responses = [
+        AIMessage(
+            content="Item added; opening the basket.",
+            tool_calls=[
+                {
+                    "name": "click",
+                    "args": {"target": [500, 930], "target_description": "Basket"},
+                    "id": "tc1",
+                }
+            ],
+        ),
+        LLMResumedError("resumed"),
+        _report(explanation="ok"),
+    ]
+    capture = AsyncMock(
+        side_effect=[_INITIAL_OBSERVATION, ("home.png", b"IMG-HOME", "[1] Grab")]
+    )
+    with (
+        patch("artemis.controllers.unified_controller.get_driver"),
+        patch("artemis.agents.flash.runner.capture_screenshot_and_parse_ui", capture),
+    ):
+        runner = _make_runner(mock_context, [], max_turns=0)
+        pending = list(responses)
+
+        async def _invoke(llm, tools, messages):
+            runner.calls.append({"tools": list(tools), "messages": list(messages)})
+            item = pending.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        runner._invoke_model = AsyncMock(side_effect=_invoke)
+        result = await runner.run(State(initial_goal="Open the basket"))
+
+    assert result == {"status": "completed", "explanation": "ok"}
+    assert capture.await_count == 2  # initial observation + re-observation on resume
+    reasked = runner.calls[2]["messages"]
+
+    # History survives: the turn before the pause is still in the conversation.
+    assert any(
+        isinstance(m, AIMessage) and "opening the basket" in str(m.content) for m in reasked
+    )
+    tail = reasked[-1]
+    texts = [b["text"] for b in tail.content if b["type"] == "text"]
+    images = [b for b in tail.content if b["type"] == "image_url"]
+    assert images[0]["image_url"]["url"].endswith(base64.b64encode(b"IMG-HOME").decode())
+    assert f"{PRO_UI_LIST_MARKER}\n[1] Grab" in texts
+    assert _RESUMED_NOTICE in texts
+
+
+def _png(seed: int) -> bytes:
+    import io
+    import random
+
+    from PIL import Image
+
+    rnd = random.Random(seed)
+    img = Image.new("L", (64, 128))
+    img.putdata([rnd.randint(0, 255) for _ in range(64 * 128)])
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _scroll_probe_runner(mock_context, responses, swipe_images):
+    runner = _make_runner(mock_context, responses, max_turns=0)
+    shots = list(swipe_images)
+    calls = []
+
+    def _execute(name, args, tc_id, state, **_):
+        calls.append((name, args))
+        img = shots.pop(0) if name == "swipe" and shots else _png(99)
+        return _exec_result(tc_id, name, img)
+
+    runner.executor.execute = AsyncMock(side_effect=_execute)
+    runner.device_calls = calls
+    return runner
+
+
+@pytest.mark.asyncio
+async def test_completion_on_scrollable_page_scrolls_first(mock_context):
+    """A "completed" report on a scrollable screen triggers one system swipe; a
+    changed screen defers the report, an unchanged one accepts it."""
+    first = _png(1)
+    responses = [_report(explanation="ready", tc_id="r1"), _report(explanation="reviewed", tc_id="r2")]
+    capture = AsyncMock(return_value=("s.png", first, "[1] Place Order"))
+    with (
+        patch("artemis.controllers.unified_controller.get_driver"),
+        patch("artemis.agents.flash.runner.capture_screenshot_and_parse_ui", capture),
+    ):
+        # Probe 1 reveals new content; probe 2 shows the same screen (page end).
+        runner = _scroll_probe_runner(mock_context, responses, [_png(2), _png(2)])
+        state = State(initial_goal="Prepare the order")
+        state.screen_scrollable = True
+        result = await runner.run(state)
+
+    assert result == {"status": "completed", "explanation": "reviewed"}
+    assert [c[0] for c in runner.device_calls] == ["swipe", "swipe"]
+    second_call = runner.calls[1]["messages"]
+    deferred = [m for m in second_call if isinstance(m, ToolMessage) and m.tool_call_id == "r1"]
+    assert len(deferred) == 1 and deferred[0].name == "report_task_status"
+    assert "Report not accepted yet" in deferred[0].content
+
+
+@pytest.mark.asyncio
+async def test_completion_on_fixed_screen_is_accepted_without_probe(mock_context):
+    capture = AsyncMock(return_value=("s.png", _png(1), "[1] Done"))
+    with (
+        patch("artemis.controllers.unified_controller.get_driver"),
+        patch("artemis.agents.flash.runner.capture_screenshot_and_parse_ui", capture),
+    ):
+        runner = _scroll_probe_runner(mock_context, [_report(explanation="ok")], [])
+        state = State(initial_goal="x")
+        state.screen_scrollable = False
+        result = await runner.run(state)
+    assert result == {"status": "completed", "explanation": "ok"}
+    assert runner.device_calls == []

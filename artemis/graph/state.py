@@ -99,6 +99,11 @@ class State(BaseModel):
         " containing text, bounds, class, and center coordinates.",
         take_last,
     ] = None
+    screen_scrollable: Annotated[
+        bool | None,
+        "Whether the latest observed screen holds a large scrollable container",
+        take_last,
+    ] = None
 
     # ── Turn products (previous turn's decisions & results) ──────────────
     current_step_id: Annotated[str | None, "Current step ID from data engine", take_last] = None

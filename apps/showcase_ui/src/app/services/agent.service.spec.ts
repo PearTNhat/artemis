@@ -1,7 +1,7 @@
 import { signal, computed } from '@angular/core';
 import { of } from 'rxjs';
 
-import { AgentService } from './agent.service';
+import { AgentService, CHAT_CONTEXT_MARKER, stripChatContext } from './agent.service';
 
 describe('AgentService live LLM retry timeline', () => {
   function createServiceWithoutPolling(): AgentService {
@@ -14,6 +14,7 @@ describe('AgentService live LLM retry timeline', () => {
     (service as any).sessionSnapshotRequestId = 0;
     (service as any).sessionSnapshotAppliedId = 0;
     (service as any).pendingSnapshotRequests = new Set<number>();
+    service.newChatMode = signal(false);
     return service;
   }
 
@@ -178,6 +179,29 @@ describe('AgentService live LLM retry timeline', () => {
     service.runTask('test goal').subscribe();
 
     expect(selectSpy).toHaveBeenCalledWith('new-session', false);
+  });
+
+  it('sends the previous session id for a chat follow-up and leaves new-chat mode', () => {
+    const service = createServiceWithoutPolling();
+    let payload: any = null;
+    (service as any).http = {
+      post: (_url: string, body: any) => {
+        payload = body;
+        return of({ tasks: [] });
+      }
+    };
+    service.userPinnedSessionId = signal<string | null>(null);
+    service.newChatMode.set(true);
+
+    service.runTask('pause it', 'flash', undefined, undefined, undefined, 'prev-session').subscribe();
+
+    expect(payload.previous_session_id).toBe('prev-session');
+    expect(service.newChatMode()).toBeFalse();
+  });
+
+  it('strips carried chat context from a stored goal', () => {
+    expect(stripChatContext(`pause it\n\n${CHAT_CONTEXT_MARKER}\nPrevious request: play song`)).toBe('pause it');
+    expect(stripChatContext('plain goal')).toBe('plain goal');
   });
 
   it('keeps the paused state when the backend says there is nothing to resume', () => {

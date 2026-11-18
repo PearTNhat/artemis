@@ -99,6 +99,25 @@ def _begin_llm_request(provider: str | None) -> Token:
 # retries hands over to it immediately instead of pausing the whole task.
 _FALLBACK_AVAILABLE: ContextVar[bool] = ContextVar("llm_fallback_available", default=False)
 
+#: Set by agents that rebuild their prompt from a fresh observation: after a
+#: pause is resumed, the gateway raises LLMResumedError instead of replaying the
+#: paused request (whose screenshot may be stale by then).
+_REOBSERVE_ON_RESUME: ContextVar[bool] = ContextVar("llm_reobserve_on_resume", default=False)
+
+
+class LLMResumedError(Exception):
+    """A paused call was resumed; the caller should re-observe and call again."""
+
+
+@contextmanager
+def reobserve_on_resume() -> Iterator[None]:
+    """Within this scope a resumed pause raises LLMResumedError (see above)."""
+    token = _REOBSERVE_ON_RESUME.set(True)
+    try:
+        yield
+    finally:
+        _REOBSERVE_ON_RESUME.reset(token)
+
 # Shared circuit breaker keyed by "provider:model".  Transient failures open
 # it; while open, concurrent calls wait out the cooldown instead of hammering
 # a provider that is already melting down.
@@ -225,6 +244,10 @@ def _record_llm_event(name: str, payload: dict[str, Any], *, status: str = "retr
         )
     except Exception as trace_error:
         llm_logger.warning("Failed to persist LLM event trace %s: %s", name, trace_error)
+    if str(getattr(engine, "ended_session_id", None)) == str(engine.current_session_id):
+        # The task already ended: a background helper's retry is kept in the
+        # trace for diagnosis but not shown as live agent activity.
+        return
     try:
         engine._publish(
             name,
@@ -414,8 +437,9 @@ async def _run_with_recovery[T](
                     result = await call_once()
                 except (KeyboardInterrupt, asyncio.CancelledError):
                     raise
-                except LLMCallError:
-                    # Already classified terminal by a nested recovery layer.
+                except (LLMCallError, LLMResumedError):
+                    # Already classified terminal by a nested recovery layer,
+                    # or a resumed pause the caller re-observes for.
                     raise
                 except Exception as e:
                     failure = classify_failure(e)
@@ -503,6 +527,8 @@ async def _run_with_recovery[T](
         current_engine = _get_current_data_engine()
         if current_engine:
             current_engine._publish("task_resumed", {})
+        if _REOBSERVE_ON_RESUME.get():
+            raise LLMResumedError("LLM call resumed after pause; re-observe before retrying.")
 
 
 def _inject_parent_trace_id(trace_id, *args, **kwargs):
@@ -982,6 +1008,8 @@ class _ObservedFallback(FallbackRunner):
             _FALLBACK_AVAILABLE.reset(token)
 
     def fallback_reason(self, error: Exception) -> tuple[str, str | None] | None:
+        if isinstance(error, LLMResumedError):
+            return None
         if isinstance(error, LLMCallError):
             reason, failure = "terminal_error", error.failure
         else:

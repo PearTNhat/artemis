@@ -282,3 +282,62 @@ async def test_mid_stream_failure_records_stream_reset_payload(monkeypatch):
     assert payload["reason"] == "mid_stream_failure"
     assert "stream_exec_id" in payload
     assert "lower API priority" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_resume_raises_for_reobserving_callers_instead_of_replaying():
+    """Inside reobserve_on_resume(), a resumed pause hands control back to the
+    caller (to rebuild the prompt from a fresh screen) instead of replaying the
+    stale request; outside it, resume still replays."""
+
+    class FailsUntilResumed:
+        def __init__(self):
+            self.calls = 0
+            self.fail = True
+
+        async def astream(self, *args, **kwargs):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("503 service unavailable")
+            yield AIMessageChunk(content="ok")
+
+    async def resume_when_paused(base):
+        while not llm_service.PAUSE_FILE.exists():
+            await asyncio.sleep(0.01)
+        base.fail = False
+        llm_service.PAUSE_FILE.unlink()
+
+    base = FailsUntilResumed()
+    wrapper = RobustChatModelWrapper(base)
+    with llm_service.reobserve_on_resume():
+        resumer = asyncio.create_task(resume_when_paused(base))
+        with pytest.raises(llm_service.LLMResumedError):
+            await wrapper.complete([])
+        await resumer
+    calls_before_replay = base.calls
+
+    base.fail = True
+    resumer = asyncio.create_task(resume_when_paused(base))
+    result = await wrapper.complete([])
+    await resumer
+    assert result.content == "ok"
+    assert base.calls > calls_before_replay
+
+
+def test_llm_events_after_session_end_are_not_published(monkeypatch):
+    published = []
+    engine = SimpleNamespace(
+        current_session_id="s1",
+        current_step_id=None,
+        ended_session_id=None,
+        record_trace=lambda **kw: "t1",
+        _publish=lambda name, payload: published.append(name),
+    )
+    monkeypatch.setattr(llm_service, "_get_current_data_engine", lambda: engine)
+
+    llm_service._record_llm_event("llm_retry", {"error": "503"})
+    assert published == ["llm_retry"]
+
+    engine.ended_session_id = "s1"
+    llm_service._record_llm_event("llm_retry", {"error": "429"})
+    assert published == ["llm_retry"]  # kept in the trace only

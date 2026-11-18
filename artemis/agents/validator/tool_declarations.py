@@ -182,6 +182,7 @@ async def capture_screenshot_and_parse_ui(
     if obs.hierarchy_ok:
         state.indexed_points = [el["center"] for el in obs.elements]
         state.indexed_elements = obs.elements
+        state.screen_scrollable = obs.scrollable
 
     return obs.screenshot_path, screenshot_bytes, obs.elements_text
 

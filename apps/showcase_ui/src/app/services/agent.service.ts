@@ -64,6 +64,40 @@ interface SessionVideoResponse {
   message?: string;
 }
 
+export interface SessionTimingStep {
+  step: number;
+  action: string;
+  target: string;
+  wall_s: number;
+  llm_s: number | null;
+  action_s: number | null;
+  observe_s: number | null;
+  prep_s: number | null;
+  shared_model_call: boolean;
+  llm_resumes: number;
+  agy: { model_calls?: number; opened_screenshot?: boolean } | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+}
+
+export interface SessionTimingReport {
+  session_id: string;
+  has_timing: boolean;
+  steps: SessionTimingStep[];
+  totals: { wall_s: number; llm_s: number; action_s: number; observe_s: number; prep_s: number; other_s: number };
+  agents: { name: string; count: number; total_s: number; longest_s: number }[];
+}
+
+/** Marker the backend puts before a chat follow-up's carried context. */
+export const CHAT_CONTEXT_MARKER = '[Chat context: earlier tasks in this conversation]';
+
+/** The user's own request from a goal that may carry chat context. */
+export function stripChatContext<T extends string | null | undefined>(goal: T): T {
+  if (typeof goal !== 'string') return goal;
+  const idx = goal.indexOf(CHAT_CONTEXT_MARKER);
+  return (idx >= 0 ? goal.slice(0, idx).trimEnd() : goal) as T;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -194,10 +228,19 @@ export class AgentService {
       }
     });
 
-    return Array.from(sessionMap.values()).sort((a, b) => b.start_time - a.start_time);
+    // A chat follow-up stores the previous task's context after the user's
+    // request; show only the request itself.
+    return Array.from(sessionMap.values())
+      .map((sess) => {
+        const goal = stripChatContext(sess.initial_goal);
+        return goal === sess.initial_goal ? sess : { ...sess, initial_goal: goal };
+      })
+      .sort((a, b) => b.start_time - a.start_time);
   });
 
   public currentSessionId = signal<string | null>(null);
+  /** True after "New chat": nothing is selected and the next task starts fresh. */
+  public newChatMode = signal<boolean>(false);
   public sessionLogs = signal<any[]>([]); // Dynamic array of all raw events received
   public isSessionContentLoading = signal<boolean>(false);
   public agentStatus = signal<string>('idle'); // Status of the agent runner process
@@ -295,6 +338,18 @@ export class AgentService {
    */
   public clearUserPinnedSession(): void {
     this.userPinnedSessionId.set(null);
+  }
+
+  /** Per-step timing of a session (model wait / action / screen capture). */
+  public fetchSessionTiming(sessionId: string): Observable<SessionTimingReport> {
+    return this.http.get<SessionTimingReport>(`/api/sessions/${encodeURIComponent(sessionId)}/timing`);
+  }
+
+  /** Start a new chat: clear the view so the next task carries no context. */
+  public startNewChat(): void {
+    this.userPinnedSessionId.set(null);
+    this.selectSession('', false);
+    this.newChatMode.set(true);
   }
 
   /**
@@ -420,7 +475,8 @@ export class AgentService {
     profile: string = 'flash',
     expectedOutput?: string,
     enableOutputter?: boolean,
-    proTuning?: ProTuningOptions
+    proTuning?: ProTuningOptions,
+    previousSessionId?: string | null
   ): Observable<any> {
     return new Observable((obs) => {
       const submittedEvent: StartupProgressEvent = {
@@ -430,6 +486,10 @@ export class AgentService {
       };
       this.pendingStartupProgress.set([submittedEvent]);
       const payload: any = { goal, profile };
+      if (previousSessionId) {
+        payload.previous_session_id = previousSessionId;
+      }
+      this.newChatMode.set(false);
       if (expectedOutput && expectedOutput.trim()) {
         payload.expected_output = expectedOutput.trim();
       }
@@ -531,7 +591,7 @@ export class AgentService {
       this.runningGoal.set(null);
     } else if (this.runningSessionId() === targetSessionId) {
       this.runningSessionId.set(otherRunningSessions[0].session_id);
-      this.runningGoal.set(otherRunningSessions[0].initial_goal || null);
+      this.runningGoal.set(stripChatContext(otherRunningSessions[0].initial_goal || null));
     }
 
     this.isPaused.set(false);
@@ -620,7 +680,7 @@ export class AgentService {
         this.rawSessions.set(data);
         this.persistSessionsCache(data);
         // On initial load, if nothing is selected, not pinned, not running, and sessions exist, select latest
-        if (!this.currentSessionId() && !this.userPinnedSessionId() && this.agentStatus() !== 'running' && data.length > 0) {
+        if (!this.currentSessionId() && !this.userPinnedSessionId() && !this.newChatMode() && this.agentStatus() !== 'running' && data.length > 0) {
           this.selectSession(data[0].session_id, false);
         }
       },
@@ -714,6 +774,9 @@ export class AgentService {
    * @param isUserAction Whether this selection was explicitly triggered by user interaction
    */
   public selectSession(sessionId: string, isUserAction: boolean = false): void {
+    if (sessionId) {
+      this.newChatMode.set(false);
+    }
     if (isUserAction) {
       if (sessionId && sessionId === this.runningSessionId() && this.agentStatus() === 'running') {
         // User explicitly clicked the currently running task -> follow live runner
@@ -856,7 +919,7 @@ export class AgentService {
               this.runningSessionId.set(parsedData.session_id);
             }
             if (parsedData?.initial_goal) {
-              this.runningGoal.set(parsedData.initial_goal);
+              this.runningGoal.set(stripChatContext(parsedData.initial_goal));
             }
             this.fetchSessions();
 
@@ -878,12 +941,12 @@ export class AgentService {
             if (remaining.length > 0) {
               this.agentStatus.set('running');
               this.runningSessionId.set(remaining[0].session_id);
-              this.runningGoal.set(remaining[0].goal || null);
+              this.runningGoal.set(stripChatContext(remaining[0].goal || null));
             } else if (this.pendingQueue().length > 0) {
               const nextPending = this.pendingQueue()[0];
               this.agentStatus.set('running');
               this.runningSessionId.set(nextPending.session_id);
-              this.runningGoal.set(nextPending.initial_goal || null);
+              this.runningGoal.set(stripChatContext(nextPending.initial_goal || null));
             } else {
               this.agentStatus.set('idle');
               this.runningSessionId.set(null);
@@ -1522,7 +1585,7 @@ export class AgentService {
           const isActive = data.status === 'running' || data.status === 'paused';
           this.agentStatus.set(data.status);
           this.runningSessionId.set(data.session_id || null);
-          this.runningGoal.set(data.goal || null);
+          this.runningGoal.set(stripChatContext(data.goal || null));
           if (data.model_info) {
             this.activeModel.set(data.model_info);
           }

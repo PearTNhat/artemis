@@ -185,6 +185,17 @@ async def get_session_usage(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/api/sessions/{session_id}/timing")
+async def get_session_timing(session_id: str):
+    """Per-step timing: model wait, device action, screen capture, prompt prep."""
+    from artemis.utils.timing_report import build_timing_report
+
+    report = await asyncio.to_thread(build_timing_report, DB_PATH, session_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return report
+
+
 @router.get("/api/sessions/{session_id}/tree")
 async def get_tree(session_id: str):
     try:

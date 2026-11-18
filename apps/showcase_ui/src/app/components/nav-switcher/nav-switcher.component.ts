@@ -44,13 +44,24 @@ import { SystemService } from '../../services/system.service';
         <span class="tab-label">Workspace</span>
       </a>
 
-      @if (systemService.activeModelDisplayName()) {
-        <div class="nav-divider"></div>
-        <a 
-          routerLink="/" 
+      <div class="nav-divider"></div>
+      @if (systemService.usesCliModel()) {
+        <!-- The agent reasons through the agy CLI: one badge says it all. -->
+        <a
+          routerLink="/"
+          [queryParams]="{tab: 'diagnostics'}"
+          class="nav-cli-badge is-gemini"
+          [title]="'AI đang chạy qua CLI: ' + systemService.activeModelDisplayName() + '. Bấm để đổi model.'"
+        >
+          <span class="cli-badge-icon">🤖</span>
+          <span class="cli-badge-name">CLI: {{ systemService.activeModelDisplayName() }}</span>
+        </a>
+      } @else if (systemService.activeModelDisplayName()) {
+        <a
+          routerLink="/"
           [queryParams]="{tab: 'diagnostics'}"
           class="nav-model-badge"
-          [title]="'Mô hình AI đang sử dụng: ' + systemService.activeModelDisplayName() + ' (' + systemService.activeModelName() + '). Bấm để xem hoặc cấu hình model.'"
+          [title]="'Vision Model: ' + systemService.activeModelDisplayName() + ' (' + systemService.activeModelName() + '). Bấm để xem hoặc cấu hình model.'"
         >
           <span class="model-badge-icon">{{ systemService.activeModelBadgeIcon() }}</span>
           <span class="model-badge-name">{{ systemService.activeModelDisplayName() }}</span>

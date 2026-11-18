@@ -7,11 +7,15 @@
   // 1. Global Default Model (Applied to all sub-agents unless overridden below)
   // ------------------------------------------------------------------------------
   "default": {
-    "provider": "openai",
-    "model": "Qwen3.8-27B-UD-Q4_K_M.gguf:no_think",
+    // Reasoning runs in the local Antigravity CLI (agy): no API key needed,
+    // one open agy conversation per task. Models: `agy models`.
+    "provider": "agy",
+    "model": "gemini-3.8-flash-low",
+    // When agy fails, fall back to the Gemini API (needs GEMINI/GOOGLE key).
     "fallback": {
-      "provider": "openai",
-      "model": "Qwen3.8-27B-UD-Q4_K_M.gguf:no_think"
+      "provider": "google",
+      "model": "gemini-3.6-flash",
+      "thinking_level": "medium"
     }
   },
 
@@ -66,18 +70,18 @@
     //  - Native Gemini Files API for Gemini models with Google API keys (long video file stream);
     //    Gemini 3.6+ Flash sub-agents use agentic video understanding by default (see video_analyzer.processing below)
     //  - Universal Multi-Model Engine for Claude 3.5/3.7, GPT-4o, OpenRouter, Vertex AI (dynamic keyframe extraction + multimodal tool calling)
-    "video_analyzer": {},
+    "video_analyzer": { "provider": "google", "model": "gemini-3.5-flash" },
 
     // 👁️ Object Detector & Explorer (Flash Mode): Visual coordinates grounding and bounding boxes
     // CRITICAL REQUIREMENT: Standard LLMs (including standard Gemini Flash, GPT-4o, Claude 3.7) lack sub-pixel spatial coordinate fine-tuning.
     // To achieve accurate [x, y] point and bounding box localization, this node MUST use specialized Gemini ER (Embodied Reasoning / Robotics) models:
     // e.g., "gemini-robotics-er-2-preview". Non-ER models will fail spatial coordinate detection.
     "object_detector": {
-      "provider": "openai",
-      "model": "Qwen3.8-27B-UD-Q4_K_M.gguf:no_think",
+      "provider": "google",
+      "model": "gemini-robotics-er-2-preview",
       "fallback": {
-        "provider": "openai",
-        "model": "Qwen3.8-27B-UD-Q4_K_M.gguf:no_think"
+        "provider": "google",
+        "model": "gemini-robotics-er-2-preview"
       }
     },
 
@@ -90,15 +94,16 @@
     },
 
     // 📋 Summarizer: Aggregates step history and generates structured outcome
-    "summarizer": {},
+    // One-shot background helpers stay on the API (cheap, parallel).
+    "summarizer": { "provider": "google", "model": "gemini-3.5-flash-lite" },
 
     // 🔽 Hopper: Fast lightweight package name locator
     "hopper": {
-      "provider": "openai",
-      "model": "Qwen3.8-27B-UD-Q4_K_M.gguf:no_think",
+      "provider": "google",
+      "model": "gemini-3.5-flash-lite",
       "fallback": {
-        "provider": "openai",
-        "model": "Qwen3.8-27B-UD-Q4_K_M.gguf:no_think"
+        "provider": "google",
+        "model": "gemini-3.1-flash-lite"
       }
     },
 
@@ -144,7 +149,7 @@
       // Summarizes intermediate steps in background without blocking the runner,
       // replacing images only after strictly objective, high-density summaries are ready.
       "step_summarizer": {
-        "enabled": false, // Whether background step summarization is active (Gemini-only)
+        "enabled": true, // Whether background step summarization is active
         "model": "gemini-3.5-flash-lite", // Lightweight model for fast background inference
         "prune_history_xml": true // Prune outdated heavy XML trees from historical steps
       }
@@ -206,7 +211,7 @@
         // prompt path byte-for-byte (L2/L3 chunk compression rides this same
         // flag). See services/token_meter.py for measured session token usage
         // and cache-hit ratios.
-        "enabled": false, // off: chunk capsules are Gemini-only
+        "enabled": true,
         "context_budget_tokens": 80000,
         // Below start_ratio of the operator's own measured prompt size, closed
         // segments only prepare their summary; the original turns are kept in
@@ -246,7 +251,8 @@
         // call each); milestone closes are exempt, the hard line waives it.
         "min_steps": 3,
         "target_source_tokens": 2000,
-        "model": "gemini-3.6-flash",
+        // flash-lite: the free tier allows only ~20 gemini-3.6-flash calls a day.
+        "model": "gemini-3.5-flash-lite",
         "max_chunks": 8
         // "max_eras": 8 // independent era cap; omitted = follows max_chunks
       },

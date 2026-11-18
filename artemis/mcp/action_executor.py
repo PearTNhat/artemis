@@ -33,6 +33,7 @@ through ``ToolFailure`` or an explicit status.
 import ast
 import hashlib
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -172,6 +173,8 @@ class McpActionExecutor:
         xml_list: str | None = None
         target_semantics: dict[str, Any] = {}
         target_coordinates: list[int] | None = None
+        action_s: float | None = None
+        observe_s: float | None = None
         with span:
             try:
                 session = await self._session_or_start()
@@ -185,6 +188,7 @@ class McpActionExecutor:
                     target_coordinates = wire_args.get("target")
                 extension = raw_name not in (REQUIRED_ACTIONS | OPTIONAL_ACTIONS)
 
+                action_started = time.monotonic()
                 if extension:
                     raw_result = await session.call_raw(wire_name, wire_args)
                     message = next(
@@ -201,15 +205,19 @@ class McpActionExecutor:
                         )
                         res = res.model_copy(update={"message": res.message + res_note})
                     message = finalize(res) if finalize else res.message
+                action_s = time.monotonic() - action_started
 
                 if res.ok or self._observe_despite_failure(raw_name, res):
+                    observe_started = time.monotonic()
                     obs = await session.observe(settle_ms=400)
+                    observe_s = time.monotonic() - observe_started
                     if obs.ok:
                         shot_path = obs.screenshot_path
                         xml_list = obs.elements_text
                         if obs.hierarchy_ok:
                             state.indexed_points = [el["center"] for el in obs.elements]
                             state.indexed_elements = obs.elements
+                            state.screen_scrollable = obs.scrollable
                         if shot_path:
                             try:
                                 img_bytes = Path(shot_path).read_bytes()
@@ -254,6 +262,10 @@ class McpActionExecutor:
                 "normalized_coordinates": res.normalized_coordinates,
                 "target_semantics": target_semantics,
                 "target_coordinates": target_coordinates,
+                # Wall time of the device action itself and of the post-action
+                # observation (settle + screenshot + UI hierarchy), in seconds.
+                "action_s": round(action_s, 3) if action_s is not None else None,
+                "observe_s": round(observe_s, 3) if observe_s is not None else None,
             },
         )
 

@@ -814,42 +814,212 @@ $rose-dark: #dc2626;
           }
 
           /* Active Model Badge in Dock Footer */
-          .dock-model-pill {
+          .new-chat-pill {
             display: inline-flex;
             align-items: center;
-            gap: 4.5px;
+            gap: 4px;
             padding: 2.5px 9px;
             border-radius: 6px;
+            border: 1px solid rgba(148, 163, 184, 0.45);
             background: rgba(255, 255, 255, 0.55);
-            backdrop-filter: blur(14px);
-            -webkit-backdrop-filter: blur(14px);
-            border: 1px solid rgba(255, 255, 255, 0.7);
-            box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.8), 0 1px 3px rgba(0, 0, 0, 0.02);
             font-size: 11px;
             font-weight: 600;
             color: #334155;
-            cursor: default;
-            user-select: none;
-            transition: all 0.2s ease;
+            cursor: pointer;
+            transition: background 0.15s ease, border-color 0.15s ease;
 
-            .model-pill-icon {
-              font-size: 11.5px;
-              line-height: 1;
+            .pill-icon {
+              font-size: 14px;
             }
 
-            .model-pill-name {
-              max-width: 170px;
-              overflow: hidden;
-              text-overflow: ellipsis;
-              white-space: nowrap;
+            &:hover:not(:disabled) {
+              background: rgba(255, 255, 255, 0.9);
+              border-color: rgba(99, 102, 241, 0.5);
+            }
+
+            &.is-continuing {
+              color: #4338ca;
+              border-color: rgba(99, 102, 241, 0.45);
+              background: rgba(224, 231, 255, 0.6);
+            }
+
+            &:disabled {
+              opacity: 0.45;
+              cursor: not-allowed;
+            }
+          }
+
+          .dock-model-dropdown-container {
+            position: relative;
+            display: inline-flex;
+
+            .dock-model-pill {
+              display: inline-flex;
+              align-items: center;
+              gap: 4.5px;
+              padding: 2.5px 9px;
+              border-radius: 6px;
+              background: rgba(255, 255, 255, 0.55);
+              backdrop-filter: blur(14px);
+              -webkit-backdrop-filter: blur(14px);
+              border: 1px solid rgba(255, 255, 255, 0.7);
+              box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.8), 0 1px 3px rgba(0, 0, 0, 0.02);
               font-size: 11px;
               font-weight: 600;
-              color: #1e293b;
+              color: #334155;
+              cursor: pointer;
+              user-select: none;
+              transition: all 0.2s ease;
+              outline: none;
+
+              .model-pill-icon {
+                font-size: 11.5px;
+                line-height: 1;
+              }
+
+              .model-pill-name {
+                max-width: 170px;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                font-size: 11px;
+                font-weight: 600;
+                color: #1e293b;
+              }
+
+              .pill-chevron {
+                font-size: 14px;
+                color: #64748b;
+                transition: transform 0.2s ease;
+              }
+
+              &:hover,
+              &.is-open {
+                background: rgba(255, 255, 255, 0.95);
+                border-color: #3b82f6;
+                box-shadow: 0 2px 8px rgba(59, 130, 246, 0.15);
+
+                .pill-chevron {
+                  color: #2563eb;
+                }
+              }
             }
 
-            &:hover {
-              background: rgba(255, 255, 255, 0.85);
-              border-color: rgba(203, 213, 225, 0.9);
+            .dock-model-menu {
+              position: absolute;
+              bottom: calc(100% + 8px);
+              left: 0;
+              width: 260px;
+              background: #ffffff;
+              border: 1px solid rgba(226, 232, 240, 0.95);
+              border-radius: 12px;
+              box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16);
+              z-index: 1000;
+              padding: 8px;
+              display: flex;
+              flex-direction: column;
+              gap: 4px;
+              animation: popIn 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+
+              .menu-header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 2px 6px 6px;
+                border-bottom: 1px solid #f1f5f9;
+                font-size: 10.5px;
+                font-weight: 700;
+                color: #64748b;
+                text-transform: uppercase;
+                letter-spacing: 0.3px;
+
+                .btn-close-menu {
+                  background: transparent;
+                  border: none;
+                  color: #94a3b8;
+                  cursor: pointer;
+                  padding: 1px;
+                  border-radius: 4px;
+                  display: flex;
+                  align-items: center;
+
+                  .material-symbols-outlined {
+                    font-size: 14px;
+                  }
+
+                  &:hover {
+                    color: #0f172a;
+                    background: #f1f5f9;
+                  }
+                }
+              }
+
+              .menu-items {
+                display: flex;
+                flex-direction: column;
+                gap: 3px;
+
+                .menu-item {
+                  display: flex;
+                  align-items: center;
+                  gap: 8px;
+                  padding: 6px 8px;
+                  border-radius: 8px;
+                  background: transparent;
+                  border: 1px solid transparent;
+                  text-align: left;
+                  cursor: pointer;
+                  transition: all 0.15s ease;
+
+                  .item-icon {
+                    font-size: 15px;
+                    flex-shrink: 0;
+                  }
+
+                  .item-text {
+                    flex: 1;
+                    display: flex;
+                    flex-direction: column;
+                    gap: 1px;
+
+                    .item-title {
+                      font-size: 12px;
+                      font-weight: 600;
+                      color: #0f172a;
+                    }
+
+                    .item-sub {
+                      font-size: 10px;
+                      color: #64748b;
+                    }
+                  }
+
+                  .check-pill {
+                    font-size: 11px;
+                    font-weight: 700;
+                    color: #16a34a;
+                  }
+
+                  &:hover:not(:disabled) {
+                    background: #f8fafc;
+                    border-color: #e2e8f0;
+                  }
+
+                  &.is-active {
+                    background: #f0fdf4;
+                    border-color: #bbf7d0;
+
+                    .item-text .item-title {
+                      color: #15803d;
+                    }
+                  }
+
+                  &:disabled {
+                    opacity: 0.5;
+                    cursor: not-allowed;
+                  }
+                }
+              }
             }
           }
         }

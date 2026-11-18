@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { Component, signal, computed, effect, inject, OnInit, OnDestroy, ChangeDetectionStrategy } from '@angular/core';
+import { Component, signal, computed, effect, inject, OnInit, OnDestroy, ChangeDetectionStrategy, HostListener } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Router, RouterLink } from '@angular/router';
 import { AgentService } from '../../services/agent.service';
@@ -133,6 +133,28 @@ export class HomeComponent implements OnInit, OnDestroy {
   public isSwitchingPreset = signal<string | null>(null);
   public presetMessage = signal<string | null>(null);
   public presetError = signal<string | null>(null);
+  public isModelDropdownOpen = signal<boolean>(false);
+
+  public toggleModelDropdown(event?: Event): void {
+    if (event) {
+      event.stopPropagation();
+    }
+    this.isModelDropdownOpen.update(v => !v);
+  }
+
+  public selectPresetFromDropdown(preset: 'agy' | 'fosta' | 'qwen' | 'gemini'): void {
+    this.switchPreset(preset);
+    setTimeout(() => {
+      this.isModelDropdownOpen.set(false);
+    }, 400);
+  }
+
+  @HostListener('document:click')
+  public onDocumentClick(): void {
+    if (this.isModelDropdownOpen()) {
+      this.isModelDropdownOpen.set(false);
+    }
+  }
 
   // Custom model config form state
   public customModelInput = signal<string>('gpt-6.1-sol');
@@ -163,11 +185,15 @@ export class HomeComponent implements OnInit, OnDestroy {
     const found = vars.find(v => v.name === 'GEMINI_API_KEY');
     return found?.preview || '';
   });
-  public activePreset = computed<'fosta' | 'qwen' | 'gemini' | 'custom'>(() => {
+  public activePreset = computed<'agy' | 'fosta' | 'qwen' | 'gemini' | 'custom'>(() => {
     const model = (this.activeModelName() || '').toLowerCase();
     const url = (this.activeBaseUrl() || '').toLowerCase();
     const provider = (this.activeProvider() || '').toLowerCase();
 
+    // 0. Local Antigravity CLI (its models are Gemini models too)
+    if (provider === 'agy') {
+      return 'agy';
+    }
     // 1. Google Gemini
     if (provider === 'google' || model.includes('gemini')) {
       return 'gemini';
@@ -854,7 +880,7 @@ export class HomeComponent implements OnInit, OnDestroy {
     }
   }
 
-  public switchPreset(preset: 'fosta' | 'qwen' | 'gemini'): void {
+  public switchPreset(preset: 'agy' | 'fosta' | 'qwen' | 'gemini'): void {
     this.isSwitchingPreset.set(preset);
     this.presetMessage.set(null);
     this.presetError.set(null);
@@ -960,19 +986,23 @@ export class HomeComponent implements OnInit, OnDestroy {
   public cliMessage = signal<string | null>(null);
   public cliError = signal<string | null>(null);
 
+  // Active CLI selection ('claude' vs 'antigravity')
+  public selectedCli = computed(() => this.systemService.activeCli());
+
+  public selectCli(target: 'claude' | 'antigravity'): void {
+    this.systemService.setActiveCli(target);
+  }
+
   public connectCli(target: 'claude' | 'antigravity'): void {
+    this.selectCli(target);
     this.cliMessage.set(null);
     this.cliError.set(null);
     this.systemService.installCliMcp(target).subscribe({
       next: (res) => {
         const name = target === 'claude' ? 'Claude Code (Claude CLI)' : 'Gemini CLI / Antigravity (agy)';
-        const modelPreset = target === 'claude' ? 'fosta' : 'gemini';
-        const modelName = target === 'claude' ? 'GPT-6.1 Sol (Fosta)' : 'Gemini 3.6 Flash';
+        const cmd = target === 'claude' ? 'claude' : 'agy';
 
-        // Auto-switch model preset to match selected CLI
-        this.switchPreset(modelPreset);
-
-        this.cliMessage.set(`✓ Đã kết nối ARTEMIS với ${name} và kích hoạt model ${modelName}! Bạn có thể mở terminal gõ "${target === 'claude' ? 'claude' : 'agy'}" và ra lệnh ngay.`);
+        this.cliMessage.set(`✓ Đã kích hoạt và kết nối MCP cho ${name} thành công! Bây giờ bạn có thể mở terminal gõ "${cmd}" để ra lệnh (Model Vision: ${this.systemService.activeModelDisplayName()}).`);
         setTimeout(() => this.cliMessage.set(null), 8000);
       },
       error: (err) => {

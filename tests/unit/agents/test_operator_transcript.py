@@ -54,8 +54,8 @@ from artemis.memory.transcript import (
 
 # SHA-256 snapshots of the legacy system message with the fixed inputs below.
 # Update these when an intentional template change alters the rendered prompt.
-GOLDEN_EMPTY_PLAN = "c5021f63044d986cb3148c97366d102073ad42e370c4c9cf46b1efac8c8b18a5"
-GOLDEN_SENTINEL_PLAN = "a6cc1350d54452173a6e17d19e517881452d1f5e2198ac704aafbb139faa7b78"
+GOLDEN_EMPTY_PLAN = "75bbb078cf7c4ba90c995829002abcf632ef109c58513911d4a5a46d81d6339c"
+GOLDEN_SENTINEL_PLAN = "215ca36944cb9598d3d337a11a98c0d3f459a12980368cc345e2bf569c6a79da"
 
 SCREENSHOT_B64 = base64.b64encode(b"fake-jpeg-bytes").decode("utf-8")
 

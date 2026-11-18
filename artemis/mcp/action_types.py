@@ -84,3 +84,5 @@ class ObserveResult(BaseModel):
     hierarchy_ok: bool = True
     """False when the screenshot succeeded but the UI hierarchy parse failed; callers
     must then keep their previous element index rather than clobbering it."""
+    scrollable: bool | None = None
+    """Whether the screen holds a large scrollable container (None: unknown)."""

@@ -19,7 +19,7 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import { HttpClient } from '@angular/common/http';
-import { AgentService, StartupProgressEvent } from '../../services/agent.service';
+import { AgentService, StartupProgressEvent, SessionTimingReport } from '../../services/agent.service';
 import { SystemService } from '../../services/system.service';
 import { Session, ModelInfo, SessionUsage } from '../../core/models/session.model';
 import { MarkdownSegment, MarkdownLine, NoteMilestone, ParsedNote } from '../../core/models/markdown.model';
@@ -272,6 +272,9 @@ export class AgentStreamComponent implements AfterViewInit {
   // Run info popover (opened from the Flash / Pro chip): elapsed time, token
   // usage, executor context share and the Pro tuning the run started with.
   public isRunInfoOpen = signal<boolean>(false);
+  public isTimingOpen = signal<boolean>(false);
+  public timingReport = signal<SessionTimingReport | null>(null);
+  public timingError = signal<string | null>(null);
   public runUsage = signal<SessionUsage | null>(null);
   private runInfoClock = signal<number>(Date.now());
 
@@ -853,6 +856,33 @@ export class AgentStreamComponent implements AfterViewInit {
     this.isTaskDropdownOpen.set(false);
     this.isNotesDropdownOpen.set(false);
     this.isRunInfoOpen.set(false);
+  }
+
+  /** Open the per-step timing table of the viewed session (fetched fresh each time). */
+  public toggleTiming(event: Event): void {
+    event.stopPropagation();
+    if (this.isTimingOpen()) {
+      this.isTimingOpen.set(false);
+      return;
+    }
+    const sessionId = this.agentService.currentSessionId();
+    if (!sessionId) return;
+    this.timingReport.set(null);
+    this.timingError.set(null);
+    this.isTimingOpen.set(true);
+    this.agentService.fetchSessionTiming(sessionId).subscribe({
+      next: (report) => this.timingReport.set(report),
+      error: (err) => this.timingError.set(err?.error?.detail || 'Không tải được số liệu thời gian.')
+    });
+  }
+
+  public timingPct(value: number | null | undefined, report: SessionTimingReport): number {
+    const wall = report.totals.wall_s || 1;
+    return Math.round((100 * (value || 0)) / wall);
+  }
+
+  public fmtSec(value: number | null | undefined): string {
+    return value === null || value === undefined ? '–' : `${value.toFixed(1)}s`;
   }
 
   public toggleRunInfo(event: Event): void {

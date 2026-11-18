@@ -30,6 +30,7 @@ try:
     from admin_console.services.model_service import model_service
     from admin_console.services.task_preset_catalog import task_recommendation_engine
     from admin_console.services.task_queue_service import task_queue_service
+    from admin_console.services.conversation_context import build_followup_goal
 except ImportError:
     from apps.admin_console.core.state import state
     from apps.admin_console.database.repositories.session_repository import session_repo
@@ -38,6 +39,7 @@ except ImportError:
     from apps.admin_console.services.model_service import model_service
     from apps.admin_console.services.task_preset_catalog import task_recommendation_engine
     from apps.admin_console.services.task_queue_service import task_queue_service
+    from apps.admin_console.services.conversation_context import build_followup_goal
 
 
 router = APIRouter(tags=["tasks"])
@@ -80,6 +82,18 @@ async def run_task(request: RunRequest):
             status_code=400,
             detail="Either 'goal' or 'goals' list must be provided.",
         )
+
+    # Chat follow-up: prefix the previous task's request, outcome and last
+    # steps so the fresh agent knows what the user is continuing.
+    if request.previous_session_id and len(incoming_goals) == 1:
+        prev_sid = str(request.previous_session_id)
+        previous = session_repo.get_session_by_id(prev_sid)
+        if previous:
+            incoming_goals = [
+                build_followup_goal(
+                    incoming_goals[0], previous, session_repo.get_recent_steps(prev_sid)
+                )
+            ]
 
     # Idempotent SDK retries must never re-run device readiness checks. A task
     # can hold the device while its admission response is lost in transit; in

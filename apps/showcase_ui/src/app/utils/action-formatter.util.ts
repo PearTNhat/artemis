@@ -504,7 +504,7 @@ export function extractActionExtraParams(action: any, cache?: WeakMap<any, Actio
     'pre_image_name', 'post_image_name', 'pre_screenshot', 'post_screenshot',
     'before_screenshot', 'after_screenshot', 'status', 'success', 'timestamp',
     'created_at', 'start_time', 'execution_id', 'controller', 'agent', 'session_id', 'step_id',
-    'app_name', 'package_name', 'app', 'key', 'keycode', 'time_in_ms', 'delay_ms', 'delay_seconds', 'duration',
+    'app_name', 'package_name', 'app', 'key', 'keycode', 'time_in_ms', 'delay_ms', 'delay_seconds', 'duration', 'duration_ms',
     'args', 'kwargs', 'parameters', 'extra_params', 'direction', 'gesture'
   ]);
 
@@ -528,10 +528,21 @@ export function extractActionExtraParams(action: any, cache?: WeakMap<any, Actio
 
   const mergedObj = { ...act, ...parsedArgs };
 
-  // Explicitly check duration if available and not already formatted
-  const dur = mergedObj.duration || mergedObj.duration_ms;
-  if (dur !== undefined && dur !== null && dur !== '') {
-    result.push({ key: 'Duration', value: typeof dur === 'number' ? `${dur}ms` : String(dur) });
+  // Two different durations share the name: a gesture argument (swipe / long
+  // press length, in ms) and the recorded execution time of the action (in
+  // seconds, e.g. 1.1988 for a 1.2 s ADB tap). Never label seconds as ms.
+  const gestureMs = parsedArgs.duration_ms ?? parsedArgs.duration ?? act.duration_ms;
+  if (gestureMs !== undefined && gestureMs !== null && gestureMs !== '') {
+    result.push({
+      key: 'Duration',
+      value: typeof gestureMs === 'number' ? `${Math.round(gestureMs)}ms` : String(gestureMs)
+    });
+  } else if (typeof act.duration === 'number' && act.duration > 0) {
+    const secs = act.duration;
+    result.push({
+      key: 'Exec time',
+      value: secs < 1 ? `${Math.round(secs * 1000)}ms` : `${secs.toFixed(2)}s`
+    });
   }
 
   for (const [k, v] of Object.entries(mergedObj)) {

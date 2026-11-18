@@ -45,6 +45,7 @@ class ModelProvider(StrEnum):
     OLLAMA = "ollama"
     VLLM = "vllm"
     CUSTOM = "custom"
+    AGY = "agy"
 
     @classmethod
     def from_string(cls, val: Any) -> "ModelProvider":
@@ -75,6 +76,9 @@ class ModelProvider(StrEnum):
             "ollama": cls.OLLAMA,
             "vllm": cls.VLLM,
             "custom": cls.CUSTOM,
+            "agy": cls.AGY,
+            "antigravity": cls.AGY,
+            "geminicli": cls.AGY,
         }
         provider = mapping.get(s)
         if provider is None:
@@ -364,6 +368,16 @@ class ModelFactory:
                 api_key=api_key,
                 base_url=endpoint.api_base or "https://api.x.ai/v1",
                 timeout=endpoint.timeout_seconds,
+            )
+
+        elif provider == ModelProvider.AGY:
+            # Local Antigravity CLI: no API key, one open conversation per task.
+            from artemis.llm.agy_model import AgyChatModel
+
+            return AgyChatModel(
+                model_name=endpoint.model_name or None,
+                agy_bin=endpoint.api_base or os.environ.get("ARTEMIS_AGY_BIN", "agy"),
+                turn_timeout_s=max(endpoint.timeout_seconds, 240.0),
             )
 
         elif provider in (ModelProvider.OLLAMA, ModelProvider.VLLM, ModelProvider.CUSTOM):

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { Component, ChangeDetectionStrategy, NgZone, DestroyRef, inject, computed, signal, ViewChild, ElementRef, OnInit } from '@angular/core';
+import { Component, ChangeDetectionStrategy, NgZone, DestroyRef, inject, computed, signal, ViewChild, ElementRef, OnInit, HostListener } from '@angular/core';
 
 import { FormsModule } from '@angular/forms';
 import { AgentStreamComponent } from '../../components/agent-stream/agent-stream.component';
@@ -59,6 +59,36 @@ export class WorkspaceComponent implements OnInit {
   public errorMessage = signal<string | null>(null);
   public successMessage = signal<string | null>(null);
   public selectedProfile = signal<'flash' | 'pro'>('flash');
+  public isModelDropdownOpen = signal<boolean>(false);
+  public isSwitchingPreset = signal<string | null>(null);
+
+  public toggleModelDropdown(event?: Event): void {
+    if (event) {
+      event.stopPropagation();
+    }
+    this.isModelDropdownOpen.update(v => !v);
+  }
+
+  public selectPresetFromDropdown(preset: string): void {
+    this.isSwitchingPreset.set(preset);
+    this.systemService.switchModelPreset(preset).subscribe({
+      next: () => {
+        this.isSwitchingPreset.set(null);
+        setTimeout(() => this.isModelDropdownOpen.set(false), 400);
+      },
+      error: (err) => {
+        this.isSwitchingPreset.set(null);
+        console.error('Failed to switch preset:', err);
+      }
+    });
+  }
+
+  @HostListener('document:click')
+  public onDocumentClick(): void {
+    if (this.isModelDropdownOpen()) {
+      this.isModelDropdownOpen.set(false);
+    }
+  }
 
   // Expand States (Signals for 0-latency reactivity)
   public isHoveringCard = signal<boolean>(false);
@@ -109,6 +139,22 @@ export class WorkspaceComponent implements OnInit {
   public isTaskRunning = computed(() => {
     return this.agentService.isCurrentSessionRunning();
   });
+
+  /**
+   * The finished task a new message continues: the viewed session when it is
+   * no longer running, unless the user started a new chat.
+   */
+  public followUpSessionId = computed<string | null>(() => {
+    if (this.agentService.newChatMode() || this.isTaskRunning()) return null;
+    const session = this.agentService.currentSession();
+    return session && !session.session_id.startsWith('active-') ? session.session_id : null;
+  });
+
+  /** Start a fresh chat: the next task carries no earlier context. */
+  public startNewChat(event?: MouseEvent): void {
+    event?.stopPropagation();
+    this.agentService.startNewChat();
+  }
 
   /**
    * Dynamic tooltip and label indicating which task will be stopped
@@ -271,7 +317,7 @@ export class WorkspaceComponent implements OnInit {
     }
     this.isInputFocused.set(false);
 
-    this.agentService.runTask(goal, this.selectedProfile()).subscribe({
+    this.agentService.runTask(goal, this.selectedProfile(), undefined, undefined, undefined, this.followUpSessionId()).subscribe({
       next: (res) => {
         this.taskInput = '';
         if (this.dockInputRef?.nativeElement) {

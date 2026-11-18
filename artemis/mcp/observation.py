@@ -37,6 +37,36 @@ logger = get_logger(__name__)
 __all__ = ["observe"]
 
 
+
+def has_large_scrollable(nodes, width, height, min_fraction: float = 0.25) -> bool:
+    """True when the hierarchy holds a scrollable container covering at least
+    ``min_fraction`` of the screen (a page whose content can move)."""
+    import re
+
+    screen = float((width or 1080) * (height or 2400))
+    stack = list(nodes) if isinstance(nodes, list) else [nodes]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, list):
+            stack.extend(node)
+            continue
+        if not isinstance(node, dict):
+            continue
+        if str(node.get("scrollable", "")).lower() == "true" or node.get("scrollable") is True:
+            bounds = node.get("bounds")
+            box = None
+            if isinstance(bounds, str):
+                m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", bounds)
+                box = tuple(map(int, m.groups())) if m else None
+            elif isinstance(bounds, (list, tuple)) and len(bounds) == 4:
+                box = tuple(int(v) for v in bounds)
+            if box and (box[2] - box[0]) * (box[3] - box[1]) >= min_fraction * screen:
+                return True
+        children = node.get("children") or node.get("nodes") or []
+        if isinstance(children, (list, dict)):
+            stack.extend(children if isinstance(children, list) else [children])
+    return False
+
 async def observe(
     ctx: ArtemisContext,
     controller: UnifiedMobileController,
@@ -78,6 +108,7 @@ async def observe(
     ocr_results = ocr_results or []
     elements: list[dict] = []
     hierarchy_ok = True
+    scrollable: bool | None = None
     width = height = None
     try:
         xml_hierarchy = device_data.elements
@@ -87,6 +118,7 @@ async def observe(
             ctx.device.device_width = width
             ctx.device.device_height = height
 
+        scrollable = has_large_scrollable(xml_hierarchy, width, height)
         fused_xml = fuse_ocr_with_xml(xml_hierarchy, ocr_results)
         minimal_list_str, elements, _ = format_minimal_list_with_elements(fused_xml, width, height)
     except Exception as e:
@@ -128,6 +160,7 @@ async def observe(
             elements_text=minimal_list_str,
             elements=elements,
             hierarchy_ok=hierarchy_ok,
+            scrollable=scrollable,
         ),
         screenshot_bytes,
     )

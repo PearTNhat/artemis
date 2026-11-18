@@ -526,13 +526,41 @@ export class SystemService {
 
   public modelConfigEnv = signal<ModelConfigEnvResponse | null>(null);
 
+  // Active CLI selection ('antigravity' vs 'claude')
+  public activeCli = signal<'antigravity' | 'claude'>(
+    (typeof localStorage !== 'undefined' && (localStorage.getItem('artemis_selected_cli') as any)) || 'antigravity'
+  );
+
+  public setActiveCli(cli: 'antigravity' | 'claude'): void {
+    this.activeCli.set(cli);
+    try {
+      localStorage.setItem('artemis_selected_cli', cli);
+    } catch (_) {}
+  }
+
+  public activeCliDisplayName = computed<string>(() => {
+    return this.activeCli() === 'antigravity' ? 'Gemini CLI (agy)' : 'Claude Code (claude)';
+  });
+
+  public activeCliBadgeIcon = computed<string>(() => {
+    return this.activeCli() === 'antigravity' ? '🤖' : '⚡';
+  });
+
+  /** True when the agent itself reasons through the agy CLI (one badge only). */
+  public usesCliModel = computed(() => this.activeModelPreset() === 'agy');
+
   public activeModelName = computed(() => this.modelConfigEnv()?.default_model?.model || '');
   public activeModelProvider = computed(() => this.modelConfigEnv()?.default_model?.provider || '');
-  public activeModelPreset = computed<'fosta' | 'qwen' | 'gemini' | 'custom'>(() => {
+  public activeModelPreset = computed<'agy' | 'fosta' | 'qwen' | 'gemini' | 'custom'>(() => {
     const model = (this.activeModelName() || '').toLowerCase();
     const url = (this.modelConfigEnv()?.env_vars?.find(v => v.name === 'OPENAI_BASE_URL')?.preview || '').toLowerCase();
     const provider = (this.activeModelProvider() || '').toLowerCase();
 
+    // Reasoning through the local Antigravity CLI (checked before 'gemini':
+    // its model names are Gemini models too).
+    if (provider === 'agy') {
+      return 'agy';
+    }
     if (provider === 'google' || model.includes('gemini')) {
       return 'gemini';
     }
@@ -546,6 +574,7 @@ export class SystemService {
   });
   public activeModelDisplayName = computed<string>(() => {
     const preset = this.activeModelPreset();
+    if (preset === 'agy') return `Gemini CLI (agy) · ${this.activeModelName() || 'default'}`;
     if (preset === 'fosta') return 'GPT-6.1 Sol (Fosta)';
     if (preset === 'qwen') return 'Qwen-27B Local';
     if (preset === 'gemini') return 'Gemini 3.6 Flash';
@@ -553,6 +582,7 @@ export class SystemService {
   });
   public activeModelBadgeIcon = computed<string>(() => {
     const preset = this.activeModelPreset();
+    if (preset === 'agy') return '🤖';
     if (preset === 'fosta') return '⚡';
     if (preset === 'qwen') return '🏠';
     if (preset === 'gemini') return '🌟';

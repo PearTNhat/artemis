@@ -26,6 +26,20 @@ import pytest
 from artemis.drivers.mock.mock_driver import MockDeviceDriver
 
 
+@pytest.fixture(autouse=True)
+def _no_live_ipc(monkeypatch, request):
+    """Keep tests off a running admin console.
+
+    DataEngine discovers the IPC port from env, port files or even
+    http://127.0.0.1:8000/api/status, so without this every test that builds an
+    engine streams fake sessions ("search test session", ...) into the user's
+    live UI. Tests that exercise IPC patch read_ipc_port themselves.
+    """
+    if request.node.get_closest_marker("live_ipc"):
+        return
+    monkeypatch.setattr("artemis.data_engine.engine.read_ipc_port", lambda: None)
+
+
 @pytest.fixture
 def mock_driver():
     """Provide an isolated mock mobile driver."""

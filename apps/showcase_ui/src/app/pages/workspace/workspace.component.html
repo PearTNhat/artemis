@@ -102,6 +102,8 @@ limitations under the License.
             @if (isTaskRunning()) {
               <span class="running-pulsing-dot"></span>
               <span class="capsule-placeholder live-guidance">💬 AI đang chạy · Bấm để gửi chỉ dẫn hoặc can thiệp...</span>
+            } @else if (followUpSessionId()) {
+              <span class="capsule-placeholder">💬 Nhắn tiếp để AI làm tiếp từ task trước...</span>
             } @else {
               <span class="capsule-placeholder">Start a new task...</span>
             }
@@ -121,6 +123,8 @@ limitations under the License.
                   [disabled]="isSubmitting()"
                   [placeholder]="isTaskRunning()
                     ? '💬 Nhập chỉ dẫn hoặc can thiệp cho AI đang chạy (ví dụ: bấm nút Yes it\'s me, vuốt lên, chọn Phuc Phan...) rồi nhấn Enter...'
+                    : followUpSessionId()
+                    ? '💬 Chat tiếp: AI nhớ task trước (yêu cầu, kết quả, các bước cuối). Bấm New chat để bắt đầu lại.'
                     : (selectedProfile() === 'pro' 
                         ? 'Pro: plans first, checks results and recovers from blocked steps. For long or complex tasks'
                         : 'Flash: fast single-look loop for everyday app tasks')"
@@ -185,10 +189,96 @@ limitations under the License.
                   </button>
                 </div>
 
-                <!-- Active Model Indicator -->
-                <div class="dock-model-pill" [title]="'Mô hình AI: ' + systemService.activeModelDisplayName() + ' (' + systemService.activeModelName() + ')'">
-                  <span class="model-pill-icon">{{ systemService.activeModelBadgeIcon() }}</span>
-                  <span class="model-pill-name">{{ systemService.activeModelDisplayName() }}</span>
+                <!-- New Chat: drop the follow-up context for the next task -->
+                <button type="button" class="new-chat-pill" [class.is-continuing]="!!followUpSessionId()"
+                  [disabled]="isTaskRunning()"
+                  (mousedown)="$event.preventDefault()" (click)="startNewChat($event)"
+                  [title]="followUpSessionId() ? 'Đang chat tiếp task trước. Bấm để bắt đầu chat mới (AI không mang theo ngữ cảnh cũ)' : 'Chat mới'">
+                  <span class="material-symbols-outlined pill-icon">{{ followUpSessionId() ? 'link' : 'add_comment' }}</span>
+                  <span class="pill-label">{{ followUpSessionId() ? 'Chat tiếp · New chat' : 'New chat' }}</span>
+                </button>
+
+                <!-- Active Model Switcher Dropdown in Dock -->
+                <div class="dock-model-dropdown-container">
+                  <button type="button" class="dock-model-pill" 
+                    [class.is-open]="isModelDropdownOpen()"
+                    (click)="toggleModelDropdown($event)"
+                    title="Mô hình AI hiện tại. Bấm để chuyển đổi model ngay tại đây.">
+                    <span class="model-pill-icon">{{ systemService.activeModelBadgeIcon() }}</span>
+                    <span class="model-pill-name">{{ systemService.activeModelDisplayName() }}</span>
+                    <span class="material-symbols-outlined pill-chevron">
+                      {{ isModelDropdownOpen() ? 'expand_less' : 'expand_more' }}
+                    </span>
+                  </button>
+
+                  @if (isModelDropdownOpen()) {
+                  <div class="dock-model-menu" (click)="$event.stopPropagation()">
+                    <div class="menu-header">
+                      <span>Chuyển đổi Model AI</span>
+                      <button type="button" class="btn-close-menu" (click)="isModelDropdownOpen.set(false)">
+                        <span class="material-symbols-outlined">close</span>
+                      </button>
+                    </div>
+
+                    <div class="menu-items">
+                      <button type="button" class="menu-item" 
+                        [class.is-active]="systemService.activeModelPreset() === 'agy'"
+                        [disabled]="isSwitchingPreset() !== null"
+                        (click)="selectPresetFromDropdown('agy')">
+                        <span class="item-icon">🤖</span>
+                        <div class="item-text">
+                          <span class="item-title">Gemini CLI (agy)</span>
+                          <span class="item-sub">Antigravity CLI trên máy · không cần API key</span>
+                        </div>
+                        @if (systemService.activeModelPreset() === 'agy') {
+                        <span class="check-pill">✓</span>
+                        }
+                      </button>
+
+                      <button type="button" class="menu-item" 
+                        [class.is-active]="systemService.activeModelPreset() === 'gemini'"
+                        [disabled]="isSwitchingPreset() !== null"
+                        (click)="selectPresetFromDropdown('gemini')">
+                        <span class="item-icon">🌟</span>
+                        <div class="item-text">
+                          <span class="item-title">Gemini 3.6 Flash</span>
+                          <span class="item-sub">Google AI Studio · Multimodal</span>
+                        </div>
+                        @if (systemService.activeModelPreset() === 'gemini') {
+                        <span class="check-pill">✓</span>
+                        }
+                      </button>
+
+                      <button type="button" class="menu-item" 
+                        [class.is-active]="systemService.activeModelPreset() === 'fosta'"
+                        [disabled]="isSwitchingPreset() !== null"
+                        (click)="selectPresetFromDropdown('fosta')">
+                        <span class="item-icon">⚡</span>
+                        <div class="item-text">
+                          <span class="item-title">GPT-6.1 Sol</span>
+                          <span class="item-sub">codex.fosta.app (Fosta)</span>
+                        </div>
+                        @if (systemService.activeModelPreset() === 'fosta') {
+                        <span class="check-pill">✓</span>
+                        }
+                      </button>
+
+                      <button type="button" class="menu-item" 
+                        [class.is-active]="systemService.activeModelPreset() === 'qwen'"
+                        [disabled]="isSwitchingPreset() !== null"
+                        (click)="selectPresetFromDropdown('qwen')">
+                        <span class="item-icon">🏠</span>
+                        <div class="item-text">
+                          <span class="item-title">Qwen-27B Local</span>
+                          <span class="item-sub">192.168.1.40:18080 · Self-hosted</span>
+                        </div>
+                        @if (systemService.activeModelPreset() === 'qwen') {
+                        <span class="check-pill">✓</span>
+                        }
+                      </button>
+                    </div>
+                  </div>
+                  }
                 </div>
               </div>
             </div>
