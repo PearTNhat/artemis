@@ -31,8 +31,11 @@ through ``ToolFailure`` or an explicit status.
 """
 
 import ast
+import asyncio
 import hashlib
+import inspect
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -46,6 +49,7 @@ from artemis.mcp.action_specs import exception_prefix
 from artemis.mcp.action_session import ActionSession, get_action_session
 from artemis.mcp.action_types import ActionCode, ActionResult
 from artemis.mcp.actuators.adb import AdbActuator
+from artemis.utils.image_hash import dhash_hex, hamming_distance_hex
 from artemis.agents.validator.tool_declarations import (
     ToolExecutionResult,
     normalize_coordinate_target,
@@ -102,6 +106,55 @@ class McpActionExecutor:
         # never sees or chooses the tier.
         self.agent_name = agent_name
         self._session: ActionSession | None = None
+        self._last_point_action: dict[str, Any] | None = None
+        self._last_elements_signature: str | None = None
+        self._last_image_hash: str | None = None
+        # dHash distance at or below which two screenshots count as the same
+        # screen (calibrated in memory.transcript.similarity_max_distance:
+        # same screen <=4, different screens >=7), so a clock tick or a
+        # blinking cursor does not register as a screen change.
+        self._same_screen_max_distance = 5
+        try:
+            from artemis.config import load_agent_config
+
+            self._same_screen_max_distance = int(
+                load_agent_config().memory.transcript.similarity_max_distance
+            )
+        except Exception as exc:
+            logger.debug(f"Similarity distance config unavailable; using 5: {exc}")
+
+    def record_observation(self, elements: list[dict[str, Any]] | None, image_bytes: bytes | None) -> None:
+        """Re-bases the screen-change baseline on an observation taken outside
+        the executor (runner fallback capture, burst abort, scroll probe), so
+        the next "screen unchanged" check compares against the screen the
+        model actually saw last. Also clears the repeated-tap guard: the
+        screen it was judged against is no longer the baseline."""
+        self._last_elements_signature = self._elements_signature(elements)
+        image_hash = dhash_hex(image_bytes) if image_bytes else None
+        if image_hash:
+            self._last_image_hash = image_hash
+        self._last_point_action = None
+
+    @staticmethod
+    def _elements_signature(elements: list[dict[str, Any]] | None) -> str:
+        if not elements:
+            return ""
+        parts = [
+            f"{el.get('text')}:{el.get('center')}:{el.get('checked')}:{el.get('selected')}:{el.get('error')}"
+            for el in elements
+        ]
+        return hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()
+
+    def _determine_settle_ms(
+        self, raw_name: str, args: dict[str, Any], target_semantics: dict[str, Any]
+    ) -> int:
+        if raw_name == "manage_app":
+            return 1500
+        if raw_name == "press_key":
+            key = str(args.get("key") or args.get("keycode") or "").upper()
+            if key in ("ENTER", "66", "SEARCH", "84"):
+                return 1000
+        return 400
 
     @property
     def action_tool_names(self) -> frozenset[str]:
@@ -123,6 +176,7 @@ class McpActionExecutor:
         state: Any,
         *,
         index_elements: list[dict[str, Any]] | None = None,
+        skip_observe: bool = False,
     ) -> ToolExecutionResult:
         """Executes the named tool and wraps the outcome for the calling agent.
 
@@ -141,7 +195,13 @@ class McpActionExecutor:
 
         if raw_name in self.action_tool_names:
             return await self._execute_device_action(
-                raw_name, name, args, tool_call_id, state, index_elements=index_elements
+                raw_name,
+                name,
+                args,
+                tool_call_id,
+                state,
+                index_elements=index_elements,
+                skip_observe=skip_observe,
             )
 
         return ToolExecutionResult(
@@ -162,6 +222,7 @@ class McpActionExecutor:
         state: Any,
         *,
         index_elements: list[dict[str, Any]] | None = None,
+        skip_observe: bool = False,
     ) -> ToolExecutionResult:
         span = TraceSpan(name=raw_name, trace_type="action", ctx=self.ctx)
         span.payload = {"args": args}
@@ -178,6 +239,52 @@ class McpActionExecutor:
         with span:
             try:
                 session = await self._session_or_start()
+                if raw_name in _POINT_TARGET_ACTIONS and args.get("target_text"):
+                    # target_text always resolves against the live screen, never
+                    # against the turn's snapshot: an earlier action in the burst
+                    # may have changed the screen, and the same text at its old
+                    # position would be tapped on the new screen. Poll up to 3s
+                    # for the text; if it never shows up, resolve against the last
+                    # live observation so the Anchor Guard reports "not found".
+                    target_clean = str(args.get("target_text")).strip()
+                    last_live_elements: list[dict[str, Any]] | None = None
+                    if session is not None and hasattr(session, "observe"):
+                        from artemis.utils.screen_diff import find_matching_text_elements
+
+                        deadline = time.monotonic() + 3.0
+                        while True:
+                            try:
+                                obs = await session.observe(settle_ms=0)
+                                if (
+                                    obs
+                                    and obs.ok
+                                    and obs.hierarchy_ok
+                                    and isinstance(obs.elements, list)
+                                ):
+                                    last_live_elements = obs.elements
+                                    width, height = self._screen_size()
+                                    if obs.elements and find_matching_text_elements(
+                                        obs.elements, target_clean, width=width, height=height
+                                    ):
+                                        break
+                            except Exception as e:
+                                logger.debug(f"Error observing fresh screen for target_text: {e}")
+                            if time.monotonic() >= deadline:
+                                break
+                            await asyncio.sleep(0.3)
+
+                    if last_live_elements is None:
+                        raise _ArgError(
+                            f"Anchor Guard: could not observe the live screen to resolve "
+                            f"target_text '{target_clean}'. Aborting chain to request a fresh AI observation."
+                        )
+                    index_elements = last_live_elements
+                    if state is not None:
+                        state.indexed_elements = last_live_elements
+                        state.indexed_points = [
+                            el["center"] for el in last_live_elements if el.get("center")
+                        ]
+
                 wire_name, wire_args, finalize, target_semantics = self._translate(
                     raw_name, args, state, index_elements=index_elements
                 )
@@ -186,6 +293,18 @@ class McpActionExecutor:
                     # coordinates of an index target (the model named an index,
                     # not a point).
                     target_coordinates = wire_args.get("target")
+                    if target_coordinates and self._last_point_action:
+                        last_coords = self._last_point_action.get("target_coordinates")
+                        last_unchanged = self._last_point_action.get("screen_unchanged", False)
+                        if last_coords and last_unchanged:
+                            dx = target_coordinates[0] - last_coords[0]
+                            dy = target_coordinates[1] - last_coords[1]
+                            if (dx * dx + dy * dy) <= 400:  # <= 20 units (~2% threshold)
+                                raise _ArgError(
+                                    f"Repeated tap rejected: Point {target_coordinates} was already tapped in the "
+                                    f"previous step and did not change the screen. If you are confirming a form, "
+                                    f"please check if there is an unselected option, required field, or validation notice on screen."
+                                )
                 extension = raw_name not in (REQUIRED_ACTIONS | OPTIONAL_ACTIONS)
 
                 action_started = time.monotonic()
@@ -207,22 +326,123 @@ class McpActionExecutor:
                     message = finalize(res) if finalize else res.message
                 action_s = time.monotonic() - action_started
 
-                if res.ok or self._observe_despite_failure(raw_name, res):
+                if (res.ok or self._observe_despite_failure(raw_name, res)) and not skip_observe:
                     observe_started = time.monotonic()
-                    obs = await session.observe(settle_ms=400)
+                    settle_ms = self._determine_settle_ms(raw_name, args, target_semantics)
+                    obs = await session.observe(settle_ms=settle_ms)
                     observe_s = time.monotonic() - observe_started
                     if obs.ok:
+                        # Auto-detect skeleton / loading (<=1 text element in content area below top bar)
+                        if obs.hierarchy_ok and len(obs.elements) > 3 and (raw_name in ("manage_app", "press_key") or settle_ms >= 1000):
+                            screen_height = obs.height or 2400
+                            content_y_threshold = screen_height * 0.15
+                            content_text_elements = [
+                                el for el in obs.elements
+                                if el.get("text") and el.get("center") and el["center"][1] > content_y_threshold
+                            ]
+                            if len(content_text_elements) <= 1:
+                                logger.info(
+                                    f"Screen appears to be skeleton/loading (content area below top bar has {len(content_text_elements)} text element); waiting additional 1.0s..."
+                                )
+                                obs = await session.observe(settle_ms=1000)
+
                         shot_path = obs.screenshot_path
                         xml_list = obs.elements_text
-                        if obs.hierarchy_ok:
-                            state.indexed_points = [el["center"] for el in obs.elements]
-                            state.indexed_elements = obs.elements
-                            state.screen_scrollable = obs.scrollable
                         if shot_path:
                             try:
                                 img_bytes = Path(shot_path).read_bytes()
                             except Exception as read_err:
                                 logger.warning(f"Failed to read observed screenshot: {read_err}")
+
+                        # Screen unchanged calculation combining XML elements and image dHash (app-agnostic)
+                        def _calc_unchanged(obs_res: Any, shot_data: bytes | None) -> tuple[bool, str, str | None]:
+                            sig = self._elements_signature(obs_res.elements)
+                            xml_same = bool(
+                                self._last_elements_signature is not None and sig == self._last_elements_signature
+                            )
+                            img_same = True
+                            img_h = dhash_hex(shot_data) if shot_data else None
+                            if self._last_image_hash and img_h:
+                                dist = hamming_distance_hex(img_h, self._last_image_hash)
+                                if dist is not None and dist > self._same_screen_max_distance:
+                                    img_same = False
+                            return (xml_same and img_same), sig, img_h
+
+                        screen_unchanged, curr_sig, curr_hash = _calc_unchanged(obs, img_bytes)
+
+                        # Retry observation if screen is unchanged immediately after a tap (permits page transition / bottom sheet to finish animation)
+                        if raw_name in _POINT_TARGET_ACTIONS and screen_unchanged:
+                            logger.info(
+                                "Screen unchanged immediately after tap; waiting 800ms for potential page transition..."
+                            )
+                            retry_obs = await session.observe(settle_ms=800)
+                            if retry_obs.ok:
+                                retry_shot = retry_obs.screenshot_path
+                                retry_bytes = None
+                                if retry_shot:
+                                    try:
+                                        retry_bytes = Path(retry_shot).read_bytes()
+                                    except Exception:
+                                        pass
+                                retry_unchanged, retry_sig, retry_h = _calc_unchanged(retry_obs, retry_bytes)
+                                if not retry_unchanged:
+                                    logger.info("Screen transition detected after 800ms settle delay.")
+                                    obs = retry_obs
+                                    shot_path = retry_shot
+                                    img_bytes = retry_bytes
+                                    xml_list = obs.elements_text
+                                    screen_unchanged = False
+                                    curr_sig = retry_sig
+                                    curr_hash = retry_h
+
+                        if screen_unchanged and obs.hierarchy_ok and obs.elements:
+                            form_notices = []
+                            for el in obs.elements:
+                                err = el.get("error")
+                                if err:
+                                    form_notices.append(f"Error: '{err}'")
+                                txt = str(el.get("text") or "")
+                                if txt and any(
+                                    kw in txt.lower()
+                                    for kw in ("vui lòng", "bắt buộc", "required", "invalid", "error", "không được để trống")
+                                ):
+                                    form_notices.append(f"Notice: '{txt}'")
+                            if form_notices:
+                                message += f" (Screen stayed; detected form feedback: {', '.join(form_notices[:2])})"
+
+                        self._last_elements_signature = curr_sig
+                        if curr_hash:
+                            self._last_image_hash = curr_hash
+
+                        if obs.hierarchy_ok:
+                            state.indexed_points = [el["center"] for el in obs.elements]
+                            state.indexed_elements = obs.elements
+                            state.screen_scrollable = obs.scrollable
+
+                        # Reset or update _last_point_action
+                        if raw_name in _POINT_TARGET_ACTIONS and target_coordinates:
+                            if screen_unchanged:
+                                self._last_point_action = {
+                                    "raw_name": raw_name,
+                                    "target_coordinates": target_coordinates,
+                                    "screen_unchanged": True,
+                                }
+                            else:
+                                self._last_point_action = None
+                        else:
+                            # Any non-point action (swipe, wait, press_key, etc.) resets point action guard
+                            self._last_point_action = None
+                elif res.ok and skip_observe:
+                    # Intermediate burst action: short delay between consecutive physical inputs
+                    await asyncio.sleep(0.1)
+                    if target_coordinates:
+                        self._last_point_action = {
+                            "raw_name": raw_name,
+                            "target_coordinates": target_coordinates,
+                            "screen_unchanged": False,
+                        }
+                    else:
+                        self._last_point_action = None
             except _ArgError as e:
                 res = ActionResult.failure(raw_name, str(e), code=ActionCode.INVALID_ARGS)
                 message = str(e)
@@ -262,6 +482,7 @@ class McpActionExecutor:
                 "normalized_coordinates": res.normalized_coordinates,
                 "target_semantics": target_semantics,
                 "target_coordinates": target_coordinates,
+                "timed_out": getattr(res, "timed_out", False),
                 # Wall time of the device action itself and of the post-action
                 # observation (settle + screenshot + UI hierarchy), in seconds.
                 "action_s": round(action_s, 3) if action_s is not None else None,
@@ -277,8 +498,8 @@ class McpActionExecutor:
         """
         if raw_name == "manage_app":
             return res.code not in (ActionCode.PACKAGE_NOT_FOUND, ActionCode.INVALID_ARGS)
-        if raw_name == "wait_for_text":
-            return res.code is ActionCode.TIMEOUT
+        if raw_name in ("wait_for_text", "wait_for_screen_change", "wait_until_gone"):
+            return res.code is ActionCode.TIMEOUT or res.code is ActionCode.DEVICE_ERROR
         return False
 
     # --- Argument translation --------------------------------------------------------
@@ -303,7 +524,7 @@ class McpActionExecutor:
         """
         if raw_name == "click":
             target, recorded = self._resolve_target(
-                args.get("target") or args.get("coordinates"),
+                args.get("target") or args.get("coordinates") or args.get("target_text"),
                 "click",
                 args,
                 state,
@@ -322,7 +543,7 @@ class McpActionExecutor:
 
         if raw_name == "long_press":
             target, recorded = self._resolve_target(
-                args.get("target") or args.get("coordinates"),
+                args.get("target") or args.get("coordinates") or args.get("target_text"),
                 "long press",
                 args,
                 state,
@@ -339,7 +560,7 @@ class McpActionExecutor:
             )
 
         if raw_name == "input_text":
-            raw_target = args.get("target") or args.get("coordinates")
+            raw_target = args.get("target") or args.get("coordinates") or args.get("target_text")
             target = None
             recorded = {}
             if raw_target:
@@ -390,13 +611,42 @@ class McpActionExecutor:
         if raw_name == "wait_for_delay":
             return "wait_for_delay", {"time_in_ms": args.get("time_in_ms", 1000)}, None, {}
 
+        if raw_name == "wait_for_screen_change":
+            timeout_s = args.get("timeout_s")
+            timeout_ms = int(timeout_s * 1000) if timeout_s is not None else args.get("timeout_ms", 25000)
+            return (
+                "wait_for_screen_change",
+                {
+                    "timeout_ms": timeout_ms,
+                    "region": args.get("region"),
+                },
+                None,
+                {},
+            )
+
         if raw_name == "wait_for_text":
+            timeout_s = args.get("timeout_s")
+            timeout_ms = int(timeout_s * 1000) if timeout_s is not None else args.get("timeout_ms", 8000)
             return (
                 "wait_for_text",
                 {
                     "text": args.get("text", ""),
                     "wait_state": args.get("wait_state") or "appear",
-                    "timeout_ms": args.get("timeout_ms", 5000),
+                    "timeout_ms": timeout_ms,
+                },
+                None,
+                {},
+            )
+
+        if raw_name == "wait_until_gone":
+            timeout_s = args.get("timeout_s")
+            timeout_ms = int(timeout_s * 1000) if timeout_s is not None else args.get("timeout_ms", 15000)
+            return (
+                "wait_for_text",
+                {
+                    "text": args.get("text", ""),
+                    "wait_state": "disappear",
+                    "timeout_ms": timeout_ms,
                 },
                 None,
                 {},
@@ -415,6 +665,97 @@ class McpActionExecutor:
             height if isinstance(height, int) and height > 0 else 2400,
         )
 
+    def _resolve_target_text(
+        self,
+        target_text: str,
+        label: str,
+        state: Any,
+        *,
+        index_elements: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[int], dict[str, Any]]:
+        target_clean = target_text.strip()
+        if not target_clean:
+            raise _ArgError(f"Error during {label}: target_text cannot be empty.")
+
+        # 1. Commitment Guard: Never allow commitment button targeting via target_text on unseen screens
+        from artemis.utils.screen_diff import COMMITMENT_PATTERN, find_matching_text_elements
+
+        if COMMITMENT_PATTERN.search(target_clean):
+            raise _ArgError(
+                f"Commitment Guard: Action '{label}' targeting commitment text '{target_clean}' "
+                f"cannot be executed via target_text. Please verify the screen and use element index or explicit confirmation."
+            )
+
+        elements = self._index_elements(state, index_elements) if state is not None else index_elements
+        width, height = self._screen_size()
+
+        matches = find_matching_text_elements(elements, target_clean, width=width, height=height)
+
+        if not matches:
+            raise _ArgError(
+                f"Anchor Guard: target_text '{target_clean}' for {label} was not found on screen. "
+                f"Aborting chain to request fresh AI observation."
+            )
+
+        # 2. Ambiguity Guard: Multiple candidates with top match score at different screen locations
+        top_score = matches[0].get("_match_score", 1)
+        top_matches = [m for m in matches if m.get("_match_score") == top_score]
+        if len(top_matches) > 1:
+            centers = []
+            for m in top_matches:
+                c = m.get("center")
+                if not c:
+                    b = m.get("_parsed_bounds") or m.get("bounds")
+                    if isinstance(b, (list, tuple)) and len(b) == 4:
+                        c = [(b[0] + b[2]) // 2, (b[1] + b[3]) // 2]
+                if c:
+                    centers.append(c)
+            if len(centers) > 1:
+                c0 = centers[0]
+                distinct = any(abs(c[0] - c0[0]) > 40 or abs(c[1] - c0[1]) > 40 for c in centers[1:])
+                if distinct:
+                    raise _ArgError(
+                        f"Anchor Guard: target_text '{target_clean}' for {label} is ambiguous "
+                        f"({len(top_matches)} matches found at different positions). "
+                        f"Aborting chain to request AI decision."
+                    )
+
+        best_match = matches[0]
+
+        # 3. Occlusion Guard
+        if best_match.get("occluded") or best_match.get("is_occluded"):
+            raise _ArgError(
+                f"Anchor Guard: target_text '{target_clean}' for {label} is occluded or obscured. "
+                f"Aborting chain."
+            )
+
+        # 4. Resolve normalized [x, y] coordinates
+        center = best_match.get("center")
+        if center and len(center) == 2:
+            nx = int(max(0, min(1000, round(center[0] * 1000 / max(1, width)))))
+            ny = int(max(0, min(1000, round(center[1] * 1000 / max(1, height)))))
+            point = [nx, ny]
+        else:
+            bounds = best_match.get("_parsed_bounds") or best_match.get("bounds")
+            if bounds and len(bounds) == 4:
+                l, t, r, b = bounds
+                cx = (l + r) // 2
+                cy = (t + b) // 2
+                nx = int(max(0, min(1000, round(cx * 1000 / max(1, width)))))
+                ny = int(max(0, min(1000, round(cy * 1000 / max(1, height)))))
+                point = [nx, ny]
+            else:
+                raise _ArgError(f"Anchor Guard: target_text '{target_clean}' has no valid coordinates.")
+
+        recorded = {
+            "target_text": target_clean,
+            "target_bounds": best_match.get("bounds"),
+            "target_class": best_match.get("class"),
+            "target_resource_id": best_match.get("resource_id") or best_match.get("resource-id"),
+            "snapped_to_text": best_match.get("text") or target_clean,
+        }
+        return point, recorded
+
     def _resolve_target(
         self,
         raw: Any,
@@ -429,7 +770,12 @@ class McpActionExecutor:
         An element index carries observed semantics (text, bounds, id, class
         straight from the indexed list); a coordinate pair carries only the
         model's own ``target_description``. The two never mix (Pro parity).
+        Supports dynamic element targeting via ``target_text`` with Anchor Guard.
         """
+        target_text_val = args.get("target_text")
+        if target_text_val:
+            return self._resolve_target_text(str(target_text_val).strip(), label, state, index_elements=index_elements)
+
         target = normalize_coordinate_target(raw)
         if isinstance(target, bool):
             target = None

@@ -88,8 +88,16 @@ class Actuator(Protocol):
 
     async def wait_for_delay(self, time_in_ms: int) -> ActionResult: ...
 
+    async def wait_for_screen_change(
+        self, timeout_ms: int = 25000, region: list[int] | None = None
+    ) -> ActionResult: ...
+
     async def wait_for_text(
-        self, text: str, wait_state: str | None = None, timeout_ms: int | None = None
+        self, text: str | list[str], wait_state: str | None = None, timeout_ms: int | None = None
+    ) -> ActionResult: ...
+
+    async def wait_until_gone(
+        self, text: str | list[str], timeout_ms: int = 15000
     ) -> ActionResult: ...
 
     async def open_link(self, url: str) -> ActionResult: ...

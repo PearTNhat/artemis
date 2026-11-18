@@ -273,6 +273,9 @@ LIST_NOTES_TOOL = ToolDeclaration(
 MANAGE_APP_TOOL = tool_declaration("manage_app")
 
 WAIT_FOR_DELAY_TOOL = tool_declaration("wait_for_delay")
+WAIT_FOR_SCREEN_CHANGE_TOOL = tool_declaration("wait_for_screen_change")
+WAIT_FOR_TEXT_TOOL = tool_declaration("wait_for_text")
+WAIT_UNTIL_GONE_TOOL = tool_declaration("wait_until_gone")
 
 REPORT_TASK_STATUS_TOOL = ToolDeclaration(
     name="report_task_status",

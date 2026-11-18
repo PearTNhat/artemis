@@ -134,3 +134,77 @@ async def test_agenerate_parses_reply_into_tool_calls(monkeypatch, tmp_path):
     assert result.usage_metadata["total_tokens"] == 120
     session = next(iter(model._sessions.values()))
     assert result.id in session.reply_ids
+
+
+@pytest.mark.asyncio
+async def test_agenerate_recycles_session_when_threshold_exceeded(monkeypatch, tmp_path):
+    model = AgyChatModel(max_context_tokens=500).bind_tools([CLICK])
+    closed = []
+
+    async def fake_start(self):
+        self.proc = SimpleNamespace(returncode=None)
+        self.workdir = str(tmp_path)
+
+    async def fake_ask(self, text):
+        return {
+            "status": "SUCCESS",
+            "response": json.dumps({"thought": "Done.", "tool_calls": []}),
+            "usage": {"input_tokens": 800, "output_tokens": 10, "total_tokens": 810},
+        }
+
+    async def fake_close(self, keep_files=False):
+        closed.append(True)
+
+    monkeypatch.setattr(agy_model._AgySession, "_start", fake_start)
+    monkeypatch.setattr(agy_model._AgySession, "ask", fake_ask)
+    monkeypatch.setattr(agy_model._AgySession, "close", fake_close)
+
+    await model.ainvoke([SystemMessage(content="S2"), HumanMessage(content="o1")])
+    assert len(closed) == 1
+    # The session key should have been evicted from model._sessions
+    assert len(model._sessions) == 0
+
+
+@pytest.mark.asyncio
+async def test_agenerate_recycles_session_on_delta_threshold(monkeypatch, tmp_path):
+    model = AgyChatModel(max_context_tokens=750, context_delta_tokens=150).bind_tools([CLICK])
+    closed = []
+    tokens_sequence = [600, 700, 800]
+    call_idx = 0
+
+    async def fake_start(self):
+        self.proc = SimpleNamespace(returncode=None)
+        self.workdir = str(tmp_path)
+
+    async def fake_ask(self, text):
+        nonlocal call_idx
+        inp = tokens_sequence[min(call_idx, len(tokens_sequence) - 1)]
+        call_idx += 1
+        return {
+            "status": "SUCCESS",
+            "response": json.dumps({"thought": f"Step {call_idx}", "tool_calls": []}),
+            "usage": {"input_tokens": inp, "output_tokens": 10, "total_tokens": inp + 10},
+        }
+
+    async def fake_close(self, keep_files=False):
+        closed.append(True)
+
+    monkeypatch.setattr(agy_model._AgySession, "_start", fake_start)
+    monkeypatch.setattr(agy_model._AgySession, "ask", fake_ask)
+    monkeypatch.setattr(agy_model._AgySession, "close", fake_close)
+
+    # Turn 1: initial tokens = 600, delta = 0 -> should NOT recycle
+    await model.ainvoke([SystemMessage(content="S2"), HumanMessage(content="turn 1")])
+    assert len(closed) == 0
+    assert len(model._sessions) == 1
+
+    # Turn 2: tokens = 700, delta = 100 < 150 -> should NOT recycle
+    await model.ainvoke([SystemMessage(content="S2"), HumanMessage(content="turn 2")])
+    assert len(closed) == 0
+    assert len(model._sessions) == 1
+
+    # Turn 3: tokens = 800, delta = 200 >= 150 -> SHOULD recycle!
+    await model.ainvoke([SystemMessage(content="S2"), HumanMessage(content="turn 3")])
+    assert len(closed) == 1
+    assert len(model._sessions) == 0
+

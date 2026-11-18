@@ -82,10 +82,9 @@ OPTIONAL_ACTIONS: frozenset[str] = frozenset(
         "press_key",
         "manage_app",
         "wait_for_delay",
-        # The four below appear in no prompt at all. `wait_for_text` corroborates the
-        # classification: the former legacy executor dispatched it, but it has never had
-        # a ToolDeclaration, i.e. it has always been unreachable by any LLM.
+        "wait_for_screen_change",
         "wait_for_text",
+        "wait_until_gone",
         "open_link",
         "erase_one_char",
         "focus_and_clear_text",

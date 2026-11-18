@@ -103,6 +103,7 @@ def _runner(mock_context, observations):
     with patch("artemis.controllers.unified_controller.get_driver"):
         runner = FlashRunner(mock_context, goal="Open Wi-Fi and Display")
     runner.summarizer = None
+    runner.fast_burst = False
     runner.executor._session = _FakeSession(observations)
     # No device: the executor's observation already refreshed the state.
     runner._capture_post_screenshot = AsyncMock(return_value=None)
@@ -300,3 +301,137 @@ async def test_explorer_after_an_action_moves_the_snapshot_to_the_list_it_number
 
     session = runner.executor._session
     assert [args["target"] for _, args in session.calls] == [[500, 417], [185, 833]]
+
+
+@pytest.mark.asyncio
+async def test_index_click_after_wait_step_in_burst_is_aborted(mock_context):
+    """Bug a: [wait_for_text, click(5)] -> index 5 is from the old screen before waiting.
+
+    The runner must abort the burst to prevent blind index resolution on the new screen.
+    """
+    runner = _runner(mock_context, observations=[REFRESHED, [_el(1, "New Screen", 1, 1)]])
+    state = _state(ORIGINAL)
+    messages: list = []
+    turn = _TurnRecord()
+
+    await runner._process_tool_calls(
+        [
+            {"name": "wait_for_text", "args": {"text": "Wi-Fi"}, "id": "tc-wait"},
+            _click(5, "tc-click"),
+        ],
+        state,
+        messages,
+        "thought",
+        {},
+        b"pre",
+        "xml",
+        0,
+        turn,
+    )
+
+    # Only wait was executed on session; index click was intercepted by safety guard
+    session = runner.executor._session
+    assert [name for name, _ in session.calls] == ["wait_for_text"]
+    tool_msgs = [m for m in messages if isinstance(m, ToolMessage)]
+    assert len(tool_msgs) == 2
+    assert tool_msgs[0].status == "success"
+    assert tool_msgs[1].status == "error"
+    assert "targets an index or coordinate from an earlier screen" in tool_msgs[1].content
+
+
+@pytest.mark.asyncio
+async def test_target_text_click_after_wait_step_in_burst_is_allowed(mock_context):
+    """[wait_for_text, click(target_text=...)] -> target_text is explicitly permitted after wait."""
+    runner = _runner(mock_context, observations=[REFRESHED, [_el(1, "Confirm", 500, 1000)]])
+    confirm_data = Mock(elements=[_el(1, "Confirm", 500, 1000)], width=1080, height=2400)
+    runner.controller.get_screen_data = AsyncMock(return_value=confirm_data)
+    state = _state(ORIGINAL)
+    messages: list = []
+    turn = _TurnRecord()
+
+    await runner._process_tool_calls(
+        [
+            {"name": "wait_for_text", "args": {"text": "Wi-Fi"}, "id": "tc-wait"},
+            {"name": "click", "args": {"target_text": "Confirm"}, "id": "tc-click"},
+        ],
+        state,
+        messages,
+        "thought",
+        {},
+        b"pre",
+        "xml",
+        0,
+        turn,
+    )
+
+    session = runner.executor._session
+    assert [name for name, _ in session.calls] == ["wait_for_text", "click"]
+    tool_msgs = [m for m in messages if isinstance(m, ToolMessage)]
+    assert len(tool_msgs) == 2
+    assert tool_msgs[0].status == "success"
+    assert tool_msgs[1].status == "success"
+
+
+@pytest.mark.asyncio
+async def test_targetless_actions_allowed_after_wait_step(mock_context):
+    """Targetless actions (press_key, input_text without target) are allowed after wait."""
+    runner = _runner(mock_context, observations=[REFRESHED])
+    state = _state(ORIGINAL)
+    messages: list = []
+    turn = _TurnRecord()
+
+    await runner._process_tool_calls(
+        [
+            {"name": "wait_for_text", "args": {"text": "Wi-Fi"}, "id": "tc-wait"},
+            {"name": "input_text", "args": {"text": "phở"}, "id": "tc-input"},
+            {"name": "press_key", "args": {"key": "ENTER"}, "id": "tc-key"},
+        ],
+        state,
+        messages,
+        "thought",
+        {},
+        b"pre",
+        "xml",
+        0,
+        turn,
+    )
+
+    session = runner.executor._session
+    assert [name for name, _ in session.calls] == ["wait_for_text", "input_text", "press_key"]
+    tool_msgs = [m for m in messages if isinstance(m, ToolMessage)]
+    assert len(tool_msgs) == 3
+    assert all(m.status == "success" for m in tool_msgs)
+
+
+@pytest.mark.asyncio
+async def test_index_click_after_target_text_click_is_aborted(mock_context):
+    """[click(target_text=...), click(5)] -> target_text sets has_waited=True; subsequent index click is aborted."""
+    runner = _runner(mock_context, observations=[REFRESHED, [_el(1, "Search", 500, 1000)]])
+    state = _state(ORIGINAL)
+    messages: list = []
+    turn = _TurnRecord()
+
+    await runner._process_tool_calls(
+        [
+            {"name": "click", "args": {"target_text": "Search"}, "id": "tc-target-text"},
+            _click(5, "tc-click-5"),
+        ],
+        state,
+        messages,
+        "thought",
+        {},
+        b"pre",
+        "xml",
+        0,
+        turn,
+    )
+
+    session = runner.executor._session
+    # First click executed, second click intercepted because has_waited is set to True after target_text action
+    assert [name for name, _ in session.calls] == ["click"]
+    tool_msgs = [m for m in messages if isinstance(m, ToolMessage)]
+    assert len(tool_msgs) == 2
+    assert tool_msgs[0].status == "success"
+    assert tool_msgs[1].status == "error"
+    assert "targets an index or coordinate from an earlier screen" in tool_msgs[1].content
+

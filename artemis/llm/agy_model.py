@@ -86,7 +86,7 @@ You are the reasoning engine behind an Android automation agent (ARTEMIS). You d
 - Deliver your decision by calling your `finish` tool right away with this JSON object as the result (never write it as a plain text message first):
   {"thought": "<your reasoning about the phone: what the screen shows, what changed, why this action>", "tool_calls": [{"name": "<device tool>", "args": {...}}]}
   The thought is shown to the user as the agent's reasoning: never mention these protocol rules, read_file, finish or file names in it.
-- The device tools below are executed by the agent after your reply; their results and a new observation arrive in the next message. Put several calls in tool_calls only where the instructions allow it.
+- The device tools below are executed by the agent after your reply; their results and a new observation arrive in the next message. You can put several calls in tool_calls executed SEQUENTIALLY (e.g. input text followed by Enter, or multiple taps followed by waiting for the result). Choose event-driven wait tools: `wait_for_text` when specific text will appear, `wait_until_gone` when a loading spinner will vanish, or `wait_for_screen_change` when waiting for an opponent's move in chess or an incoming message. Use `target_text` for elements on upcoming screens. If a wait tool hands over on timeout, inspect the attached screenshot to see if the app is still loading or the opponent is still thinking before deciding.
 
 # DEVICE TOOLS (JSON schemas)
 """
@@ -145,6 +145,7 @@ class _AgySession:
         self.reply_ids: set[str] = set()
         self.tool_names: tuple[str, ...] = ()
         self.image_seq = 0
+        self.initial_input_tokens: int | None = None
 
     @property
     def alive(self) -> bool:
@@ -265,6 +266,8 @@ class AgyChatModel(BaseChatModel):
     agy_bin: str = "agy"
     turn_timeout_s: float = 240.0
     bound_tools: list[dict[str, Any]] = []
+    max_context_tokens: int = 80_000
+    context_delta_tokens: int = 15_000
 
     _sessions: "OrderedDict[str, _AgySession]" = PrivateAttr(default_factory=OrderedDict)
 
@@ -280,10 +283,13 @@ class AgyChatModel(BaseChatModel):
 
     # -- conversation bookkeeping --------------------------------------------------
 
-    def _session_for(self, messages: list[BaseMessage]) -> _AgySession:
+    def _session_for(self, messages: list[BaseMessage]) -> tuple[_AgySession, str]:
         system = next((m for m in messages if isinstance(m, SystemMessage)), None)
         key = hashlib.sha256(_text_of(system.content if system else "").encode()).hexdigest()
         session = self._sessions.get(key)
+        if session is not None and not session.alive:
+            self._sessions.pop(key, None)
+            session = None
         if session is None:
             session = _AgySession(self.agy_bin, self.model_name, self.turn_timeout_s)
             _ALL_SESSIONS.append(session)
@@ -292,7 +298,7 @@ class AgyChatModel(BaseChatModel):
                 _, old = self._sessions.popitem(last=False)
                 asyncio.ensure_future(old.close())
         self._sessions.move_to_end(key)
-        return session
+        return session, key
 
     def _tool_names(self) -> tuple[str, ...]:
         return tuple(t.get("function", {}).get("name", "") for t in self.bound_tools)
@@ -371,7 +377,7 @@ class AgyChatModel(BaseChatModel):
         run_manager: AsyncCallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        session = self._session_for(messages)
+        session, key = self._session_for(messages)
         async with session.lock:
             if not session.alive:
                 # A fresh process knows nothing: _build_turn then sends it all.
@@ -382,6 +388,9 @@ class AgyChatModel(BaseChatModel):
                 raise AgyError(f"agy returned {result.get('status')}: {result.get('error')}")
             thought, calls = parse_reply(str(result.get("response") or ""))
             usage = result.get("usage") or {}
+            input_tokens = int(usage.get("input_tokens") or 0)
+            output_tokens = int(usage.get("output_tokens") or 0)
+            total_tokens = int(usage.get("total_tokens") or 0)
             reply = AIMessage(
                 id=f"agy-{uuid.uuid4().hex[:16]}",
                 content=thought,
@@ -391,12 +400,50 @@ class AgyChatModel(BaseChatModel):
                 ],
                 response_metadata={"agy": result.get("_profile") or {}},
                 usage_metadata={
-                    "input_tokens": int(usage.get("input_tokens") or 0),
-                    "output_tokens": int(usage.get("output_tokens") or 0),
-                    "total_tokens": int(usage.get("total_tokens") or 0),
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": total_tokens,
                 },
             )
             session.reply_ids.add(reply.id)
+
+            # Context auto-compaction: recycle the agy session if token delta threshold is exceeded
+            measured_tokens = input_tokens or (len(turn) // 4)
+            if session.initial_input_tokens is None:
+                session.initial_input_tokens = measured_tokens
+                logger.info(
+                    f"Agy session initial input tokens recorded: {measured_tokens}"
+                )
+
+            token_delta = measured_tokens - session.initial_input_tokens
+            should_recycle = False
+            recycle_reason = ""
+            if (
+                self.max_context_tokens
+                and measured_tokens >= self.max_context_tokens
+                and self.context_delta_tokens
+                and token_delta >= self.context_delta_tokens
+            ):
+                should_recycle = True
+                recycle_reason = (
+                    f"context tokens {measured_tokens} >= {self.max_context_tokens} "
+                    f"AND delta {token_delta} >= {self.context_delta_tokens} "
+                    f"(initial: {session.initial_input_tokens})"
+                )
+            elif self.max_context_tokens and measured_tokens >= int(self.max_context_tokens * 1.5):
+                should_recycle = True
+                recycle_reason = (
+                    f"hard safety ceiling reached: {measured_tokens} tokens "
+                    f"(>= {int(self.max_context_tokens * 1.5)})"
+                )
+
+            if should_recycle:
+                logger.info(
+                    f"Recycling agy session: {recycle_reason}. Next turn will start fresh session with compressed transcript."
+                )
+                await session.close()
+                self._sessions.pop(key, None)
+
         return ChatResult(generations=[ChatGeneration(message=reply)])
 
     def _generate(

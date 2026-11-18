@@ -52,6 +52,7 @@ class ActionResult(BaseModel):
     """Raw driver/controller error for diagnostics; never shown to the LLM."""
     normalized_coordinates: list[int] | None = None
     duration_ms: int | None = None
+    timed_out: bool = False
 
     @classmethod
     def success(cls, action: str, message: str, **kwargs: Any) -> "ActionResult":

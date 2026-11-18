@@ -44,6 +44,9 @@ OPERATOR_ACTION_TO_CANONICAL: dict[str, str] = {
     "stop_app": "manage_app",
     "open_link": "open_link",
     "wait_for_delay": "wait_for_delay",
+    "wait_for_screen_change": "wait_for_screen_change",
+    "wait_for_text": "wait_for_text",
+    "wait_until_gone": "wait_until_gone",
 }
 
 
@@ -168,5 +171,24 @@ def to_canonical_call(
 
     if verb == "wait_for_delay":
         return "wait_for_delay", {"time_in_ms": action_item.get("time_in_ms", 0)}
+
+    if verb == "wait_for_screen_change":
+        return "wait_for_screen_change", {
+            "timeout_ms": action_item.get("timeout_ms", 25000),
+            "region": action_item.get("region"),
+        }
+
+    if verb == "wait_for_text":
+        return "wait_for_text", {
+            "text": action_item.get("text", ""),
+            "wait_state": action_item.get("wait_state", "appear"),
+            "timeout_ms": action_item.get("timeout_ms", 8000),
+        }
+
+    if verb == "wait_until_gone":
+        return "wait_until_gone", {
+            "text": action_item.get("text", ""),
+            "timeout_ms": action_item.get("timeout_ms", 15000),
+        }
 
     raise ValueError(f"Unsupported action: {verb}")

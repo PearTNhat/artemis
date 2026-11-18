@@ -22,11 +22,12 @@ sequence must be described too. Nothing is inferred, the description never
 reaches the wire, and the wire only ever sees coordinates.
 """
 
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from artemis.mcp.action_executor import McpActionExecutor, _ArgError
+from artemis.mcp.action_types import ActionCode
 
 
 def _make_executor(width=1080, height=2400):
@@ -347,3 +348,147 @@ def test_click_sequence_accepts_a_serialized_pair_list():
         _state(),
     )
     assert wire_args["sequence"] == [[500, 600], [10, 10]]
+
+
+def test_determine_settle_ms_app_agnostic():
+    executor = _make_executor()
+    # App launch gets 1500ms
+    assert executor._determine_settle_ms("manage_app", {}, {}) == 1500
+    # Enter / Search key gets 1000ms
+    assert executor._determine_settle_ms("press_key", {"key": "ENTER"}, {}) == 1000
+    assert executor._determine_settle_ms("press_key", {"keycode": "66"}, {}) == 1000
+    # Regular clicks (even with previously Grab-specific keywords like basket, cart, search) get 400ms
+    assert executor._determine_settle_ms("click", {"target_description": "basket button"}, {}) == 400
+    assert executor._determine_settle_ms("click", {"target_description": "search box"}, {}) == 400
+    assert executor._determine_settle_ms("click", {"target_description": "phở tái bò viên"}, {}) == 400
+
+
+@pytest.mark.asyncio
+async def test_repeated_tap_allowed_when_screen_changed_or_after_intervening_action():
+    executor = _make_executor()
+    executor.actuator.extensions.return_value = []
+    state = _state()
+    state.indexed_elements = [
+        {"index": 1, "text": "Item 1", "center": [100, 100]},
+        {"index": 2, "text": "Confirm", "center": [500, 500]},
+    ]
+
+    session_mock = Mock()
+    session_mock.started = True
+    session_mock.call = AsyncMock()
+    session_mock.observe = AsyncMock()
+    obs_mock = Mock()
+    obs_mock.ok = True
+    obs_mock.hierarchy_ok = True
+    obs_mock.elements = state.indexed_elements
+    obs_mock.screenshot_path = None
+    obs_mock.elements_text = ""
+    obs_mock.scrollable = None
+    obs_mock.height = 2400
+    session_mock.observe.return_value = obs_mock
+    res_mock = Mock()
+    res_mock.ok = True
+    res_mock.message = "Tapped"
+    res_mock.code = ActionCode.OK
+    session_mock.call.return_value = res_mock
+    executor._session = session_mock
+
+    # Case 1: Prior tap had screen_unchanged = False (e.g. chessboard visual highlight / move changed image)
+    executor._last_point_action = None
+    res1 = await executor.execute(
+        "click",
+        {"target": [500, 500], "target_description": "chess tile or button"},
+        "call_1",
+        state,
+    )
+    assert res1.status == "success"
+
+    # Case 2: Consecutive duplicate tap with unchanged screen is rejected
+    executor._last_point_action = {
+        "raw_name": "click",
+        "target_coordinates": [500, 500],
+        "screen_unchanged": True,
+    }
+    res_reject = await executor.execute(
+        "click",
+        {"target": [500, 500], "target_description": "chess tile or button"},
+        "call_2",
+        state,
+    )
+    assert res_reject.status == "error"
+    assert "Repeated tap rejected" in res_reject.text_summary
+
+    # Case 3: An intervening action (swipe or wait) resets _last_point_action
+    await executor.execute(
+        "swipe",
+        {"direction": "up"},
+        "call_swipe",
+        state,
+    )
+    assert executor._last_point_action is None
+
+    # After intervening action, tapping the same point again is now allowed!
+    res3 = await executor.execute(
+        "click",
+        {"target": [500, 500], "target_description": "retry button"},
+        "call_3",
+        state,
+    )
+    assert res3.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_screen_transition_retry_when_unchanged_after_tap():
+    executor = _make_executor()
+    executor.actuator.extensions.return_value = []
+    state = _state()
+    state.indexed_elements = [{"index": 1, "text": "Basket", "center": [500, 900]}]
+
+    session_mock = Mock()
+    session_mock.started = True
+    session_mock.call = AsyncMock()
+    session_mock.observe = AsyncMock()
+
+    # Initial observation: same screen (Basket button)
+    obs1 = Mock(
+        ok=True,
+        hierarchy_ok=True,
+        elements=state.indexed_elements,
+        screenshot_path=None,
+        elements_text="[1] Basket",
+        scrollable=None,
+        height=2400,
+    )
+    # Retry observation after 800ms: cart page opened!
+    new_elements = [{"index": 1, "text": "Cart Items", "center": [500, 300]}]
+    obs2 = Mock(
+        ok=True,
+        hierarchy_ok=True,
+        elements=new_elements,
+        screenshot_path=None,
+        elements_text="[1] Cart Items",
+        scrollable=None,
+        height=2400,
+    )
+    session_mock.observe.side_effect = [obs1, obs2]
+    res_mock = Mock(ok=True, message="Tapped", code=ActionCode.OK)
+    session_mock.call.return_value = res_mock
+    executor._session = session_mock
+
+    # Set prior signature to match obs1 so first observe looks unchanged
+    import hashlib
+    parts = [f"{el.get('text')}:{el.get('center')}:{el.get('checked')}:{el.get('selected')}:{el.get('error')}" for el in obs1.elements]
+    executor._last_elements_signature = hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()
+
+    res = await executor.execute(
+        "click",
+        {"target": [500, 900], "target_description": "basket button"},
+        "call_tap",
+        state,
+    )
+    assert res.status == "success"
+    # observe should have been called twice (initial + 800ms retry)
+    assert session_mock.observe.call_count == 2
+    # And state was updated with new_elements from obs2
+    assert state.indexed_elements == new_elements
+

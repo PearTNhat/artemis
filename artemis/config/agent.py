@@ -773,6 +773,10 @@ class FlashProfileConfig(BaseModel):
         default="flash",
         description="Perception mode for Flash runner ('flash' for 1-shot detection).",
     )
+    fast_burst: bool = Field(
+        default=False,
+        description="Whether to execute multi-action turns as fast bursts without intermediate screen captures.",
+    )
     step_summarizer: StepSummarizerConfig = Field(
         default_factory=StepSummarizerConfig,
         description="Asynchronous visual context compressor settings.",

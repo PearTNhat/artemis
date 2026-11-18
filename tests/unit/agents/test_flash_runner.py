@@ -556,3 +556,127 @@ async def test_final_report_persists_native_thinking(mock_context):
     assert kwargs["operator_raw_thinking"] == "final text"
     assert kwargs["operator_native_thinking"] == "native summary"
     assert isinstance(messages[-1], ToolMessage)
+
+
+def test_build_tail_scroll_signals(mock_context):
+    with patch("artemis.controllers.unified_controller.get_driver"):
+        runner = FlashRunner(mock_context, goal="g")
+    ledger_mock = Mock()
+    ledger_mock.elapsed_label.return_value = "T+00:15"
+
+    # Level 1: scrollable is True
+    tail1 = runner._build_tail(ledger_mock, 1, None, None, scrollable=True)
+    assert "[Scroll: scrollable container detected]" in tail1.content[0]["text"]
+    assert "more content below" not in tail1.content[0]["text"]
+
+    # Level 2: scrollable is False with XML present
+    tail2 = runner._build_tail(ledger_mock, 1, None, "[1] Button: 'OK'", scrollable=False)
+    assert "[Scroll: fixed layout (no scrollable container — scrolling is unlikely to reveal anything)]" in tail2.content[0]["text"]
+
+    # Level 3: scrollable is False without XML (Flutter/Canvas)
+    tail3 = runner._build_tail(ledger_mock, 1, None, None, scrollable=False)
+    assert "[Scroll: unknown]" in tail3.content[0]["text"]
+
+    # Level 4: scrollable is None (no scroll line appended)
+    tail4 = runner._build_tail(ledger_mock, 1, None, None, scrollable=None)
+    assert "[Scroll:" not in tail4.content[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_process_tool_calls_aborts_mid_burst_commitment(mock_context):
+    with patch("artemis.controllers.unified_controller.get_driver"):
+        runner = FlashRunner(mock_context, goal="Order food")
+    runner.fast_burst = True
+    runner.executor = Mock()
+    runner.executor.action_tool_names = frozenset(["click", "swipe"])
+    runner._execute_and_record_action = AsyncMock()
+
+    state = SimpleNamespace(
+        indexed_elements=[
+            {"index": 1, "text": "Item 1", "center": [100, 100]},
+            {"index": 2, "text": "Place Order", "center": [500, 900]},
+            {"index": 3, "text": "Next", "center": [500, 1000]},
+        ]
+    )
+    turn = SimpleNamespace(step_keys=[], actions=[])
+    messages = []
+
+    # Sequence of 3 tool calls: click(1) [Item 1], click(2) [Place Order], click(3) [Next]
+    tool_calls = [
+        {"name": "click", "args": {"target": 1}, "id": "call-1"},
+        {"name": "click", "args": {"target": 2}, "id": "call-2"},
+        {"name": "click", "args": {"target": 3}, "id": "call-3"},
+    ]
+
+    # First call succeeds
+    runner._execute_and_record_action.return_value = (b"img", "xml", 1)
+
+    with patch("artemis.agents.flash.runner.observe", new_callable=AsyncMock) as mock_obs:
+        obs_res = Mock()
+        obs_res.ok = True
+        obs_res.elements_text = "new_xml"
+        obs_res.elements = []
+        obs_res.hierarchy_ok = True
+        obs_res.screenshot_path = "shot.png"
+        mock_obs.return_value = (obs_res, b"obs_shot")
+
+        await runner._process_tool_calls(
+            tool_calls, state, messages, "raw", {}, b"pre", "xml", 0, turn
+        )
+
+    # First call executed
+    assert runner._execute_and_record_action.call_count == 1
+    # Place Order was NOT executed
+    # Messages should contain call-1 (from executor mock, here 0 since mock didn't append),
+    # but call-2 and call-3 MUST have ToolMessage with status="error"
+    error_msgs = [m for m in messages if isinstance(m, ToolMessage) and m.status == "error"]
+    assert len(error_msgs) == 2
+    assert error_msgs[0].tool_call_id == "call-2"
+    assert "Safety guard" in error_msgs[0].content
+    assert error_msgs[1].tool_call_id == "call-3"
+    assert "Burst was aborted" in error_msgs[1].content
+
+
+@pytest.mark.asyncio
+async def test_process_tool_calls_aborts_on_failure(mock_context):
+    with patch("artemis.controllers.unified_controller.get_driver"):
+        runner = FlashRunner(mock_context, goal="Test")
+    runner.fast_burst = True
+    runner.executor = Mock()
+    runner.executor.action_tool_names = frozenset(["click"])
+
+    state = SimpleNamespace(indexed_elements=[])
+    turn = SimpleNamespace(step_keys=[], actions=[])
+    messages = []
+
+    async def fake_exec_fail(*args, **kwargs):
+        turn.actions.append(("click", "error", "Element not found"))
+        return b"pre", "xml", 1
+
+    runner._execute_and_record_action = fake_exec_fail
+
+    tool_calls = [
+        {"name": "click", "args": {"target": [100, 100], "target_description": "btn1"}, "id": "call-1"},
+        {"name": "click", "args": {"target": [200, 200], "target_description": "btn2"}, "id": "call-2"},
+    ]
+
+    with patch("artemis.agents.flash.runner.observe", new_callable=AsyncMock) as mock_obs:
+        obs_res = Mock()
+        obs_res.ok = True
+        obs_res.elements_text = "new_xml"
+        obs_res.elements = []
+        obs_res.hierarchy_ok = True
+        obs_res.screenshot_path = "shot.png"
+        mock_obs.return_value = (obs_res, b"obs_shot")
+
+        await runner._process_tool_calls(
+            tool_calls, state, messages, "raw", {}, b"pre", "xml", 0, turn
+        )
+
+    # Only call-1 was attempted
+    assert len(turn.actions) == 1
+    # call-2 must be skipped with ToolMessage
+    skipped = [m for m in messages if isinstance(m, ToolMessage) and m.tool_call_id == "call-2"]
+    assert len(skipped) == 1
+    assert "Burst was aborted due to previous action failure" in skipped[0].content
+

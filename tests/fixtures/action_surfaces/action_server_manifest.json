@@ -99,6 +99,11 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
         }
       },
       "required": [
@@ -209,6 +214,11 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
         }
       },
       "required": [
@@ -316,6 +326,11 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
         }
       },
       "required": [
@@ -435,6 +450,11 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
         }
       },
       "required": [
@@ -550,6 +570,11 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
         }
       },
       "required": [
@@ -649,6 +674,11 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
         }
       },
       "required": [
@@ -753,6 +783,11 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
         }
       },
       "required": [
@@ -852,6 +887,128 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "code",
+        "action",
+        "message"
+      ],
+      "title": "ActionResult",
+      "type": "object"
+    }
+  },
+  "wait_for_screen_change": {
+    "description": "Wait for visual or hierarchy changes on screen.",
+    "inputSchema": {
+      "properties": {
+        "timeout_ms": {
+          "default": 25000,
+          "title": "Timeout Ms",
+          "type": "integer"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        }
+      },
+      "title": "wait_for_screen_changeArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "ActionCode": {
+          "description": "Machine-readable outcome classification for a device action.",
+          "enum": [
+            "OK",
+            "INVALID_ARGS",
+            "TARGET_NOT_FOUND",
+            "DEVICE_ERROR",
+            "PACKAGE_NOT_FOUND",
+            "TIMEOUT",
+            "UNSUPPORTED"
+          ],
+          "title": "ActionCode",
+          "type": "string"
+        }
+      },
+      "description": "Outcome of one device action, independent of any transport or agent.",
+      "properties": {
+        "ok": {
+          "title": "Ok",
+          "type": "boolean"
+        },
+        "code": {
+          "$ref": "#/$defs/ActionCode"
+        },
+        "action": {
+          "title": "Action",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "normalized_coordinates": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Normalized Coordinates"
+        },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
         }
       },
       "required": [
@@ -869,8 +1026,18 @@
     "inputSchema": {
       "properties": {
         "text": {
-          "title": "Text",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "title": "Text"
         },
         "wait_state": {
           "default": "appear",
@@ -878,7 +1045,7 @@
           "type": "string"
         },
         "timeout_ms": {
-          "default": 5000,
+          "default": 8000,
           "title": "Timeout Ms",
           "type": "integer"
         }
@@ -961,6 +1128,130 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "code",
+        "action",
+        "message"
+      ],
+      "title": "ActionResult",
+      "type": "object"
+    }
+  },
+  "wait_until_gone": {
+    "description": "Wait for text to disappear from the screen.",
+    "inputSchema": {
+      "properties": {
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "title": "Text"
+        },
+        "timeout_ms": {
+          "default": 15000,
+          "title": "Timeout Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "wait_until_goneArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "ActionCode": {
+          "description": "Machine-readable outcome classification for a device action.",
+          "enum": [
+            "OK",
+            "INVALID_ARGS",
+            "TARGET_NOT_FOUND",
+            "DEVICE_ERROR",
+            "PACKAGE_NOT_FOUND",
+            "TIMEOUT",
+            "UNSUPPORTED"
+          ],
+          "title": "ActionCode",
+          "type": "string"
+        }
+      },
+      "description": "Outcome of one device action, independent of any transport or agent.",
+      "properties": {
+        "ok": {
+          "title": "Ok",
+          "type": "boolean"
+        },
+        "code": {
+          "$ref": "#/$defs/ActionCode"
+        },
+        "action": {
+          "title": "Action",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "normalized_coordinates": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Normalized Coordinates"
+        },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
         }
       },
       "required": [
@@ -1060,6 +1351,11 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
         }
       },
       "required": [
@@ -1151,6 +1447,11 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
         }
       },
       "required": [
@@ -1253,6 +1554,11 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
         }
       },
       "required": [

@@ -63,6 +63,9 @@ from artemis.agents.validator.tool_declarations import (
     READ_NOTE_TOOL,
     REPORT_TASK_STATUS_TOOL,
     VALIDATOR_TOOLS_DECLARATION,
+    WAIT_FOR_SCREEN_CHANGE_TOOL,
+    WAIT_FOR_TEXT_TOOL,
+    WAIT_UNTIL_GONE_TOOL,
     capture_screenshot_and_parse_ui,
     prune_intermediate_screenshots,
 )
@@ -92,9 +95,41 @@ from artemis.services.llm import (
 )
 from artemis.tools.history import history_tool_declarations
 from artemis.tools.tool_wrapper import tool_result_messages
+from artemis.utils.screen_diff import COMMITMENT_PATTERN
+
+
+def _has_stale_screen_target(name: str, args: dict) -> bool:
+    """Checks whether an action specifies coordinate/index targets that belong to an earlier screen."""
+    if args.get("target_text"):
+        return False
+
+    # 1. Any point target (index or [x, y])
+    target = args.get("target")
+    if target is not None:
+        return True
+    if args.get("coordinates") is not None:
+        return True
+
+    # 2. click_sequence uses explicit coordinates from old screen
+    if name == "click_sequence":
+        return True
+
+    # 3. focus_and_clear_text requires coordinates
+    if name == "focus_and_clear_text":
+        return True
+
+    # 4. swipe with explicit start/end coordinates (direction-only swipe is safe)
+    if name == "swipe":
+        if args.get("start") is not None or args.get("end") is not None:
+            return True
+
+    return False
+
+
 from artemis.utils.coordinates import (
     COORDINATE_SPACE_KEY,
     COORDINATE_SPACE_NORMALIZED,
+    compute_smart_swipe_coordinates,
     parse_swipe_parameters,
 )
 from third_party.mobile_use.utils.logger import get_logger
@@ -168,12 +203,14 @@ class FlashRunner:
         try:
             cfg = load_agent_config()
             self.max_turns = max_turns if max_turns is not None else cfg.flash.max_turns
+            self.fast_burst = getattr(cfg.flash, "fast_burst", False)
             self.step_summarizer_cfg = cfg.flash.step_summarizer
             self.memory_runtime_cfg = cfg.memory.runtime
             self.transcript_cfg = cfg.memory.transcript
             self.chunking_cfg = cfg.memory.chunking
         except Exception:
             self.max_turns = max_turns if max_turns is not None else 0
+            self.fast_burst = False
             self.step_summarizer_cfg = StepSummarizerConfig()
             self.memory_runtime_cfg = MemoryRuntimeConfig()
             self.transcript_cfg = MemoryTranscriptConfig()
@@ -225,6 +262,9 @@ class FlashRunner:
             if t is not READ_NOTE_TOOL and t is not LIST_NOTES_TOOL
         ]
         tools.insert(1, CLICK_SEQUENCE_TOOL)
+        tools.append(WAIT_FOR_SCREEN_CHANGE_TOOL)
+        tools.append(WAIT_FOR_TEXT_TOOL)
+        tools.append(WAIT_UNTIL_GONE_TOOL)
         tools.append(ASK_EXPLORER_TOOL)
         # Helper tools shared with the Pro operator: the history tools are
         # declared from the very same args schemas the LangChain tools bind
@@ -371,6 +411,7 @@ class FlashRunner:
         notices: list[str] | None = None,
         is_final: bool = False,
         previous_turn_silent: bool = False,
+        scrollable: bool | None = None,
     ) -> HumanMessage:
         """Builds this turn's observation tail (Pro observation shape).
 
@@ -386,8 +427,18 @@ class FlashRunner:
         """
         # ``turns`` is kept for call-site symmetry: the tail has the same shape
         # on every turn.
+        obs_header = f"# CURRENT OBSERVATION [{ledger.elapsed_label()}]"
+        if scrollable is True:
+            obs_header += "\n[Scroll: scrollable container detected]"
+        elif scrollable is False:
+            has_xml = bool(xml_list and xml_list.strip() and "Not available" not in xml_list)
+            if has_xml:
+                obs_header += "\n[Scroll: fixed layout (no scrollable container — scrolling is unlikely to reveal anything)]"
+            else:
+                obs_header += "\n[Scroll: unknown]"
+
         blocks: list[dict] = [
-            {"type": "text", "text": f"# CURRENT OBSERVATION [{ledger.elapsed_label()}]"}
+            {"type": "text", "text": obs_header}
         ]
         if img_bytes:
             img_b64 = base64.b64encode(img_bytes).decode("utf-8")
@@ -604,6 +655,18 @@ class FlashRunner:
             await self.summarizer.flush()
         return final_report
 
+    def _rebase_screen_baseline(self, obs, screenshot_bytes) -> None:
+        """Tells the executor about a screen captured outside it, so its
+        screen-unchanged check (repeat-tap guard, post-tap recapture) compares
+        against the screen the model will actually see next."""
+        record = getattr(self.executor, "record_observation", None)
+        if not callable(record):
+            return
+        try:
+            record(obs.elements if obs.hierarchy_ok else None, screenshot_bytes)
+        except Exception as err:
+            logger.debug(f"Could not re-base the executor's screen baseline: {err}")
+
     async def _capture_post_screenshot(
         self, exec_result, name: str, action_names, state: State | None = None
     ):
@@ -628,6 +691,7 @@ class FlashRunner:
             logger.warning(f"Failed to capture fallback screenshot in FlashRunner: {obs.message}")
             return post_img_bytes
         post_img_bytes = screenshot_bytes
+        self._rebase_screen_baseline(obs, screenshot_bytes)
         if not exec_result.ui_elements_text:
             exec_result.ui_elements_text = obs.elements_text
         if not exec_result.screenshot_path and obs.screenshot_path:
@@ -799,6 +863,7 @@ class FlashRunner:
         injected: str | None = None,
         native_text: str | None = None,
         index_elements: list[dict] | None = None,
+        skip_observe: bool = False,
     ):
         """Executes one tool call, records it, and updates loop state.
 
@@ -815,12 +880,14 @@ class FlashRunner:
         action_names = self.executor.action_tool_names
         try:
             exec_result = await self.executor.execute(
-                name, args, tc_id, state, index_elements=index_elements
+                name, args, tc_id, state, index_elements=index_elements, skip_observe=skip_observe
             )
 
-            post_img_bytes = await self._capture_post_screenshot(
-                exec_result, name, action_names, state
-            )
+            post_img_bytes = None
+            if not skip_observe:
+                post_img_bytes = await self._capture_post_screenshot(
+                    exec_result, name, action_names, state
+                )
 
             # One record shape for the DataEngine step and the visual lens.
             action_dict = (
@@ -961,11 +1028,143 @@ class FlashRunner:
         """
         action_names = self.executor.action_tool_names
         index_elements = self._turn_index_snapshot(state)
-        for tc in tool_calls:
+        total_calls = len(tool_calls)
+        has_waited = False
+
+        for idx, tc in enumerate(tool_calls):
             name = tc["name"].split(":")[-1] if ":" in tc["name"] else tc["name"]
             args = tc.get("args") or {}
             tc_id = tc.get("id") or str(uuid.uuid4())
-            logger.info(f"Executing Flash tool: {name}({args})")
+            is_last = (idx == total_calls - 1)
+            is_wait_tool = name in ("wait_for_text", "wait_for_screen_change", "wait_until_gone")
+
+            # Safety check: After a wait step in a burst, actions with stale coordinates/indices are aborted.
+            # Actions without targets (press_key, input_text without target, directional swipe, manage_app)
+            # or actions using target_text remain valid.
+            if has_waited and (name in action_names) and _has_stale_screen_target(name, args):
+                logger.warning(
+                    f"Action '{name}' after wait step uses stale target coordinates or index. "
+                    f"Indices or coordinates from previous screen are invalid after waiting. "
+                    f"Aborting burst to observe new screen."
+                )
+                try:
+                    obs, shot_bytes = await observe(self.ctx, self.controller, settle_ms=0)
+                    if obs.ok:
+                        pre_screenshot_bytes = shot_bytes
+                        self._rebase_screen_baseline(obs, shot_bytes)
+                        if obs.elements_text:
+                            xml_list = obs.elements_text
+                        if state is not None:
+                            if obs.hierarchy_ok:
+                                state.indexed_points = [el["center"] for el in obs.elements]
+                                state.indexed_elements = obs.elements
+                            if obs.screenshot_path:
+                                state.latest_screenshot = obs.screenshot_path
+                except Exception as shot_err:
+                    logger.warning(f"Failed to observe screen after aborting burst: {shot_err}")
+
+                safety_msg = (
+                    f"Safety guard: Action '{name}' follows a wait step or cross-screen action and targets "
+                    f"an index or coordinate from an earlier screen. Burst aborted to observe the new screen state."
+                )
+                if name in action_names:
+                    turn.step_keys.append(str(tc_id))
+                    turn.actions.append((name, "error", safety_msg))
+                messages.append(
+                    ToolMessage(
+                        tool_call_id=tc_id,
+                        name=name,
+                        content=safety_msg,
+                        status="error",
+                    )
+                )
+                for rem_tc in tool_calls[idx + 1:]:
+                    rem_id = rem_tc.get("id") or str(uuid.uuid4())
+                    rem_name = rem_tc.get("name", "").split(":")[-1]
+                    messages.append(
+                        ToolMessage(
+                            tool_call_id=rem_id,
+                            name=rem_name,
+                            content="Action skipped: Burst was aborted due to safety guard.",
+                            status="error",
+                        )
+                    )
+                break
+
+            # Safety check: Commitment action cannot run in the middle of a burst
+            target_desc = str(args.get("target_description") or args.get("text") or "")
+            target_val = args.get("target")
+            if not target_desc and index_elements:
+                try:
+                    t_idx = int(target_val) if isinstance(target_val, (int, str)) and str(target_val).isdigit() else None
+                    if t_idx is not None:
+                        # Visible UI elements are 1-indexed (index_elements[t_idx - 1] has index == t_idx)
+                        matching_el = None
+                        if 1 <= t_idx <= len(index_elements):
+                            candidate = index_elements[t_idx - 1]
+                            if candidate.get("index") == t_idx:
+                                matching_el = candidate
+                        if matching_el is None:
+                            matching_el = next((el for el in index_elements if el.get("index") == t_idx), None)
+                        if matching_el:
+                            target_desc = str(matching_el.get("text") or matching_el.get("content_description") or "")
+                except Exception:
+                    pass
+
+            is_commitment = bool(COMMITMENT_PATTERN.search(target_desc))
+            if is_commitment and not is_last:
+                logger.warning(
+                    f"Commitment action '{name}' ('{target_desc}') detected mid-burst (call {idx+1}/{total_calls}). "
+                    f"Aborting burst before executing commitment action for user safety."
+                )
+                try:
+                    obs, shot_bytes = await observe(self.ctx, self.controller, settle_ms=0)
+                    if obs.ok:
+                        pre_screenshot_bytes = shot_bytes
+                        self._rebase_screen_baseline(obs, shot_bytes)
+                        if obs.elements_text:
+                            xml_list = obs.elements_text
+                        if state is not None:
+                            if obs.hierarchy_ok:
+                                state.indexed_points = [el["center"] for el in obs.elements]
+                                state.indexed_elements = obs.elements
+                            if obs.screenshot_path:
+                                state.latest_screenshot = obs.screenshot_path
+                except Exception as shot_err:
+                    logger.warning(f"Failed to observe screen after aborting burst: {shot_err}")
+
+                safety_msg = (
+                    f"Safety guard: Action '{name}' targeting commitment button '{target_desc}' cannot be "
+                    f"executed in the middle of a fast burst. All remaining actions aborted. "
+                    f"Please verify the screen state and execute commitment actions individually."
+                )
+                if name in action_names:
+                    turn.step_keys.append(str(tc_id))
+                    turn.actions.append((name, "error", safety_msg))
+                messages.append(
+                    ToolMessage(
+                        tool_call_id=tc_id,
+                        name=name,
+                        content=safety_msg,
+                        status="error",
+                    )
+                )
+                for rem_tc in tool_calls[idx + 1:]:
+                    rem_id = rem_tc.get("id") or str(uuid.uuid4())
+                    rem_name = rem_tc.get("name", "").split(":")[-1]
+                    messages.append(
+                        ToolMessage(
+                            tool_call_id=rem_id,
+                            name=rem_name,
+                            content="Action skipped: Burst was aborted due to safety guard.",
+                            status="error",
+                        )
+                    )
+                break
+
+            is_wait_tool = name in ("wait_for_text", "wait_for_screen_change", "wait_until_gone")
+            skip_observe = self.fast_burst and (not is_last) and (name in action_names) and (not is_wait_tool)
+            logger.info(f"Executing Flash tool: {name}({args}) [skip_observe={skip_observe}]")
 
             if name == "report_task_status":
                 probed = await self._probe_unseen_content(
@@ -1016,9 +1215,76 @@ class FlashRunner:
                 injected=injected,
                 native_text=native_text,
                 index_elements=index_elements,
+                skip_observe=skip_observe,
             )
-            if name not in action_names:
+            if is_wait_tool:
+                has_waited = True
+                index_elements = getattr(state, "indexed_elements", None) or index_elements
+                timed_out_signal = (
+                    "[TIMEOUT_REACHED]" in str(turn.actions[-1][2])
+                    if turn.actions
+                    else False
+                )
+                if timed_out_signal and not is_last:
+                    logger.info(
+                        f"Wait tool '{name}' timed out without target event. "
+                        f"Aborting remaining burst actions to return observation to AI."
+                    )
+                    for rem_tc in tool_calls[idx + 1:]:
+                        rem_id = rem_tc.get("id") or str(uuid.uuid4())
+                        rem_name = rem_tc.get("name", "").split(":")[-1]
+                        messages.append(
+                            ToolMessage(
+                                tool_call_id=rem_id,
+                                name=rem_name,
+                                content="Action skipped: Previous wait reached timeout without event; returning to AI for evaluation.",
+                                status="success",
+                            )
+                        )
+                    break
+            elif args.get("target_text"):
+                # An action targeting target_text may have altered the screen; mark has_waited
+                # so subsequent actions with stale index/coordinates are safely stopped.
+                has_waited = True
+                index_elements = getattr(state, "indexed_elements", None) or index_elements
+            elif name not in action_names:
                 index_elements = self._extend_index_snapshot(state, index_elements, before_len)
+
+            # Safety check: if action failed mid-burst, abort remaining actions to prevent blind execution
+            if turn.actions and turn.actions[-1][1] in ("error", "failure") and not is_last:
+                logger.warning(
+                    f"Action '{name}' failed mid-burst (call {idx+1}/{total_calls}). "
+                    f"Aborting remaining burst actions to prevent blind execution."
+                )
+                if skip_observe:
+                    try:
+                        obs, shot_bytes = await observe(self.ctx, self.controller, settle_ms=0)
+                        if obs.ok:
+                            pre_screenshot_bytes = shot_bytes
+                            self._rebase_screen_baseline(obs, shot_bytes)
+                            if obs.elements_text:
+                                xml_list = obs.elements_text
+                            if state is not None:
+                                if obs.hierarchy_ok:
+                                    state.indexed_points = [el["center"] for el in obs.elements]
+                                    state.indexed_elements = obs.elements
+                                if obs.screenshot_path:
+                                    state.latest_screenshot = obs.screenshot_path
+                    except Exception as shot_err:
+                        logger.warning(f"Failed to capture fallback screen after failed burst action: {shot_err}")
+
+                for rem_tc in tool_calls[idx + 1:]:
+                    rem_id = rem_tc.get("id") or str(uuid.uuid4())
+                    rem_name = rem_tc.get("name", "").split(":")[-1]
+                    messages.append(
+                        ToolMessage(
+                            tool_call_id=rem_id,
+                            name=rem_name,
+                            content="Action skipped: Burst was aborted due to previous action failure.",
+                            status="error",
+                        )
+                    )
+                break
         return None, pre_screenshot_bytes, xml_list, action_sequence
 
     @staticmethod
@@ -1269,6 +1535,7 @@ class FlashRunner:
                     # The ledger judged the turn it just committed: a bare tool
                     # call (or thinking only) earns a one-line reminder, no bounce.
                     previous_turn_silent=previous_turn_silent,
+                    scrollable=getattr(state, "screen_scrollable", None),
                 )
                 pending_notices = []
 

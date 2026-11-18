@@ -170,12 +170,20 @@ def get_center_coordinates(left: int, top: int, right: int, bottom: int) -> tupl
     return (left + right) // 2, (top + bottom) // 2
 
 
+def _is_truthy(val: Any) -> bool:
+    if isinstance(val, str):
+        return val.strip().lower() in ("true", "1")
+    return bool(val)
+
+
 def _inject_mutual_occlusion_warnings(
-    lines: list[str], items_bounds: list[tuple[int, tuple[int, int, int, int]]]
+    lines: list[str],
+    items_bounds: list[tuple[int, tuple[int, int, int, int]]],
+    elements: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Detect pairs of elements with >= 50% overlap and append a soft, restrained warning
 
-    to the generated element description lines.
+    to the generated element description lines, and marks them as occluded in elements.
     Excludes pure parent-child enclosing bounds to prevent noise on standard
     nested containers.
     """
@@ -240,6 +248,13 @@ def _inject_mutual_occlusion_warnings(
     if not warnings_map:
         return lines
 
+    if elements:
+        for el in elements:
+            el_idx = el.get("index")
+            if el_idx in warnings_map:
+                el["occluded"] = True
+                el["occluded_by"] = warnings_map[el_idx]
+
     new_lines = []
     for line in lines:
         match = re.match(r"^\[(\d+)\]", line)
@@ -298,6 +313,8 @@ def format_minimal_list_with_points(
                 ocr_bounds = parse_bounds(ocr.get("bounds"))
                 if ocr_bounds:
                     left, top, right, bottom = ocr_bounds
+                    if right <= left or bottom <= top or right <= 0 or bottom <= 0 or left >= width or top >= height:
+                        continue
                     cx, cy = get_center_coordinates(left, top, right, bottom)
                     if is_duplicate(ocr["text"], cx, cy):
                         continue
@@ -374,6 +391,8 @@ def format_minimal_list_with_elements(
                 ocr_bounds = parse_bounds(ocr.get("bounds"))
                 if ocr_bounds:
                     left, top, right, bottom = ocr_bounds
+                    if right <= left or bottom <= top or right <= 0 or bottom <= 0 or left >= width or top >= height:
+                        continue
                     cx, cy = get_center_coordinates(left, top, right, bottom)
                     if is_duplicate(ocr["text"], cx, cy):
                         continue
@@ -406,6 +425,20 @@ def format_minimal_list_with_elements(
         shown = text.strip() or hint
         if not registered and shown and bounds:
             left, top, right, bottom = bounds
+            if right <= left or bottom <= top or right <= 0 or bottom <= 0 or left >= width or top >= height:
+                continue
+            if idx > 80:
+                is_interactive = bool(
+                    _is_truthy(node.get("clickable"))
+                    or _is_truthy(node.get("focusable"))
+                    or _is_truthy(node.get("checked"))
+                    or _is_truthy(node.get("selected"))
+                    or error
+                    or "Button" in str(node.get("class") or "")
+                    or "EditText" in str(node.get("class") or "")
+                )
+                if not is_interactive and idx > 100:
+                    continue
             cx, cy = get_center_coordinates(left, top, right, bottom)
             if is_duplicate(shown, cx, cy):
                 continue
@@ -427,6 +460,10 @@ def format_minimal_list_with_elements(
                 "resource_id": node.get("resource-id"),
                 "is_ocr": False,
             }
+            if "checked" in node:
+                element["checked"] = node.get("checked")
+            if "selected" in node:
+                element["selected"] = node.get("selected")
             if not text.strip():
                 element["is_hint"] = True
             if error:
@@ -436,7 +473,7 @@ def format_minimal_list_with_elements(
             added_items.append((shown, cx, cy))
             idx += 1
 
-    lines = _inject_mutual_occlusion_warnings(lines, items_bounds)
+    lines = _inject_mutual_occlusion_warnings(lines, items_bounds, elements=elements)
     return "\n".join(lines), elements, labels
 
 

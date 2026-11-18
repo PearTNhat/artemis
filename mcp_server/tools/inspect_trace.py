@@ -183,9 +183,9 @@ async def mobile_inspect_trace(
             }
 
         status_data = trace_store.read_status(trace_id)
-        is_flash = status_data and status_data.get("model", "").lower() == "flash"
+        is_flash = bool(status_data and status_data.get("model", "").lower() == "flash")
         device_serial = status_data.get("device_serial") if status_data else None
-        if not device_serial and os.path.exists(db_path):
+        if os.path.exists(db_path):
             try:
                 conn_dev = sqlite3.connect(db_path)
                 conn_dev.row_factory = sqlite3.Row
@@ -198,10 +198,13 @@ async def mobile_inspect_trace(
                 if row_dev and row_dev["device_info"]:
                     try:
                         d_info = json.loads(row_dev["device_info"])
-                        if isinstance(d_info, dict) and d_info.get("device_id"):
-                            device_serial = d_info["device_id"]
+                        if isinstance(d_info, dict):
+                            if not device_serial and d_info.get("device_id"):
+                                device_serial = d_info["device_id"]
+                            if not is_flash and str(d_info.get("profile", "")).lower() == "flash":
+                                is_flash = True
                     except (ValueError, TypeError):
-                        # Malformed device_info JSON: leave the serial unset.
+                        # Malformed device_info JSON: leave fields unset.
                         pass
                 conn_dev.close()
             except sqlite3.Error:

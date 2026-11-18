@@ -198,6 +198,10 @@ class AndroidAdbDriver(BaseDeviceDriver):
         else:
             clean_ui_elements = []
 
+        from artemis.utils.screen_diff import flatten_hierarchy
+
+        clean_ui_elements = flatten_hierarchy(clean_ui_elements)
+
         w = self._width if isinstance(self._width, int) else 1080
         h = self._height if isinstance(self._height, int) else 2400
         clean_ui_elements = filter_ui_hierarchy(

@@ -225,8 +225,26 @@ async def _wire_wait_for_delay(actuator: Any, a: dict[str, Any]) -> ActionResult
     return await actuator.wait_for_delay(a["time_in_ms"])
 
 
+async def _wire_wait_for_screen_change(actuator: Any, a: dict[str, Any]) -> ActionResult:
+    return await actuator.wait_for_screen_change(
+        a.get("timeout_ms", 25000),
+        a.get("region"),
+    )
+
+
 async def _wire_wait_for_text(actuator: Any, a: dict[str, Any]) -> ActionResult:
-    return await actuator.wait_for_text(a["text"], a["wait_state"], a["timeout_ms"])
+    return await actuator.wait_for_text(
+        a["text"],
+        a.get("wait_state", "appear"),
+        a.get("timeout_ms", 8000),
+    )
+
+
+async def _wire_wait_until_gone(actuator: Any, a: dict[str, Any]) -> ActionResult:
+    return await actuator.wait_until_gone(
+        a["text"],
+        a.get("timeout_ms", 15000),
+    )
 
 
 async def _wire_open_link(actuator: Any, a: dict[str, Any]) -> ActionResult:
@@ -638,17 +656,117 @@ _SPECS: tuple[ActionSpec, ...] = (
         ),
     ),
     ActionSpec(
+        name="wait_for_screen_change",
+        declaration=DeclarationDialect(
+            description=(
+                "[ACTION] Wait for the screen to visually change or for UI elements to update.\n\n"
+                "Use this when waiting for an UNKNOWN change (e.g. opponent's move in chess or a game,"
+                " incoming chat reply, scene transition, animation to finish) where you cannot name"
+                " the exact text in advance. Never use wait_for_delay to wait for something that changes."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "timeout_s": {
+                        "type": "number",
+                        "description": "Maximum duration to wait in seconds (default 25.0, up to 300.0 for long waits such as chess thinking).",
+                    },
+                    "region": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": (
+                            "Optional bounding box [x1, y1, x2, y2] in normalized 0-1000 coordinates (matching "
+                            "element bounds [left, top, right, bottom]) to restrict change detection to a "
+                            "specific area (e.g. chessboard or message feed)."
+                        ),
+                    },
+                },
+            },
+        ),
+        wire=WireDialect(
+            description="Wait for visual or hierarchy changes on screen.",
+            params=(
+                ParamSpec("timeout_ms", int, required=False, default=25000),
+                ParamSpec("region", list[int] | None, required=False, default=None),
+            ),
+            bind=_wire_wait_for_screen_change,
+        ),
+    ),
+    ActionSpec(
         name="wait_for_text",
-        declaration=None,  # Listed in the legacy tool-name sets but never declared to
-        # any LLM; kept wire-reachable for executors and external MCP clients.
+        declaration=DeclarationDialect(
+            description=(
+                "[ACTION] Wait until specific text appears on screen.\n\n"
+                "Use this when you know the specific text that will appear (e.g. page header, search"
+                " results, 'Order summary', 'Place Order', confirmation dialog). If unsure about the"
+                " exact wording or language, you can provide a list of alternative candidate texts."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}},
+                        ],
+                        "description": (
+                            "The text string or list of alternative candidate strings to wait for"
+                            " (e.g. 'Order summary' or ['Order summary', 'Tóm tắt đơn hàng']). Case-insensitive."
+                        ),
+                    },
+                    "timeout_s": {
+                        "type": "number",
+                        "description": "Maximum duration to wait in seconds (default 8.0).",
+                    },
+                },
+                "required": ["text"],
+            },
+        ),
         wire=WireDialect(
             description="Wait for text to appear on or disappear from the screen.",
             params=(
-                ParamSpec("text", str),
+                ParamSpec("text", str | list[str]),
                 ParamSpec("wait_state", str, required=False, default="appear"),
-                ParamSpec("timeout_ms", int, required=False, default=5000),
+                ParamSpec("timeout_ms", int, required=False, default=8000),
             ),
             bind=_wire_wait_for_text,
+        ),
+    ),
+    ActionSpec(
+        name="wait_until_gone",
+        declaration=DeclarationDialect(
+            description=(
+                "[ACTION] Wait until specific text disappears from the screen.\n\n"
+                "Use this when waiting for a loading indicator, progress bar, spinner, or temporary"
+                " dialog to vanish (e.g. 'Loading...', 'Searching for driver...', 'Please wait')."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}},
+                        ],
+                        "description": (
+                            "The text string or list of alternative strings to wait to disappear from the screen."
+                        ),
+                    },
+                    "timeout_s": {
+                        "type": "number",
+                        "description": "Maximum duration to wait in seconds (default 15.0).",
+                    },
+                },
+                "required": ["text"],
+            },
+        ),
+        wire=WireDialect(
+            description="Wait for text to disappear from the screen.",
+            params=(
+                ParamSpec("text", str | list[str]),
+                ParamSpec("timeout_ms", int, required=False, default=15000),
+            ),
+            bind=_wire_wait_until_gone,
         ),
     ),
     ActionSpec(
@@ -702,7 +820,9 @@ EXCEPTION_PREFIXES: dict[str, str] = {
     "press_key": "Error during press_key",
     "manage_app": "Error during manage_app",
     "wait_for_delay": "Error during wait_for_delay",
+    "wait_for_screen_change": "Error during wait_for_screen_change",
     "wait_for_text": "Error during wait_for_text",
+    "wait_until_gone": "Error during wait_until_gone",
 }
 
 
