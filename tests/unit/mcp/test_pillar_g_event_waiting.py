@@ -573,3 +573,36 @@ async def test_target_text_refused_when_live_screen_cannot_be_observed(monkeypat
     assert res.status == "error"
     assert "could not observe the live screen" in res.text_summary
     session_mock.call.assert_not_called()
+
+
+def test_focused_full_page_webview_is_not_masked_so_board_changes_are_seen():
+    """Regression (trace a2bd7a07, lichess in Chrome): the WebView is focused and
+    spans the page. Masking every focused element blacked out the whole board in
+    both frames, so wait_for_screen_change never saw the opponent move and always
+    ran to its 60 s timeout."""
+    from PIL import Image, ImageDraw
+
+    from artemis.utils.screen_diff import compare_screen_pixels, mask_noise
+
+    w, h = 720, 1280
+    webview = {"class": "android.webkit.WebView", "focused": "true", "text": "Your turn", "bounds": "[0,160][720,1232]"}
+    search = {"class": "android.widget.EditText", "focused": "true", "text": "", "bounds": "[100,40][620,120]"}
+    before = Image.new("RGB", (w, h), "white")
+    after = before.copy()
+    ImageDraw.Draw(after).rectangle([360, 520, 450, 700], fill="black")  # a piece moved
+
+    changed, cells = compare_screen_pixels(
+        mask_noise(before, [webview, search], w, h),
+        mask_noise(after, [webview, search], w, h),
+        region=[0, 267, 1000, 828],
+        width=w,
+        height=h,
+    )
+    assert changed and cells >= 20
+
+    # A small focused text input is still masked (its caret blinks).
+    caret = before.copy()
+    ImageDraw.Draw(caret).rectangle([110, 50, 400, 110], fill="black")
+    masked_a = mask_noise(before, [search], w, h)
+    masked_b = mask_noise(caret, [search], w, h)
+    assert compare_screen_pixels(masked_a, masked_b, width=w, height=h) == (False, 0)

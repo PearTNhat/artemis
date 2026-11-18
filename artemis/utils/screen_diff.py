@@ -103,6 +103,19 @@ def is_clock_text(s: str) -> bool:
     return bool(CLOCK_PATTERN.match(s.strip()))
 
 
+#: Largest element (fraction of the screen) mask_noise may black out. Clocks and
+#: text inputs are small; anything bigger is content, not noise.
+MAX_MASK_AREA_FRACTION = 0.15
+
+
+def _is_text_input(el: dict[str, Any]) -> bool:
+    """A field with a blinking caret: EditText-like class, or flagged editable/password."""
+    cls = str(el.get("class") or "")
+    if "EditText" in cls or "AutoCompleteTextView" in cls or "SearchView" in cls:
+        return True
+    return any(el.get(k) in (True, "true", "True", 1) for k in ("editable", "password"))
+
+
 def mask_noise(
     img: Image.Image,
     elements: list[dict[str, Any]] | None,
@@ -120,16 +133,22 @@ def mask_noise(
     if not elements:
         return img_copy
 
-    # 2. Mask XML elements with clock patterns and focused input cursors
+    # 2. Mask XML elements with clock patterns and focused text-input cursors.
+    # Only small elements are ever masked: a focused container (Chrome's WebView
+    # is "focused" and spans the whole page) would otherwise black out the very
+    # content being watched, and no change could ever be detected.
+    max_mask_area = MAX_MASK_AREA_FRACTION * max(1, width) * max(1, height)
     for el in elements:
         text = str(el.get("text") or "").strip()
         desc = str(el.get("content-desc") or el.get("content_description") or "").strip()
-        is_focused = bool(el.get("focused") in (True, "true", "True", 1))
+        is_focused_input = bool(el.get("focused") in (True, "true", "True", 1)) and _is_text_input(el)
 
-        if is_clock_text(text) or is_clock_text(desc) or is_focused:
+        if is_clock_text(text) or is_clock_text(desc) or is_focused_input:
             bounds = robust_parse_bounds(el.get("bounds"))
             if bounds and len(bounds) == 4:
                 l, t, r, b = bounds
+                if (r - l) * (b - t) > max_mask_area:
+                    continue
                 # Clamp to image boundaries
                 l = max(0, min(width - 1, int(l)))
                 t = max(0, min(height - 1, int(t)))
