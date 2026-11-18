@@ -378,6 +378,9 @@ class ModelFactory:
                 model_name=endpoint.model_name or None,
                 agy_bin=endpoint.api_base or os.environ.get("ARTEMIS_AGY_BIN", "agy"),
                 turn_timeout_s=max(endpoint.timeout_seconds, 240.0),
+                # "acp" (default): screenshots inline, one model call per turn.
+                # "stream-json": the previous file + read_file protocol.
+                transport=os.environ.get("ARTEMIS_AGY_TRANSPORT", "acp"),
             )
 
         elif provider in (ModelProvider.OLLAMA, ModelProvider.VLLM, ModelProvider.CUSTOM):

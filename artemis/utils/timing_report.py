@@ -149,7 +149,10 @@ def format_timing_report(report: dict[str, Any]) -> str:
         note = ""
         if s["agy"]:
             agy = s["agy"]
-            note = f"  [agy {agy.get('model_calls')} calls, screenshot {'yes' if agy.get('opened_screenshot') else 'no'}]"
+            if agy.get("transport") == "acp":
+                note = f"  [agy acp {agy.get('model_calls')} calls, {agy.get('inline_images', 0)} inline image(s)]"
+            else:
+                note = f"  [agy {agy.get('model_calls')} calls, screenshot {'yes' if agy.get('opened_screenshot') else 'no'}]"
         if s["llm_resumes"]:
             note += f"  [resumed {s['llm_resumes']}x]"
         lines.append(
