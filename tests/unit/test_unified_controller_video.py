@@ -27,6 +27,7 @@ import cv2
 from artemis.context import ArtemisContext
 from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.drivers.mock.mock_driver import MockDeviceDriver
+from artemis.utils import video as video_utils
 from artemis.utils.video import (
     build_scrcpy_record_command,
     extract_frames_at_timestamps,
@@ -71,13 +72,44 @@ def test_targeted_frame_extraction_uses_requested_timestamps():
     assert all(data.startswith(b"\xff\xd8") for _, data in frames)
 
 
-def test_scrcpy_recording_locks_each_segment_orientation(tmp_path):
+_SCRCPY3_HELP = "    --capture-orientation[=value]\n    --no-window\n    --video-bit-rate=value\n"
+_SCRCPY1_HELP = "    --lock-video-orientation[=value]\n    -N, --no-display\n    -b, --bit-rate=value\n"
+
+
+def test_scrcpy_recording_locks_each_segment_orientation(tmp_path, monkeypatch):
     output_path = tmp_path / "recording.mkv"
+    monkeypatch.setattr(video_utils, "_scrcpy_help_cache", {"scrcpy": _SCRCPY3_HELP})
 
     command = build_scrcpy_record_command("scrcpy", "device-1", output_path)
 
     assert "--capture-orientation=@" in command
+    assert "--no-window" in command
+    assert command[command.index("--video-bit-rate") + 1] == "2M"
     assert command[command.index("--record") + 1] == str(output_path)
+
+
+def test_scrcpy_recording_uses_legacy_flags_on_scrcpy_1(tmp_path, monkeypatch):
+    """scrcpy 1.x (Ubuntu apt) exits on --no-window; use its own flag names."""
+    output_path = tmp_path / "recording.mkv"
+    monkeypatch.setattr(video_utils, "_scrcpy_help_cache", {"scrcpy": _SCRCPY1_HELP})
+
+    command = build_scrcpy_record_command("scrcpy", "device-1", output_path)
+
+    assert "--no-display" in command
+    assert "--no-window" not in command
+    assert command[command.index("--bit-rate") + 1] == "2M"
+    assert "--video-bit-rate" not in command
+    assert "--lock-video-orientation=initial" in command
+    assert "--capture-orientation=@" not in command
+
+
+def test_scrcpy_recording_defaults_to_modern_flags_without_help(tmp_path, monkeypatch):
+    monkeypatch.setattr(video_utils, "_scrcpy_help_cache", {"scrcpy": ""})
+
+    command = build_scrcpy_record_command("scrcpy", "device-1", tmp_path / "r.mkv")
+
+    assert "--no-window" in command
+    assert "--capture-orientation=@" in command
 
 
 @pytest.mark.asyncio

@@ -45,6 +45,32 @@ SCRCPY_STARTUP_TIMEOUT_SECONDS = 6.0
 TIMELINE_GAP_EPSILON_SECONDS = 0.05
 
 
+_scrcpy_help_cache: dict[str, str] = {}
+
+
+def _scrcpy_help_text(scrcpy_executable: str) -> str:
+    """Return ``scrcpy --help`` output, cached per executable ("" if unreadable)."""
+    if scrcpy_executable in _scrcpy_help_cache:
+        return _scrcpy_help_cache[scrcpy_executable]
+    text = ""
+    try:
+        res = subprocess.run(
+            [scrcpy_executable, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        text = (res.stdout or "") + (res.stderr or "")
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.debug(f"Could not read '{scrcpy_executable} --help': {e}")
+    _scrcpy_help_cache[scrcpy_executable] = text
+    return text
+
+
+def _scrcpy_supports(help_text: str, flag: str) -> bool:
+    return re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", help_text) is not None
+
+
 def build_scrcpy_record_command(
     scrcpy_executable: str,
     device_id: str,
@@ -58,21 +84,44 @@ def build_scrcpy_record_command(
     The recording supervisor starts a new segment when Android rotates, so a
     segment never contains multiple coded sizes while still displaying the app
     in its natural orientation.
+
+    The flags follow the installed scrcpy version: 3.x uses ``--no-window`` and
+    ``--capture-orientation``, while 1.x (still shipped by Ubuntu/Debian apt)
+    only knows ``--no-display``, ``--bit-rate`` and ``--lock-video-orientation``
+    and exits on any unknown option. When ``--help`` cannot be read, the modern
+    flags are used.
     """
+    help_text = _scrcpy_help_text(scrcpy_executable)
+
+    def supports(flag: str) -> bool:
+        return not help_text or _scrcpy_supports(help_text, flag)
+
+    if supports("--no-window"):
+        no_window = ["--no-window"]
+    elif _scrcpy_supports(help_text, "--no-playback"):
+        no_window = ["--no-playback"]
+    else:
+        no_window = ["--no-display"]
+
+    bit_rate_flag = "--video-bit-rate" if supports("--video-bit-rate") else "--bit-rate"
+
     command = [
         scrcpy_executable,
         "--serial",
         device_id,
-        "--no-window",
+        *no_window,
         "--record",
         str(output_path),
         "--record-format",
         "mkv",
-        "--video-bit-rate",
+        bit_rate_flag,
         video_bit_rate,
     ]
     if lock_capture_orientation:
-        command.append("--capture-orientation=@")
+        if supports("--capture-orientation"):
+            command.append("--capture-orientation=@")
+        elif _scrcpy_supports(help_text, "--lock-video-orientation"):
+            command.append("--lock-video-orientation=initial")
     return command
 
 

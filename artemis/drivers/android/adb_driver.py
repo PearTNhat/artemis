@@ -113,7 +113,7 @@ class AndroidAdbDriver(BaseDeviceDriver):
 
     async def disconnect(self) -> None:
         """Clean up ongoing recordings and tunnels."""
-        if self._recording_process:
+        if getattr(self, "_scrcpy_process", None):
             await self.stop_video_recording()
         if self._ui_adb_client and hasattr(self._ui_adb_client, "disconnect"):
             await asyncio.to_thread(self._ui_adb_client.disconnect)
