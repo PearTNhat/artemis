@@ -72,6 +72,7 @@ async def observe(
     controller: UnifiedMobileController,
     settle_ms: int = 400,
     ocr_results: list | None = None,
+    persist: bool = True,
 ) -> tuple[ObserveResult, bytes | None]:
     """Captures and indexes the current screen.
 
@@ -127,7 +128,9 @@ async def observe(
         hierarchy_ok = False
 
     screenshot_path = None
-    if ctx.data_engine:
+    # persist=False: a transient internal look (e.g. resolving target_text) that
+    # nobody will show or replay; skip the data engine and the temp-file fallback.
+    if persist and ctx.data_engine:
         try:
             image_name = ctx.data_engine.get_or_create_image(
                 screenshot_bytes,
@@ -138,7 +141,7 @@ async def observe(
         except Exception as e:
             logger.error(f"Failed to save image in DataEngine: {e}")
 
-    if not screenshot_path:
+    if persist and not screenshot_path:
         try:
             temp_dir = get_temp_dir("screenshots")
             temp_file = temp_dir / f"screenshot_{int(time.time())}.jpg"

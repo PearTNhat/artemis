@@ -784,14 +784,15 @@ async def test_completion_on_scrollable_page_scrolls_first(mock_context):
         patch("artemis.controllers.unified_controller.get_driver"),
         patch("artemis.agents.flash.runner.capture_screenshot_and_parse_ui", capture),
     ):
-        # Probe 1 reveals new content; probe 2 shows the same screen (page end).
-        runner = _scroll_probe_runner(mock_context, responses, [_png(2), _png(2)])
+        # The single probe reveals new content; the second report is accepted
+        # without another probe (_MAX_SCROLL_PROBES == 1).
+        runner = _scroll_probe_runner(mock_context, responses, [_png(2)])
         state = State(initial_goal="Prepare the order")
         state.screen_scrollable = True
         result = await runner.run(state)
 
     assert result == {"status": "completed", "explanation": "reviewed"}
-    assert [c[0] for c in runner.device_calls] == ["swipe", "swipe"]
+    assert [c[0] for c in runner.device_calls] == ["swipe"]
     second_call = runner.calls[1]["messages"]
     deferred = [m for m in second_call if isinstance(m, ToolMessage) and m.tool_call_id == "r1"]
     assert len(deferred) == 1 and deferred[0].name == "report_task_status"

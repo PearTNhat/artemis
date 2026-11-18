@@ -1584,6 +1584,11 @@
           "default": false,
           "title": "Include Image",
           "type": "boolean"
+        },
+        "persist": {
+          "default": true,
+          "title": "Persist",
+          "type": "boolean"
         }
       },
       "title": "observe_screenArguments",

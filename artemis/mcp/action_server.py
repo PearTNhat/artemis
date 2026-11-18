@@ -95,7 +95,7 @@ def build_action_server(actuator: Actuator, name: str = "artemis_actions") -> Fa
 
         @mcp.tool()
         async def observe_screen(
-            settle_ms: int = 400, include_image: bool = False
+            settle_ms: int = 400, include_image: bool = False, persist: bool = True
         ) -> Annotated[CallToolResult, ObserveResult]:
             """Capture and index the current screen (adapter-internal)."""
             try:
@@ -103,6 +103,7 @@ def build_action_server(actuator: Actuator, name: str = "artemis_actions") -> Fa
                     getattr(actuator, "ctx", None),
                     actuator.controller,
                     settle_ms=settle_ms,
+                    persist=persist,
                 )
                 content: list[Any] = [TextContent(type="text", text=obs.message)]
                 if include_image and img_bytes:

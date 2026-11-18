@@ -254,7 +254,7 @@ class McpActionExecutor:
                         deadline = time.monotonic() + 3.0
                         while True:
                             try:
-                                obs = await session.observe(settle_ms=0)
+                                obs = await session.observe(settle_ms=0, persist=False)
                                 if (
                                     obs
                                     and obs.ok

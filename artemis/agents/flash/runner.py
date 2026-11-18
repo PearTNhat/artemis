@@ -136,7 +136,10 @@ from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_MAX_SCROLL_PROBES = 2
+# One completion probe per task: once a deferred report has shown the model the
+# rest of the page, a second probe swipe rarely reveals anything new and costs a
+# full extra turn (~10-15 s observed on a lichess game page).
+_MAX_SCROLL_PROBES = 1
 _SCROLL_CHANGE_MIN_DISTANCE = 6
 _MORE_BELOW_NOTICE = (
     "Report not accepted yet: this page had more content below. The system swiped up"

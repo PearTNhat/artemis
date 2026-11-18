@@ -170,11 +170,17 @@ class ActionSession:
         result = await self.call_raw(name, args)
         return ActionResult.model_validate(result.structuredContent)
 
-    async def observe(self, settle_ms: int = 400, include_image: bool = False) -> ObserveResult:
-        """Captures and indexes the current screen via the internal observe tool."""
-        result = await self.call_raw(
-            "observe_screen", {"settle_ms": settle_ms, "include_image": include_image}
-        )
+    async def observe(
+        self, settle_ms: int = 400, include_image: bool = False, persist: bool = True
+    ) -> ObserveResult:
+        """Captures and indexes the current screen via the internal observe tool.
+
+        ``persist=False`` skips saving the screenshot (transient internal looks).
+        """
+        args: dict = {"settle_ms": settle_ms, "include_image": include_image}
+        if not persist:
+            args["persist"] = False
+        result = await self.call_raw("observe_screen", args)
         return ObserveResult.model_validate(result.structuredContent)
 
     async def screenshot_b64(self, timeout: float | None = None) -> str:

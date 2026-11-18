@@ -72,7 +72,7 @@ class _FakeSession:
         self.calls.append((name, dict(args)))
         return ActionResult.success(name, f"{name} dispatched")
 
-    async def observe(self, settle_ms=0):
+    async def observe(self, settle_ms=0, include_image=False, persist=True):
         elements = self._observations.pop(0) if self._observations else []
         return ObserveResult(
             ok=True,
