@@ -240,7 +240,7 @@ for raw in sys.stdin:
             send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1",
                   "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": chunk}}}})
         send({"jsonrpc": "2.0", "id": m["id"], "result": {"stopReason": "end_turn",
-              "usage": {"inputTokens": 120, "outputTokens": 30, "totalTokens": 150}}})
+              "usage": {"inputTokens": 20, "cachedReadTokens": 100, "outputTokens": 30, "totalTokens": 150}}})
 '''
 
 
@@ -278,6 +278,7 @@ async def test_acp_turn_sends_screenshot_inline_and_parses_reply(tmp_path, monke
 
     assert result.content == "saw 1 image(s)"
     assert result.tool_calls[0]["name"] == "click"
+    # Cached prefix tokens count toward the context size (recycle gate).
     assert result.usage_metadata["input_tokens"] == 120
     assert result.response_metadata["agy"]["transport"] == "acp"
     assert result.response_metadata["agy"]["model_calls"] == 1

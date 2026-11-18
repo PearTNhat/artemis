@@ -443,7 +443,12 @@ class _AcpSession(_AgySession):
             "error": None if response else f"stopReason={stop}, empty reply",
             "response": response,
             "usage": {
-                "input_tokens": int(usage.get("inputTokens") or 0),
+                # ACP reports cache hits separately: inputTokens is only the
+                # uncached part (~2.5k once the prefix is cached). The context
+                # size the recycle gate and the reports need is the sum.
+                "input_tokens": int(usage.get("inputTokens") or 0)
+                + int(usage.get("cachedReadTokens") or 0),
+                "cached_input_tokens": int(usage.get("cachedReadTokens") or 0),
                 "output_tokens": int(usage.get("outputTokens") or 0),
                 "total_tokens": int(usage.get("totalTokens") or 0),
             },
