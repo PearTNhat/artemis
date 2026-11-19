@@ -490,13 +490,13 @@ Kèm 3 ví dụ ngắn: cờ vua (đi + chờ đối thủ), tìm kiếm (bấm 
 | [#244](https://github.com/google/artemis/pull/244) | fix(coordinates): honor an explicit zero swipe/scroll duration | 2026-11-19 | `adopt/upstream-prs-1` | `artemis/utils/coordinates.py` | Nguyên bản |
 | [#181](https://github.com/google/artemis/pull/181) | fix(perception): keep system dialogs clickable, only filter true status/nav bars | 2026-11-19 | `adopt/upstream-prs-1` | `artemis/utils/ui_filter.py`, `artemis/utils/ocr_xml_fusion.py` | Nguyên bản |
 | [#171](https://github.com/google/artemis/pull/171) | fix(android): use clipboard paste and verify text entry in input_text | 2026-11-19 | `adopt/upstream-prs-1` | `artemis/drivers/android/adb_driver.py` | **Có sửa:** chỉ gọi helper `clear_text` khi `clear_existing=True` |
+| [#193](https://github.com/google/artemis/pull/193) (thay #189) | fix: render checked/enabled state for labeled controls in compact observation | 2026-11-19 | `main` | `artemis/utils/visualization.py` | Gộp tay, giữ occlusion check |
+| [#217](https://github.com/google/artemis/pull/217) | fix(flash): stop after consecutive tool-less turns instead of looping | 2026-11-19 | `main` | `artemis/agents/flash/runner.py`, `artemis/config/agent.py` | Gộp tay, giữ fast_burst |
+| [#219](https://github.com/google/artemis/pull/219) | fix(prompts): ask for a progress note, not for written-out reasoning | 2026-11-19 | `main` | `flash_runner.md`, `prompts.py` | Gộp tay |
+| [#221](https://github.com/google/artemis/pull/221) | fix(checker): stop final-check retries from copying the previous final verdict | 2026-11-19 | `main` | `checker.py`, `checker.json` | Gộp tay, giữ goal_requirements |
 
 ### Đã xem, chưa gộp
 | PR | Lý do |
 |:-:|:--|
-| #189 (trùng #193) | Nên gộp — hiện `checked`/`enabled` cho công tắc. Xung đột `artemis/utils/visualization.py` |
-| #217 | Nên gộp — Flash dừng sau 5 lượt liền không gọi tool. Xung đột `artemis/agents/flash/runner.py` |
-| #219 | Nên gộp — prompt "progress note". Xung đột `flash_runner.md` |
-| #221 | Nên gộp — Checker không chép lại verdict FAIL cũ. Xung đột `checker.json`, test |
 | #226, #148, #130 | Có thể gộp (vòng lặp Operator không ra action; Checker dùng tool calling cho endpoint OpenAI; gõ Unicode khi clipboard bị chặn) |
 | #163, #176, #175, #112, #161 | Không gộp lúc này — tính năng lớn hoặc dựa trên lịch sử repo cũ |

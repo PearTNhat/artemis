@@ -90,3 +90,9 @@ Mỗi khi AI Agent hoàn thành bất kỳ thay đổi mã nguồn, tính năng 
    - Ghi chú tóm tắt giải pháp kỹ thuật và số lượng test case kiểm chứng.
    - Nếu có thực hiện benchmark/trace mới, bổ sung số liệu (lượt AI, thời gian) vào **Mục 1 ("DỮ LIỆU THỰC NGHIỆM")**.
 
+3. **Cập nhật tài liệu luồng điều khiển thiết bị:**
+   Nếu thay đổi chạm vào bất kỳ file nào trong **Mục 9 ("Bản đồ file")** của [`docs/FLOW_DIEU_KHIEN_THIET_BI.md`](docs/FLOW_DIEU_KHIEN_THIET_BI.md) (capture màn hình, perception, định dạng UI list, prompt, dịch lệnh, thực thi, safety net, đồ thị Pro, Flash runner):
+   - Sửa lại mô tả tầng tương ứng và tham chiếu `file:line` cho khớp code mới.
+   - Nếu xử lý một mục trong **8.2 ("Cơ hội tối ưu")**, xoá/đánh dấu mục đó.
+   - Thêm 1 dòng vào **Mục 10 ("Nhật ký thay đổi luồng")**: ngày, thay đổi, file, ảnh hưởng tới luồng.
+
