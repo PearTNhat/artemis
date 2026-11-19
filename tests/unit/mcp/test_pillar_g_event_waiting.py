@@ -849,3 +849,74 @@ def test_find_matching_text_elements_ignores_edge_clipped_or_invisible_text():
     assert len(matches_summary) == 1
     assert matches_summary[0]["index"] == 3
 
+
+
+# --- Morphed-commitment guard ----------------------------------------------------------
+# Regression (Pro trace a8445e7d): a stale tap aimed at "Review address" landed where the
+# button had become "Place Order". Pro's safety net caught it; Flash bursts had no check.
+
+
+def _morph_executor(live_elements):
+    from artemis.mcp.action_types import ActionResult
+
+    executor = _make_executor(width=1000, height=2000)
+    session_mock = Mock()
+    session_mock.started = True
+    session_mock.call = AsyncMock(return_value=ActionResult.success("click", "Clicked"))
+    session_mock.observe = AsyncMock(
+        return_value=Mock(ok=True, hierarchy_ok=True, elements=live_elements, screenshot_path=None, elements_text="")
+    )
+    session_mock.ui_hierarchy = AsyncMock(return_value=live_elements)
+    executor._session = session_mock
+    return executor, session_mock
+
+
+def _button(text):
+    return [{"index": 1, "text": text, "center": [500, 1840], "bounds": [100, 1800, 900, 1880]}]
+
+
+@pytest.mark.asyncio
+async def test_burst_tap_on_control_that_became_a_commitment_is_refused():
+    executor, session = _morph_executor(_button("Place Order"))
+    state = _indexed_state()
+    seen = _button("Review address")
+
+    res = await executor.execute(
+        "click", {"target": [500, 920], "target_description": "Review address"}, "c1", state,
+        index_elements=seen, verify_live_target=True,
+    )
+
+    assert res.status == "error"
+    assert "Commitment Guard" in res.text_summary and "Place Order" in res.text_summary
+    session.call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_burst_tap_on_the_commitment_the_model_saw_is_allowed():
+    executor, session = _morph_executor(_button("Place Order"))
+    res = await executor.execute(
+        "click", {"target": [500, 920], "target_description": "Place Order"}, "c1", _indexed_state(),
+        index_elements=_button("Place Order"), verify_live_target=True,
+    )
+    assert res.status == "success"
+    session.call.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_burst_tap_on_ordinary_control_is_allowed():
+    executor, session = _morph_executor(_button("Next"))
+    res = await executor.execute(
+        "click", {"target": [500, 920], "target_description": "Continue"}, "c1", _indexed_state(),
+        index_elements=_button("Continue"), verify_live_target=True,
+    )
+    assert res.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_first_action_of_a_turn_skips_the_live_check():
+    executor, session = _morph_executor(_button("Place Order"))
+    await executor.execute(
+        "click", {"target": [500, 920], "target_description": "Review address"}, "c1", _indexed_state(),
+        index_elements=_button("Review address"),
+    )
+    session.ui_hierarchy.assert_not_called()

@@ -36,7 +36,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from artemis.context import ArtemisContext
 from artemis.memory.step_memory import JobKey, StepMemoryService
-from artemis.services.llm import RobustChatModelWrapper, get_google_llm, get_llm
+from artemis.services.llm import RobustChatModelWrapper, get_google_llm, get_llm, get_model_by_spec
 from artemis.services.token_meter import record_llm_usage
 from artemis.utils.task_tree import format_actions_clean
 from artemis.utils.visualization import draw_action_overlay_on_image
@@ -166,7 +166,8 @@ class VisualStepSummarizer(StepMemoryService):
         self._model_name = target_model
         try:
             if model_name:
-                self._llm = get_google_llm(model_name=target_model, temperature=0.0)
+                # "agy:<model>" routes the lens through the Gemini CLI.
+                self._llm = get_model_by_spec(target_model, temperature=0.0)
             else:
                 self._llm = get_llm(ctx, name="summarizer", is_utils=True)
         except Exception:
@@ -458,7 +459,9 @@ class VisualStepSummarizer(StepMemoryService):
                 HumanMessage(content=content_blocks),
             ]
 
-            response = await asyncio.wait_for(self._llm.ainvoke(messages), timeout=25.0)
+            # A CLI one-shot call starts an agy process (~10 s with images).
+            call_timeout = 90.0 if getattr(self._llm, "_llm_type", "") == "agy-oneshot" else 25.0
+            response = await asyncio.wait_for(self._llm.ainvoke(messages), timeout=call_timeout)
             self._meter_lens_call(response)
             summary_raw = response.content if isinstance(response.content, str) else ""
             if isinstance(response.content, list):

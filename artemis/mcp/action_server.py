@@ -31,6 +31,8 @@ Exceptions raised by the actuator are wrapped here with the historical
 """
 
 import asyncio
+import base64
+import inspect
 from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
@@ -45,6 +47,7 @@ from artemis.mcp.action_specs import (
 from artemis.mcp.action_types import ActionCode, ActionResult, ObserveResult
 from artemis.mcp.actuators.base import Actuator
 from artemis.mcp.observation import observe as observe_impl
+from artemis.mcp.screen_effect import ScreenEffectTracker, pre_wait_result
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -66,6 +69,54 @@ def _wrap_exception(action: str, exc: Exception) -> CallToolResult:
     )
 
 
+def _actuator_dims(actuator: Any, data: Any) -> tuple[int, int]:
+    """Device size for screen comparisons: the capture's own, else the device's."""
+    width = getattr(data, "width", None)
+    height = getattr(data, "height", None)
+    if not (width and height):
+        device = getattr(getattr(actuator, "ctx", None), "device", None)
+        width = getattr(device, "device_width", None) or 1080
+        height = getattr(device, "device_height", None) or 2400
+    return int(width), int(height)
+
+
+def _same_signature(wrapper, handler):
+    """FastMCP derives the tool's argument model from ``__signature__``."""
+    wrapper.__signature__ = inspect.signature(handler)
+    wrapper.__annotations__ = getattr(handler, "__annotations__", {})
+    wrapper.__name__ = getattr(handler, "__name__", "handler")
+    wrapper.__doc__ = getattr(handler, "__doc__", None)
+    return wrapper
+
+
+def _noting_action(handler, tracker: ScreenEffectTracker):
+    async def wrapper(**kwargs: Any) -> Any:
+        result = await handler(**kwargs)
+        tracker.note_action()
+        return result
+
+    return _same_signature(wrapper, handler)
+
+
+def _with_pre_wait_check(handler, tracker: ScreenEffectTracker, capture):
+    async def wrapper(**kwargs: Any) -> Any:
+        try:
+            early = await pre_wait_result(
+                tracker,
+                capture,
+                after=kwargs.get("after") or "my_action",
+                region=kwargs.get("region"),
+            )
+        except Exception as err:  # pylint: disable=broad-exception-caught
+            logger.debug(f"Pre-wait screen-effect check bypassed: {err}")
+            early = None
+        if early is not None:
+            return _wrap(early)
+        return await handler(**kwargs)
+
+    return _same_signature(wrapper, handler)
+
+
 def build_action_server(actuator: Actuator, name: str = "artemis_actions") -> FastMCP:
     """Builds a FastMCP server exposing exactly what ``actuator`` implements.
 
@@ -81,13 +132,26 @@ def build_action_server(actuator: Actuator, name: str = "artemis_actions") -> Fa
     # (artemis/mcp/action_specs.py); this server contributes only the transport
     # wrapping, so the served schema cannot drift from the manifest.
 
+    # Shared by every agent: what the agent last saw and whether it acted since
+    # (see artemis/mcp/screen_effect.py).
+    tracker = ScreenEffectTracker()
+    actuator_screen_data = getattr(actuator, "get_screen_data", None)
+
+    async def _capture():
+        data = await actuator_screen_data()
+        b64 = getattr(data, "base64", None)
+        image = base64.b64decode(b64) if b64 else None
+        width, height = _actuator_dims(actuator, data)
+        return image, list(getattr(data, "elements", None) or []), width, height
+
     for spec in wire_dialects():
         if spec.name in caps:
-            mcp.add_tool(
-                make_wire_handler(spec, actuator, _wrap, _wrap_exception),
-                name=spec.name,
-                description=spec.wire.description,
-            )
+            handler = make_wire_handler(spec, actuator, _wrap, _wrap_exception)
+            if spec.name == "wait_for_screen_change" and callable(actuator_screen_data):
+                handler = _with_pre_wait_check(handler, tracker, _capture)
+            elif not spec.name.startswith("wait"):
+                handler = _noting_action(handler, tracker)
+            mcp.add_tool(handler, name=spec.name, description=spec.wire.description)
 
     # --- Internal observation tools (never declared to an LLM) -----------------------
 
@@ -105,6 +169,8 @@ def build_action_server(actuator: Actuator, name: str = "artemis_actions") -> Fa
                     settle_ms=settle_ms,
                     persist=persist,
                 )
+                if obs.ok:
+                    tracker.note_seen(img_bytes, obs.elements if obs.hierarchy_ok else None)
                 content: list[Any] = [TextContent(type="text", text=obs.message)]
                 if include_image and img_bytes:
                     import base64 as _b64
@@ -152,6 +218,7 @@ def build_action_server(actuator: Actuator, name: str = "artemis_actions") -> Fa
                 if timeout_ms:
                     coro = asyncio.wait_for(coro, timeout=timeout_ms / 1000.0)
                 b64 = await coro
+                tracker.note_seen_b64(b64)
                 payload: dict[str, Any] = {"ok": True, "image_b64": b64}
             except TimeoutError:
                 payload = {"ok": False, "error": f"screenshot timed out after {timeout_ms}ms"}

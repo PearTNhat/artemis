@@ -194,6 +194,13 @@ def _expand_default_into_nodes(config_dict: dict) -> dict:
         utils_dict[util] = util_cfg
     result["utils"] = utils_dict
 
+    # Lightweight judges keep their own default (lightweight_judge_default)
+    # unless the config names them; an entry under "nodes" is taken as written,
+    # not merged into "default" (a judge must not inherit the agent model).
+    for judge in ("validator_pixel_safety_net", "planner_validation"):
+        if judge in nodes_override:
+            result[judge] = dict(nodes_override[judge])
+
     return result
 
 

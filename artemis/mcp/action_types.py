@@ -53,6 +53,8 @@ class ActionResult(BaseModel):
     normalized_coordinates: list[int] | None = None
     duration_ms: int | None = None
     timed_out: bool = False
+    #: The agent's own action(s) left the screen unchanged, so a wait was skipped.
+    no_effect: bool = False
 
     @classmethod
     def success(cls, action: str, message: str, **kwargs: Any) -> "ActionResult":

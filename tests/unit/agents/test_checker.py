@@ -779,3 +779,61 @@ async def test_check_loop_tool_message_status_is_structural(result, expected_sta
     assert tool_msgs[0].tool_call_id == "c1"
     assert tool_msgs[0].status == expected_status
     assert tool_msgs[0].content == str(result)
+
+
+# --- Empty structured report and no-judgment placeholders (Pro trace 14f3ebb7) -------
+# The final review reasoned "all criteria satisfied" but its structured answer had no
+# verdicts; the filler "no verdict produced" records then erased two evidence-backed
+# passes from an earlier checkpoint, and the run reported passed=0, inconclusive=3.
+
+
+@pytest.mark.asyncio
+async def test_empty_structured_report_is_retried_naming_every_item():
+    from types import SimpleNamespace
+
+    ctx = _mock_ctx()
+    llm = MagicMock()
+    llm.bind_tools.return_value = llm
+    passed = CheckReport.model_validate(
+        {"verdicts": [{"item_text": "do not tap Place Order", "kind": "assert", "status": "passed", "evidence": "button intact"}]}
+    )
+    structured = AsyncMock(side_effect=[CheckReport(verdicts=[]), passed])
+    llm.with_structured_output.return_value.ainvoke = structured
+    items = [SimpleNamespace(text="do not tap Place Order", kind="assert")]
+
+    with (
+        patch("artemis.agents.checker.checker.get_llm", return_value=llm),
+        patch(
+            "artemis.agents.checker.checker.acomplete",
+            new=AsyncMock(return_value=AIMessage(content="all satisfied", tool_calls=[])),
+        ),
+    ):
+        report = await _run_check_loop(ctx, [SystemMessage(content="s"), HumanMessage(content="h")], [], items)
+
+    assert structured.await_count == 2
+    retry_prompt = structured.await_args_list[1].args[0][-1].content
+    assert "[assert] do not tap Place Order" in retry_prompt
+    assert [(v.kind, v.status) for v in report.verdicts] == [("assert", "passed")]
+
+
+def test_no_judgment_placeholder_does_not_erase_an_earlier_verdict():
+    from artemis.graph.checkpoints import resolve_item_status
+
+    records = [
+        {"status": "passed", "evidence": "Place Order visible at step 39"},
+        {"status": "inconclusive", "evidence": "no verdict produced for this item"},
+    ]
+    assert resolve_item_status("assert", records) == "passed"
+    assert resolve_item_status("verify", records) == "passed"
+
+
+def test_judged_inconclusive_still_overrides_and_placeholders_alone_stay_inconclusive():
+    from artemis.graph.checkpoints import resolve_item_status
+
+    judged = [
+        {"status": "passed", "evidence": "seen at step 10"},
+        {"status": "inconclusive", "evidence": "screen at the end no longer shows the cart"},
+    ]
+    assert resolve_item_status("verify", judged) == "inconclusive"
+    only_placeholders = [{"status": "inconclusive", "evidence": "check timed out after 180.0s"}]
+    assert resolve_item_status("verify", only_placeholders) == "inconclusive"

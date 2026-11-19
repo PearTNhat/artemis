@@ -64,10 +64,16 @@ async def test_planner_validation():
 
 def test_planner_validation_node_defaults_to_lightweight_judge():
     """Unconfigured planner_validation resolves to the same flash-lite default
-    as the pixel safety net (cheap, temperature 0)."""
-    from artemis.config import get_default_llm_config
+    as the pixel safety net (cheap, temperature 0). Built from a config without
+    either judge entry: the shipped config may name them (Gemini CLI mode)."""
+    from artemis.config.llm import LLMConfig, _expand_default_into_nodes
 
-    llm_cfg = get_default_llm_config()
+    llm_cfg = LLMConfig.model_validate(
+        _expand_default_into_nodes(
+            {"default": {"provider": "google", "model": "gemini-3.8-flash",
+                         "fallback": {"provider": "google", "model": "gemini-3.7-flash"}}}
+        )
+    )
     node = llm_cfg.get_agent("planner_validation")
     safety_net = llm_cfg.get_agent("validator_pixel_safety_net")
     assert node.model == safety_net.model

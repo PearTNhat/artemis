@@ -1483,6 +1483,11 @@ $text-light: #94a3b8;
               word-break: break-all;
             }
 
+            .preset-desc.preset-warning {
+              color: #b45309;
+              word-break: normal;
+            }
+
             .preset-meta {
               display: flex;
               gap: 4px;
@@ -6081,4 +6086,9 @@ $text-light: #94a3b8;
       }
     }
   }
+}
+
+// Gemini CLI preset: helpers that still call an API key (see SystemService.cliApiKeyNodes).
+.item-desc.preset-warning {
+  color: #b45309;
 }

@@ -510,7 +510,20 @@ async def get_model_config_and_env():
         },
     ]
 
+    # Per-node backend (Gemini CLI vs API key) so the UI labels the setup by
+    # what really runs, not just by the default model's provider.
+    try:
+        from artemis.config.model_routing import describe_model_routing
+
+        model_routing = describe_model_routing()
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        import logging
+
+        logging.getLogger(__name__).warning("Could not describe model routing: %s", exc)
+        model_routing = None
+
     return {
+        "model_routing": model_routing,
         "config_path": config_path or "config/artemis.jsonc",
         "config_filename": "artemis.jsonc",
         "config_content": config_content,

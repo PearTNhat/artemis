@@ -119,7 +119,7 @@ DEFAULT_EXPLORER_VERSION: Literal["flash", "pro", "ultra"] = "flash"
 # ==============================================================================
 
 LLMProvider = Literal[
-    "openai", "google", "openrouter", "xai", "vertexai", "anthropic", "ollama", "vllm", "custom", "agy"
+    "openai", "google", "openrouter", "xai", "vertexai", "anthropic", "ollama", "vllm", "custom", "agy", "agy_oneshot"
 ]
 ExplorerVersion = Literal["flash", "pro", "ultra"]
 

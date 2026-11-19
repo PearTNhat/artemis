@@ -228,6 +228,7 @@ class McpActionExecutor:
         *,
         index_elements: list[dict[str, Any]] | None = None,
         skip_observe: bool = False,
+        verify_live_target: bool = False,
     ) -> ToolExecutionResult:
         """Executes the named tool and wraps the outcome for the calling agent.
 
@@ -253,6 +254,7 @@ class McpActionExecutor:
                 state,
                 index_elements=index_elements,
                 skip_observe=skip_observe,
+                verify_live_target=verify_live_target,
             )
 
         return ToolExecutionResult(
@@ -274,6 +276,7 @@ class McpActionExecutor:
         *,
         index_elements: list[dict[str, Any]] | None = None,
         skip_observe: bool = False,
+        verify_live_target: bool = False,
     ) -> ToolExecutionResult:
         span = TraceSpan(name=raw_name, trace_type="action", ctx=self.ctx)
         span.payload = {"args": args}
@@ -378,6 +381,16 @@ class McpActionExecutor:
                                 f"screen and did not change anything, and nothing else was changed since. "
                                 f"Inspect the screen for an unselected required option, a disabled control, "
                                 f"a validation notice or content below the fold before trying again."
+                            )
+
+                        # 3. Morphed-commitment guard: later in a burst the screen may
+                        # have changed under a point chosen on the turn's screenshot. A
+                        # control that turned into a commitment button ("Review address"
+                        # becoming "Place Order" at the same spot) must not be tapped
+                        # blind. target_text taps carry their own Commitment Guard.
+                        if verify_live_target and not args.get("target_text"):
+                            await self._guard_morphed_commitment(
+                                session, target_coordinates, state, index_elements
                             )
                 extension = raw_name not in (REQUIRED_ACTIONS | OPTIONAL_ACTIONS)
 
@@ -1012,6 +1025,66 @@ class McpActionExecutor:
                 raise _ArgError(f"Error during click sequence: Invalid target format: {raw_target}")
             resolved.append([nx, ny])
         return resolved
+
+    def _label_at(self, elements: Any, point: Any) -> str:
+        """Text of the smallest labelled element containing ``point`` (0-1000)."""
+        from artemis.utils.screen_diff import flatten_hierarchy, robust_parse_bounds
+
+        if not elements or not point:
+            return ""
+        width, height = self._screen_size()
+        px = point[0] * width / 1000.0
+        py = point[1] * height / 1000.0
+        best: tuple[float, str] | None = None
+        for el in flatten_hierarchy(elements):
+            label = str(
+                el.get("text") or el.get("content-desc") or el.get("content_description") or ""
+            ).strip()
+            if not label:
+                continue
+            bounds = robust_parse_bounds(el.get("bounds"))
+            if not bounds:
+                continue
+            l, t, r, b = bounds
+            if l <= px <= r and t <= py <= b:
+                area = float(max(1, (r - l) * (b - t)))
+                if best is None or area < best[0]:
+                    best = (area, label)
+        return best[1] if best else ""
+
+    async def _guard_morphed_commitment(
+        self,
+        session: Any,
+        point: Any,
+        state: Any,
+        index_elements: list[dict[str, Any]] | None,
+    ) -> None:
+        """Refuses a point tap whose target became a commitment control.
+
+        Checks the live hierarchy (one fetch, ~0.1-0.3 s; only for point actions
+        after the first device action of a burst). When the check cannot run,
+        the tap proceeds: this guard narrows a risk, it is not a gate.
+        """
+        from artemis.utils.screen_diff import COMMITMENT_PATTERN
+
+        if session is None or not hasattr(session, "ui_hierarchy"):
+            return
+        try:
+            live = await session.ui_hierarchy(timeout=2.0)
+        except Exception as err:  # pylint: disable=broad-exception-caught
+            logger.debug(f"Morphed-commitment check skipped: {err}")
+            return
+        live_label = self._label_at(live, point)
+        if not live_label or not COMMITMENT_PATTERN.search(live_label):
+            return
+        seen_label = self._label_at(self._index_elements(state, index_elements), point)
+        if seen_label == live_label:
+            return  # the model saw this very control and chose it
+        raise _ArgError(
+            f"Commitment Guard: the control at {point} is now '{live_label}' (it was "
+            f"'{seen_label or 'something else'}' on the screen you decided on). The screen changed "
+            f"during this burst; look at the new screen before tapping a commitment control."
+        )
 
     @staticmethod
     def _index_elements(

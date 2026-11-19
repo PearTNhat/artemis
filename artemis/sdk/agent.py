@@ -134,6 +134,20 @@ class Agent(AgentBase):
                 "model_ready", "Model connection is ready (fake LLM)", session_id=self._session_id
             )
             return
+        # Gemini CLI mode: no node a run needs calls the Gemini API, so warming
+        # its pool only spends a request of the key's daily quota (and logs 429
+        # retries once that quota is gone).
+        try:
+            from artemis.config.model_routing import describe_model_routing
+
+            if describe_model_routing().get("cli_only"):
+                logger.info("All model nodes run on the Gemini CLI — skipping Gemini API pre-warming.")
+                publish_startup_progress(
+                    "model_ready", "Model connection is ready (Gemini CLI)", session_id=self._session_id
+                )
+                return
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.debug(f"Model routing unavailable; pre-warming as usual: {exc}")
         publish_startup_progress(
             "model_warmup", "Warming the model connection", session_id=self._session_id
         )

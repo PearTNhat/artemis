@@ -559,6 +559,25 @@ async def _run_check_loop(
 
     if report is None:
         report = CheckReport(verdicts=[])
+    if not report.verdicts and check_items:
+        # The model reasoned to a conclusion but its structured answer came back
+        # empty (seen on Pro trace 14f3ebb7: "all criteria satisfied", zero
+        # verdicts). Ask once more, naming every item to answer verbatim.
+        items = "\n".join(f"- [{ci.kind}] {ci.text}" for ci in check_items)
+        retry = messages + [
+            HumanMessage(
+                content=(
+                    "Your structured report contained no verdicts. Return exactly one verdict per "
+                    "check item below, quoting item_text verbatim, with kind, status "
+                    "(passed/failed/inconclusive) and concrete evidence from what you observed:\n"
+                    f"{items}"
+                )
+            )
+        ]
+        try:
+            report = await _structured_report(llm, retry)
+        except Exception as err:  # pylint: disable=broad-exception-caught
+            logger.debug(f"Checker structured retry failed: {err}")
     return _normalize_report(report, check_items)
 
 

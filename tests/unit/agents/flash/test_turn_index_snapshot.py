@@ -436,166 +436,68 @@ async def test_index_click_after_target_text_click_is_aborted(mock_context):
     assert "targets an index or coordinate from an earlier screen" in tool_msgs[1].content
 
 
-# --- Pre-wait no-effect check ------------------------------------------------------
+# --- Wait results from the shared action server ---------------------------------
 
 
-def _png(tmp_path, name, mark=None) -> str:
-    """A 1080x2400 screenshot; ``mark`` paints a block (x1, y1, x2, y2) in pixels."""
-    from PIL import Image, ImageDraw
+class _NoEffectSession(_FakeSession):
+    """The action server answers wait_for_screen_change with a no-effect result."""
 
-    img = Image.new("RGB", (1080, 2400), "white")
-    if mark:
-        ImageDraw.Draw(img).rectangle(list(mark), fill="black")
-    path = tmp_path / f"{name}.png"
-    img.save(path)
-    return str(path)
-
-
-class _ShotSession(_FakeSession):
-    """A session whose observations also carry a screenshot file."""
-
-    def __init__(self, observations, shots):
-        super().__init__(observations)
-        self._shots = list(shots)
-
-    async def observe(self, settle_ms=0, include_image=False, persist=True):
-        res = await super().observe(settle_ms=settle_ms)
-        shot = self._shots.pop(0) if self._shots else None
-        return res.model_copy(update={"screenshot_path": shot})
+    async def call(self, name, args):
+        self.calls.append((name, dict(args)))
+        if name == "wait_for_screen_change":
+            return ActionResult.success(
+                name, "[NO_EFFECT] No visible change ... wait skipped.", no_effect=True
+            )
+        return ActionResult.success(name, f"{name} dispatched")
 
 
-def _burst_runner(mock_context, observations, shots):
-    runner = _runner(mock_context, observations)
-    runner.executor._session = _ShotSession(observations, shots)
-    runner._PRE_WAIT_SETTLE_STEPS_MS = (0, 0)
-    return runner
-
-
-def _wait_call(after="external"):
-    return {
-        "name": "wait_for_screen_change",
-        "args": {"region": [0, 300, 1000, 800], "timeout_s": 60.0, "after": after},
-        "id": "tc-wait",
-    }
-
-
-async def _run(runner, calls, state, pre_bytes):
+@pytest.mark.asyncio
+async def test_no_effect_wait_aborts_the_rest_of_the_burst(mock_context):
+    """[click, wait_for_screen_change, click]: the server reports the click had no
+    effect, so the trailing click (planned on the assumption it did) is not run and
+    is reported as an error; every tool call still gets exactly one ToolMessage."""
+    runner = _runner(mock_context, observations=[ORIGINAL] * 4)
+    runner.executor._session = _NoEffectSession([ORIGINAL] * 4)
     messages: list = []
+
     await runner._process_tool_calls(
-        calls, state, messages, "thought", {}, pre_bytes, "xml", 0, _TurnRecord()
+        [
+            _click(5, "tc-click-5"),
+            {"name": "wait_for_screen_change", "args": {"region": [0, 300, 1000, 800]}, "id": "tc-wait"},
+            _click(3, "tc-click-3"),
+        ],
+        _state(ORIGINAL),
+        messages,
+        "thought",
+        {},
+        b"pre",
+        "xml",
+        0,
+        _TurnRecord(),
     )
-    return [m for m in messages if isinstance(m, ToolMessage)]
 
-
-@pytest.mark.asyncio
-async def test_pre_wait_skips_wait_when_burst_left_the_region_unchanged(mock_context, tmp_path):
-    """[click, wait_for_screen_change, click] with no change in the region: the wait is
-    skipped and the trailing action is not executed (reported as an error)."""
-    blank = _png(tmp_path, "blank")
-    pre_bytes = open(blank, "rb").read()
-    # Executor's post-click look, then the two pre-wait looks: all identical.
-    runner = _burst_runner(mock_context, [ORIGINAL] * 3, [blank] * 3)
-
-    tool_msgs = await _run(runner, [_click(5, "tc-click-5"), _wait_call(), _click(3, "tc-click-3")],
-                           _state(ORIGINAL), pre_bytes)
-
-    assert [name for name, _ in runner.executor._session.calls] == ["click"]
-    assert len(tool_msgs) == 3
-    assert tool_msgs[1].status == "success"
-    assert "wait skipped" in tool_msgs[1].content
+    session = runner.executor._session
+    assert [name for name, _ in session.calls] == ["click", "wait_for_screen_change"]
+    tool_msgs = [m for m in messages if isinstance(m, ToolMessage)]
+    assert [m.tool_call_id for m in tool_msgs] == ["tc-click-5", "tc-wait", "tc-click-3"]
+    assert "[NO_EFFECT]" in tool_msgs[1].content
     assert tool_msgs[2].status == "error"
+    assert "no visible effect" in tool_msgs[2].content
 
 
 @pytest.mark.asyncio
-async def test_pre_wait_keeps_wait_when_burst_changed_the_region(mock_context, tmp_path):
-    """The burst's own action changed the region (a legal move): the wait must run.
-    The baseline is the screen from the start of the turn, not the post-click look."""
-    blank = _png(tmp_path, "blank")
-    moved = _png(tmp_path, "moved", mark=(200, 900, 600, 1500))
-    pre_bytes = open(blank, "rb").read()
-    runner = _burst_runner(mock_context, [ORIGINAL] * 3, [moved] * 3)
+async def test_only_point_taps_after_the_first_device_action_verify_the_live_target(mock_context):
+    runner = _runner(mock_context, observations=[ORIGINAL] * 4)
+    seen: list[bool] = []
+    real_execute = runner.executor.execute
 
-    tool_msgs = await _run(runner, [_click(5, "tc-click-5"), _wait_call()], _state(ORIGINAL), pre_bytes)
+    async def spy(name, args, tc_id, state, **kwargs):
+        seen.append(kwargs.get("verify_live_target", False))
+        return await real_execute(name, args, tc_id, state, **kwargs)
 
-    assert [name for name, _ in runner.executor._session.calls] == ["click", "wait_for_screen_change"]
-    assert len(tool_msgs) == 2
-
-
-@pytest.mark.asyncio
-async def test_my_action_wait_returns_once_changed_screen_has_settled(mock_context, tmp_path):
-    """after='my_action': the tap already changed the screen (navigated into a page), so
-    the wait returns as soon as two consecutive looks match, without running the wait."""
-    blank = _png(tmp_path, "blank")
-    moved = _png(tmp_path, "moved", mark=(200, 900, 600, 1500))
-    pre_bytes = open(blank, "rb").read()
-    runner = _burst_runner(mock_context, [ORIGINAL] * 6, [moved] * 6)
-    runner._SETTLE_POLL_MS = 0
-
-    tool_msgs = await _run(runner, [_click(5, "tc-click-5"), _wait_call(after="my_action")],
-                           _state(ORIGINAL), pre_bytes)
-
-    assert [name for name, _ in runner.executor._session.calls] == ["click"]
-    assert len(tool_msgs) == 2
-    assert tool_msgs[1].status == "success"
-    assert "has settled" in tool_msgs[1].content
-
-
-@pytest.mark.asyncio
-async def test_my_action_wait_reports_screen_still_moving(mock_context, tmp_path):
-    """The page keeps changing between looks (skeleton filling in): the result says so
-    instead of claiming the screen settled."""
-    blank = _png(tmp_path, "blank")
-    frames = [_png(tmp_path, f"f{i}", mark=(100 + 120 * i, 900, 220 + 120 * i, 1500)) for i in range(9)]
-    pre_bytes = open(blank, "rb").read()
-    runner = _burst_runner(mock_context, [ORIGINAL] * 9, frames)
-    runner._SETTLE_POLL_MS = 0
-
-    tool_msgs = await _run(runner, [_click(5, "tc-click-5"), _wait_call(after="my_action")],
-                           _state(ORIGINAL), pre_bytes)
-
-    assert [name for name, _ in runner.executor._session.calls] == ["click"]
-    assert "still moving" in tool_msgs[1].content
-
-
-@pytest.mark.asyncio
-async def test_pre_wait_without_screenshots_is_uncertain_and_keeps_wait(mock_context):
-    """No screenshot to compare (e.g. canvas screen whose element list never changes):
-    the element list alone cannot prove no effect, so the wait runs."""
-    runner = _runner(mock_context, observations=[ORIGINAL] * 3)
-    runner._PRE_WAIT_SETTLE_STEPS_MS = (0, 0)
-
-    tool_msgs = await _run(runner, [_click(5, "tc-click-5"), _wait_call()], _state(ORIGINAL), b"pre")
-
-    assert [name for name, _ in runner.executor._session.calls] == ["click", "wait_for_screen_change"]
-    assert len(tool_msgs) == 2
-
-
-@pytest.mark.asyncio
-async def test_turn_opening_my_action_wait_returns_when_page_already_loaded(mock_context, tmp_path):
-    """Regression (Shopee trace step 5): the model saw a loading skeleton and opened its
-    turn with wait_for_screen_change. The results had already loaded, so the wait must
-    return at once instead of taking a fresh baseline and timing out."""
-    skeleton = _png(tmp_path, "skeleton")
-    loaded = _png(tmp_path, "loaded", mark=(100, 800, 900, 1800))
-    runner = _burst_runner(mock_context, [ORIGINAL] * 6, [loaded] * 6)
-    runner._SETTLE_POLL_MS = 0
-
-    tool_msgs = await _run(runner, [_wait_call(after="my_action")], _state(ORIGINAL),
-                           open(skeleton, "rb").read())
-
-    assert runner.executor._session.calls == []
-    assert "has settled" in tool_msgs[0].content
-
-
-@pytest.mark.asyncio
-async def test_turn_opening_wait_on_unchanged_screen_still_waits(mock_context, tmp_path):
-    """Nothing acted this turn and the screen is unchanged: that is a genuine wait for
-    loading to finish, not a sign of an ineffective action."""
-    blank = _png(tmp_path, "blank")
-    runner = _burst_runner(mock_context, [ORIGINAL] * 6, [blank] * 6)
-
-    tool_msgs = await _run(runner, [_wait_call(after="my_action")], _state(ORIGINAL),
-                           open(blank, "rb").read())
-
-    assert [name for name, _ in runner.executor._session.calls] == ["wait_for_screen_change"]
-    assert "wait skipped" not in tool_msgs[0].content
+    runner.executor.execute = spy
+    await runner._process_tool_calls(
+        [_click(2, "tc-1"), _click(3, "tc-2")],
+        _state(ORIGINAL), [], "thought", {}, b"pre", "xml", 0, _TurnRecord(),
+    )
+    assert seen == [False, True]

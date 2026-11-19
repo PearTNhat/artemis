@@ -12,10 +12,11 @@
     "provider": "agy",
     "model": "gemini-3.8-flash-low",
     // When agy fails, fall back to the Gemini API (needs GEMINI/GOOGLE key).
+    // Gemini CLI mode: every node runs on agy, no API key. If the CLI call
+    // fails, retry on a stronger CLI model rather than the Gemini API.
     "fallback": {
-      "provider": "google",
-      "model": "gemini-3.6-flash",
-      "thinking_level": "medium"
+      "provider": "agy",
+      "model": "gemini-3.8-flash-medium"
     }
   },
 
@@ -95,16 +96,29 @@
 
     // 📋 Summarizer: Aggregates step history and generates structured outcome
     // One-shot background helpers stay on the API (cheap, parallel).
-    "summarizer": { "provider": "google", "model": "gemini-3.5-flash-lite" },
+    // One-shot helpers: "agy_oneshot" = one independent `agy -p` run per call.
+    "summarizer": { "provider": "agy_oneshot", "model": "gemini-3.8-flash-low" },
 
     // 🔽 Hopper: Fast lightweight package name locator
     "hopper": {
-      "provider": "google",
-      "model": "gemini-3.5-flash-lite",
-      "fallback": {
-        "provider": "google",
-        "model": "gemini-3.1-flash-lite"
-      }
+      "provider": "agy_oneshot",
+      "model": "gemini-3.8-flash-low",
+      "fallback": { "provider": "agy_oneshot", "model": "gemini-3.8-flash-medium" }
+    },
+
+    // 🛡️ Pro pre-execution pixel safety net and planner milestone review.
+    // On the CLI each check is one `agy -p` run (~6-10 s per vetted action).
+    "validator_pixel_safety_net": {
+      "provider": "agy_oneshot",
+      "model": "gemini-3.8-flash-low",
+      "temperature": 0.0,
+      "fallback": { "provider": "agy_oneshot", "model": "gemini-3.8-flash-medium" }
+    },
+    "planner_validation": {
+      "provider": "agy_oneshot",
+      "model": "gemini-3.8-flash-low",
+      "temperature": 0.0,
+      "fallback": { "provider": "agy_oneshot", "model": "gemini-3.8-flash-medium" }
     },
 
     // 📝 Outputter: Synthesizes execution trace into final output report
@@ -144,14 +158,14 @@
     // Execution: Observe-Think-Act single LLM reactive loop without graph overhead.
     "flash": {
       "max_turns": 0, // Maximum reactive turns before stopping (0 = unlimited; history is bounded by transcript compression, not by a turn cap)
-      "explorer_mode": "flash", // Explorer tier for the Flash runner: 'flash' | 'pro' | 'ultra' (see top-level "explorer")
+      "explorer_mode": "flash", // 'flash' grounds with the ER model (object_detector, Gemini API; called only on ask_explorer) Explorer tier for the Flash runner: 'flash' | 'pro' | 'ultra' (see top-level "explorer")
       "fast_burst": true, // Execute consecutive actions in multi-action turns without intermediate screen captures
       // 🧠 Step Summarizer: Asynchronous visual context compressor
       // Summarizes intermediate steps in background without blocking the runner,
       // replacing images only after strictly objective, high-density summaries are ready.
       "step_summarizer": {
         "enabled": true, // Whether background step summarization is active
-        "model": "gemini-3.5-flash-lite", // Lightweight model for fast background inference
+        "model": "agy:gemini-3.8-flash-low", // "agy:<model>" = Gemini CLI one-shot; a plain name = Gemini API
         "prune_history_xml": true // Prune outdated heavy XML trees from historical steps
       }
     },
@@ -252,8 +266,8 @@
         // call each); milestone closes are exempt, the hard line waives it.
         "min_steps": 3,
         "target_source_tokens": 2000,
-        // flash-lite: the free tier allows only ~20 gemini-3.6-flash calls a day.
-        "model": "gemini-3.5-flash-lite",
+        // "agy:<model>" = Gemini CLI one-shot (no API quota); a plain name = Gemini API.
+        "model": "agy:gemini-3.8-flash-low",
         "max_chunks": 8
         // "max_eras": 8 // independent era cap; omitted = follows max_chunks
       },

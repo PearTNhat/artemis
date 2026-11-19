@@ -45,6 +45,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from artemis.agents.flash.runner import FlashRunner
+from artemis.agents.flash.report import save_flash_report
 from artemis.agents.outputter.outputter import outputter
 from artemis.clients.screen_client_factory import (
     ScreenClient,
@@ -573,6 +574,24 @@ class AgentBase:
                             )
                             runner = FlashRunner(context, goal=request.goal, max_turns=max_turns)
                             flash_result = await runner.run(state)
+
+                            # A caller that describes the output it wants gets the
+                            # same Outputter report as Pro, rebuilt from the full
+                            # stored history; every run leaves notes/output.md.
+                            synthesized = None
+                            if output_config is not None and output_config.needs_structured_format(
+                                default_enabled=True
+                            ):
+                                synthesized = await self._extract_output(
+                                    task_name=task_name,
+                                    ctx=context,
+                                    request=request,
+                                    output_config=output_config,
+                                    state=state,
+                                )
+                                if synthesized is not None:
+                                    flash_result = {**flash_result, "report": synthesized}
+                            save_flash_report(context, flash_result, synthesized)
 
                             output = flash_result
                             last_state_snapshot = state.model_dump()

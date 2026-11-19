@@ -104,6 +104,11 @@
           "default": false,
           "title": "Timed Out",
           "type": "boolean"
+        },
+        "no_effect": {
+          "default": false,
+          "title": "No Effect",
+          "type": "boolean"
         }
       },
       "required": [
@@ -219,6 +224,11 @@
           "default": false,
           "title": "Timed Out",
           "type": "boolean"
+        },
+        "no_effect": {
+          "default": false,
+          "title": "No Effect",
+          "type": "boolean"
         }
       },
       "required": [
@@ -330,6 +340,11 @@
         "timed_out": {
           "default": false,
           "title": "Timed Out",
+          "type": "boolean"
+        },
+        "no_effect": {
+          "default": false,
+          "title": "No Effect",
           "type": "boolean"
         }
       },
@@ -455,6 +470,11 @@
           "default": false,
           "title": "Timed Out",
           "type": "boolean"
+        },
+        "no_effect": {
+          "default": false,
+          "title": "No Effect",
+          "type": "boolean"
         }
       },
       "required": [
@@ -575,6 +595,11 @@
           "default": false,
           "title": "Timed Out",
           "type": "boolean"
+        },
+        "no_effect": {
+          "default": false,
+          "title": "No Effect",
+          "type": "boolean"
         }
       },
       "required": [
@@ -678,6 +703,11 @@
         "timed_out": {
           "default": false,
           "title": "Timed Out",
+          "type": "boolean"
+        },
+        "no_effect": {
+          "default": false,
+          "title": "No Effect",
           "type": "boolean"
         }
       },
@@ -788,6 +818,11 @@
           "default": false,
           "title": "Timed Out",
           "type": "boolean"
+        },
+        "no_effect": {
+          "default": false,
+          "title": "No Effect",
+          "type": "boolean"
         }
       },
       "required": [
@@ -891,6 +926,11 @@
         "timed_out": {
           "default": false,
           "title": "Timed Out",
+          "type": "boolean"
+        },
+        "no_effect": {
+          "default": false,
+          "title": "No Effect",
           "type": "boolean"
         }
       },
@@ -1013,6 +1053,11 @@
         "timed_out": {
           "default": false,
           "title": "Timed Out",
+          "type": "boolean"
+        },
+        "no_effect": {
+          "default": false,
+          "title": "No Effect",
           "type": "boolean"
         }
       },
@@ -1138,6 +1183,11 @@
           "default": false,
           "title": "Timed Out",
           "type": "boolean"
+        },
+        "no_effect": {
+          "default": false,
+          "title": "No Effect",
+          "type": "boolean"
         }
       },
       "required": [
@@ -1257,6 +1307,11 @@
           "default": false,
           "title": "Timed Out",
           "type": "boolean"
+        },
+        "no_effect": {
+          "default": false,
+          "title": "No Effect",
+          "type": "boolean"
         }
       },
       "required": [
@@ -1361,6 +1416,11 @@
           "default": false,
           "title": "Timed Out",
           "type": "boolean"
+        },
+        "no_effect": {
+          "default": false,
+          "title": "No Effect",
+          "type": "boolean"
         }
       },
       "required": [
@@ -1456,6 +1516,11 @@
         "timed_out": {
           "default": false,
           "title": "Timed Out",
+          "type": "boolean"
+        },
+        "no_effect": {
+          "default": false,
+          "title": "No Effect",
           "type": "boolean"
         }
       },
@@ -1563,6 +1628,11 @@
         "timed_out": {
           "default": false,
           "title": "Timed Out",
+          "type": "boolean"
+        },
+        "no_effect": {
+          "default": false,
+          "title": "No Effect",
           "type": "boolean"
         }
       },

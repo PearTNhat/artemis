@@ -512,6 +512,18 @@
                     }
                   </div>
                   <div class="preset-desc">Antigravity CLI trên máy · không cần API key</div>
+                  @if (activePreset() === 'agy' && systemService.cliApiKeyNodes().length) {
+                  <div class="preset-desc preset-warning"
+                    title="Các node này vẫn gọi Gemini API bằng API key và bị giới hạn quota của key.">
+                    ⚠️ Vẫn dùng API key: {{ systemService.cliApiKeyNodes().join(', ') }}
+                  </div>
+                  }
+                  @if (activePreset() === 'agy' && systemService.cliOnDemandApiNodes().length) {
+                  <div class="preset-desc"
+                    title="Chỉ gọi khi cần (định vị phần tử bằng model ER, phân tích video); các model này chỉ có trên Gemini API.">
+                    Gọi API khi cần: {{ systemService.cliOnDemandApiNodes().join(', ') }}
+                  </div>
+                  }
                   <div class="preset-meta">
                     <span class="meta-tag">Local CLI</span>
                     <span class="meta-tag">~7-10s/step</span>
@@ -2014,6 +2026,11 @@
                         }
                       </div>
                       <span class="item-desc">Antigravity CLI trên máy · không cần API key</span>
+                      @if (activePreset() === 'agy' && systemService.cliApiKeyNodes().length) {
+                      <span class="item-desc preset-warning">
+                        ⚠️ Vẫn dùng API key: {{ systemService.cliApiKeyNodes().join(', ') }}
+                      </span>
+                      }
                     </div>
                     @if (isSwitchingPreset() === 'agy') {
                     <span class="spinner-small"></span>

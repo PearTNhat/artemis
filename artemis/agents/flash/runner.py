@@ -39,7 +39,6 @@ active window until its turn is chunked, whose user lines then carry it on.
 
 import asyncio
 import base64
-import io
 import time
 from dataclasses import dataclass, field
 import json
@@ -83,6 +82,7 @@ from artemis.graph.perception import _check_injected_instruction_file
 from artemis.graph.state import State
 from artemis.llm.structured import ParseFailure, parse_structured
 from artemis.mcp.action_executor import McpActionExecutor
+from artemis.mcp.screen_effect import NO_EFFECT_MARKER
 from artemis.mcp.observation import observe
 from artemis.memory.transcript import PRO_UI_LIST_MARKER, TranscriptLedger, mark_ephemeral
 from artemis.services.llm import (
@@ -659,137 +659,6 @@ class FlashRunner:
             await self.summarizer.flush()
         return final_report
 
-    async def _observe_live(self, settle_ms: int):
-        """Observes the device through the executor's session (the guarded
-        observation pipeline), falling back to a direct capture. Returns
-        ``(obs, screenshot_bytes)``; ``obs`` is ``None`` when both fail."""
-        session = getattr(self.executor, "_session", None)
-        if session is not None and hasattr(session, "observe"):
-            try:
-                obs = await session.observe(settle_ms=settle_ms)
-                if obs is not None and obs.ok:
-                    shot = None
-                    if getattr(obs, "screenshot_path", None):
-                        try:
-                            shot = Path(obs.screenshot_path).read_bytes()
-                        except Exception:
-                            shot = None
-                    return obs, shot
-            except Exception as err:
-                logger.debug(f"Session observation failed, falling back: {err}")
-        try:
-            obs, shot = await observe(self.ctx, self.controller, settle_ms=settle_ms)
-            return (obs, shot) if obs is not None and obs.ok else (None, None)
-        except Exception as err:
-            logger.debug(f"Direct observation failed: {err}")
-            return None, None
-
-    # Settle delays (ms) before each look: a tap's effect (animation, page
-    # transition, a short network round trip) gets ~1s to show before the
-    # burst is judged to have had no effect.
-    _PRE_WAIT_SETTLE_STEPS_MS = (300, 700)
-
-    async def _burst_effect_in_region(self, region, baseline_bytes, baseline_elements):
-        """Did this turn's actions visibly change ``region`` (0-1000 scale)?
-
-        Returns ``(verdict, obs, screenshot_bytes)`` with verdict one of
-        ``"changed"``, ``"unchanged"`` or ``"uncertain"``. Only ``"unchanged"``
-        may skip a wait: it needs a pixel comparison (status bar and clocks
-        masked) AND an unchanged element list in the region. Without both
-        screenshots the answer is ``"uncertain"``: on canvas-drawn screens the
-        element list alone cannot see a change.
-        """
-        from PIL import Image
-
-        from artemis.utils.screen_diff import compare_screen_pixels, compare_xml_hierarchy, mask_noise
-
-        width, height = self.executor._screen_size()
-        obs, shot = None, None
-        verdict = "uncertain"
-        for settle_ms in self._PRE_WAIT_SETTLE_STEPS_MS:
-            obs, shot = await self._observe_live(settle_ms)
-            if obs is None:
-                return "uncertain", None, None
-            if not (shot and baseline_bytes):
-                return "uncertain", obs, shot
-            try:
-                img_pre = Image.open(io.BytesIO(baseline_bytes))
-                img_curr = Image.open(io.BytesIO(shot))
-                # Element bounds are in device pixels; a downscaled capture is
-                # brought to device size so the noise mask lands on the clocks.
-                if img_pre.size != (width, height):
-                    img_pre = img_pre.resize((width, height))
-                if img_curr.size != (width, height):
-                    img_curr = img_curr.resize((width, height))
-                pre_masked = mask_noise(img_pre, baseline_elements, width, height)
-                curr_masked = mask_noise(img_curr, obs.elements if obs.hierarchy_ok else None, width, height)
-                pixels_changed, _ = compare_screen_pixels(
-                    pre_masked, curr_masked, region=region, width=width, height=height
-                )
-            except Exception as err:
-                logger.debug(f"Pre-wait pixel comparison failed: {err}")
-                return "uncertain", obs, shot
-            xml_changed = False
-            if baseline_elements and obs.hierarchy_ok and obs.elements:
-                xml_changed, _ = compare_xml_hierarchy(
-                    baseline_elements, obs.elements, region=region, width=width, height=height
-                )
-            if pixels_changed or xml_changed:
-                return "changed", obs, shot
-            verdict = "unchanged"
-        return verdict, obs, shot
-
-    # After a change is seen, how often and how long to look for the screen to
-    # stop moving (page slide-in, skeleton filling in) before handing it over.
-    _SETTLE_POLL_MS = 300
-    _SETTLE_MAX_LOOKS = 6
-
-    def _masked_region(self, shot: bytes, elements, region):
-        """The noise-masked device-size image of ``shot``, cropped to ``region``."""
-        from PIL import Image
-
-        from artemis.utils.screen_diff import crop_region, mask_noise
-
-        width, height = self.executor._screen_size()
-        img = Image.open(io.BytesIO(shot))
-        if img.size != (width, height):
-            img = img.resize((width, height))
-        return crop_region(mask_noise(img, elements, width, height), region, width, height)
-
-    async def _wait_until_settled(self, obs, shot, region):
-        """Looks again until two consecutive looks match in ``region``.
-
-        Returns ``(obs, shot, settled)``; on giving up after
-        ``_SETTLE_MAX_LOOKS`` looks the latest look is returned with
-        ``settled=False`` so the model knows the screen may still be moving.
-        """
-        from artemis.utils.screen_diff import compare_screen_pixels
-
-        if not shot:
-            return obs, shot, False
-        try:
-            prev = self._masked_region(shot, obs.elements if obs.hierarchy_ok else None, region)
-        except Exception as err:
-            logger.debug(f"Settle check unavailable: {err}")
-            return obs, shot, False
-        for _ in range(self._SETTLE_MAX_LOOKS):
-            new_obs, new_shot = await self._observe_live(self._SETTLE_POLL_MS)
-            if new_obs is None or not new_shot:
-                return obs, shot, False
-            try:
-                curr = self._masked_region(
-                    new_shot, new_obs.elements if new_obs.hierarchy_ok else None, region
-                )
-                w, h = curr.size
-                moved, _ = compare_screen_pixels(prev, curr, width=w, height=h)
-            except Exception as err:
-                logger.debug(f"Settle comparison failed: {err}")
-                return new_obs, new_shot, False
-            obs, shot, prev = new_obs, new_shot, curr
-            if not moved:
-                return obs, shot, True
-        return obs, shot, False
-
     def _rebase_screen_baseline(self, obs, screenshot_bytes) -> None:
         """Tells the executor about a screen captured outside it, so its
         screen-unchanged check (repeat-tap guard, post-tap recapture) compares
@@ -999,6 +868,7 @@ class FlashRunner:
         native_text: str | None = None,
         index_elements: list[dict] | None = None,
         skip_observe: bool = False,
+        verify_live_target: bool = False,
     ):
         """Executes one tool call, records it, and updates loop state.
 
@@ -1015,7 +885,8 @@ class FlashRunner:
         action_names = self.executor.action_tool_names
         try:
             exec_result = await self.executor.execute(
-                name, args, tc_id, state, index_elements=index_elements, skip_observe=skip_observe
+                name, args, tc_id, state, index_elements=index_elements, skip_observe=skip_observe,
+                verify_live_target=verify_live_target,
             )
 
             post_img_bytes = None
@@ -1165,11 +1036,9 @@ class FlashRunner:
         index_elements = self._turn_index_snapshot(state)
         total_calls = len(tool_calls)
         has_waited = False
-        # Screen the turn's actions start from: the pre-wait check asks whether the
-        # burst's own actions changed anything relative to it.
+        # Device actions dispatched so far in this burst (point actions after the
+        # first are re-checked against the live screen by the executor).
         actions_executed_in_burst = 0
-        burst_baseline_bytes = pre_screenshot_bytes
-        burst_baseline_elements = list(index_elements) if index_elements else None
 
         for idx, tc in enumerate(tool_calls):
             name = tc["name"].split(":")[-1] if ":" in tc["name"] else tc["name"]
@@ -1338,99 +1207,6 @@ class FlashRunner:
                 )
                 return final_report, pre_screenshot_bytes, xml_list, action_sequence
 
-            # Pre-wait no-effect check: a wait_for_screen_change after the burst's own
-            # actions waits for an external change. If those actions left the wait region
-            # unchanged (a rejected move, an unresponsive control), waiting the full
-            # timeout teaches the model nothing; return the live screen instead.
-            if (
-                is_wait_tool
-                and name == "wait_for_screen_change"
-                # A wait opening the turn (no action before it) is also checked for
-                # after="my_action": the page may have finished loading between the
-                # screenshot the model saw and now, and a fresh baseline would then
-                # wait for a change that already happened.
-                and (actions_executed_in_burst > 0 or args.get("after", "my_action") == "my_action")
-            ):
-                after = args.get("after", "my_action")
-                verdict, obs_pre_wait, curr_shot_bytes = await self._burst_effect_in_region(
-                    args.get("region"), burst_baseline_bytes, burst_baseline_elements
-                )
-                # "No change" only proves something when this turn acted; a wait that
-                # opens the turn on an unchanged screen is a genuine wait.
-                if verdict == "unchanged" and actions_executed_in_burst > 0:
-                    skip_msg = (
-                        "No visible change in the wait region since the start of this turn's actions "
-                        "(checked for ~1s); wait skipped. The previous action(s) may have had no effect: "
-                        "inspect the screen before repeating them."
-                    )
-                    logger.info(f"Wait tool '{name}' skipped: {skip_msg}")
-                    turn.step_keys.append(str(tc_id))
-                    turn.actions.append((name, "success", skip_msg))
-                    messages.append(
-                        ToolMessage(tool_call_id=tc_id, name=name, content=skip_msg, status="success")
-                    )
-                    if curr_shot_bytes:
-                        pre_screenshot_bytes = curr_shot_bytes
-                        self._rebase_screen_baseline(obs_pre_wait, curr_shot_bytes)
-                    if obs_pre_wait.elements_text:
-                        xml_list = obs_pre_wait.elements_text
-                    if state is not None:
-                        if obs_pre_wait.hierarchy_ok:
-                            state.indexed_points = [
-                                el["center"] for el in obs_pre_wait.elements if el.get("center")
-                            ]
-                            state.indexed_elements = obs_pre_wait.elements
-                        if obs_pre_wait.screenshot_path:
-                            state.latest_screenshot = obs_pre_wait.screenshot_path
-                    for rem_tc in tool_calls[idx + 1:]:
-                        rem_id = rem_tc.get("id") or str(uuid.uuid4())
-                        rem_name = rem_tc.get("name", "").split(":")[-1]
-                        messages.append(
-                            ToolMessage(
-                                tool_call_id=rem_id,
-                                name=rem_name,
-                                content="Action not executed: the preceding wait was skipped because the screen did not change; returning to AI for evaluation.",
-                                status="error",
-                            )
-                        )
-                    break
-                elif verdict == "changed" and after == "my_action":
-                    obs_pre_wait, curr_shot_bytes, settled = await self._wait_until_settled(
-                        obs_pre_wait, curr_shot_bytes, args.get("region")
-                    )
-                    skip_msg = (
-                        "Screen already changed since the screen you last saw and has settled; no further wait needed."
-                        if settled
-                        else "Screen already changed since the screen you last saw but was still moving at the last look "
-                        "(loading or animating); check the screen and wait again if needed."
-                    )
-                    logger.info(f"Wait tool '{name}' satisfied immediately: {skip_msg}")
-                    turn.step_keys.append(str(tc_id))
-                    turn.actions.append((name, "success", skip_msg))
-                    messages.append(
-                        ToolMessage(tool_call_id=tc_id, name=name, content=skip_msg, status="success")
-                    )
-                    if curr_shot_bytes:
-                        pre_screenshot_bytes = curr_shot_bytes
-                        self._rebase_screen_baseline(obs_pre_wait, curr_shot_bytes)
-                    if obs_pre_wait.elements_text:
-                        xml_list = obs_pre_wait.elements_text
-                    if state is not None:
-                        if obs_pre_wait.hierarchy_ok:
-                            state.indexed_points = [
-                                el["center"] for el in obs_pre_wait.elements if el.get("center")
-                            ]
-                            state.indexed_elements = obs_pre_wait.elements
-                        if obs_pre_wait.screenshot_path:
-                            state.latest_screenshot = obs_pre_wait.screenshot_path
-
-                    has_waited = True
-                    index_elements = getattr(state, "indexed_elements", None) or index_elements
-                    actions_executed_in_burst = 0
-                    burst_baseline_bytes = pre_screenshot_bytes
-                    burst_baseline_elements = list(index_elements) if index_elements else None
-                    continue
-
             elements_before = getattr(state, "indexed_elements", None)
             before_len = len(elements_before) if isinstance(elements_before, list) else 0
             pre_screenshot_bytes, xml_list, action_sequence = await self._execute_and_record_action(
@@ -1449,24 +1225,27 @@ class FlashRunner:
                 native_text=native_text,
                 index_elements=index_elements,
                 skip_observe=skip_observe,
+                # Point taps after the burst's first device action re-check the live
+                # target: the screen may have changed under the turn's screenshot.
+                verify_live_target=actions_executed_in_burst > 0,
             )
             if is_wait_tool:
                 has_waited = True
                 index_elements = getattr(state, "indexed_elements", None) or index_elements
-                # Later actions are judged against the screen after this wait.
                 actions_executed_in_burst = 0
-                burst_baseline_bytes = pre_screenshot_bytes
-                burst_baseline_elements = list(index_elements) if index_elements else None
-                timed_out_signal = (
-                    "[TIMEOUT_REACHED]" in str(turn.actions[-1][2])
-                    if turn.actions
-                    else False
-                )
-                if timed_out_signal and not is_last:
-                    logger.info(
-                        f"Wait tool '{name}' timed out without target event. "
-                        f"Aborting remaining burst actions to return observation to AI."
+                last_wait_text = str(turn.actions[-1][2]) if turn.actions else ""
+                timed_out_signal = "[TIMEOUT_REACHED]" in last_wait_text
+                # The shared action server skipped the wait because this turn's own
+                # actions changed nothing (artemis/mcp/screen_effect.py): whatever
+                # the burst planned next assumed an effect that did not happen.
+                no_effect_signal = NO_EFFECT_MARKER in last_wait_text
+                if (timed_out_signal or no_effect_signal) and not is_last:
+                    reason = (
+                        "the preceding action(s) had no visible effect"
+                        if no_effect_signal
+                        else "the previous wait reached its timeout without the event"
                     )
+                    logger.info(f"Wait tool '{name}': {reason}. Aborting remaining burst actions.")
                     for rem_tc in tool_calls[idx + 1:]:
                         rem_id = rem_tc.get("id") or str(uuid.uuid4())
                         rem_name = rem_tc.get("name", "").split(":")[-1]
@@ -1474,8 +1253,8 @@ class FlashRunner:
                             ToolMessage(
                                 tool_call_id=rem_id,
                                 name=rem_name,
-                                content="Action skipped: Previous wait reached timeout without event; returning to AI for evaluation.",
-                                status="success",
+                                content=f"Action not executed: {reason}; returning to AI for evaluation.",
+                                status="error" if no_effect_signal else "success",
                             )
                         )
                     break

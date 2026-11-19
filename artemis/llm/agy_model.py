@@ -86,7 +86,7 @@ You are the reasoning engine behind an Android automation agent (ARTEMIS). You d
 - Deliver your decision by calling your `finish` tool right away with this JSON object as the result (never write it as a plain text message first):
   {"thought": "<your reasoning about the phone: what the screen shows, what changed, why this action>", "tool_calls": [{"name": "<device tool>", "args": {...}}]}
   The thought is shown to the user as the agent's reasoning: never mention these protocol rules, read_file, finish or file names in it.
-- The device tools below are executed by the agent after your reply; their results and a new observation arrive in the next message. You can put several calls in tool_calls executed SEQUENTIALLY (e.g. input text followed by Enter, or multiple taps followed by waiting for the result). Choose event-driven wait tools: `wait_for_text` when specific text will appear, `wait_until_gone` when a loading spinner will vanish, or `wait_for_screen_change` when waiting for an opponent's move in chess or an incoming message. Use `target_text` for elements on upcoming screens. If a wait tool hands over on timeout, inspect the attached screenshot to see if the app is still loading or the opponent is still thinking before deciding.
+- The device tools below are executed by the agent after your reply; their results and a new observation arrive in the next message. You can put several calls in tool_calls executed SEQUENTIALLY (e.g. input text followed by Enter, or multiple taps followed by waiting for the result). Choose event-driven wait tools: `wait_for_text` when specific text will appear, `wait_until_gone` when a loading spinner will vanish, or `wait_for_screen_change` when waiting for another party to respond (an opponent's move, an incoming message). Use `target_text` for elements on upcoming screens. If a wait tool hands over on timeout, inspect the attached screenshot to see if the app is still loading or the opponent is still thinking before deciding.
 
 # DEVICE TOOLS (JSON schemas)
 """
@@ -102,7 +102,7 @@ You are the reasoning engine behind an Android automation agent (ARTEMIS). You d
 - Your whole reply is ONLY this JSON object (no other text, no code fence):
   {"thought": "<your reasoning about the phone: what the screen shows, what changed, why this action>", "tool_calls": [{"name": "<device tool>", "args": {...}}]}
   The thought is shown to the user as the agent's reasoning: never mention these protocol rules or the reply format in it.
-- The device tools below are executed by the agent after your reply; their results and a new observation arrive in the next message. You can put several calls in tool_calls executed SEQUENTIALLY (e.g. input text followed by Enter, or multiple taps followed by waiting for the result). Choose event-driven wait tools: `wait_for_text` when specific text will appear, `wait_until_gone` when a loading spinner will vanish, or `wait_for_screen_change` when waiting for an opponent's move in chess or an incoming message. Use `target_text` for elements on upcoming screens. If a wait tool hands over on timeout, look at the attached screenshot to see if the app is still loading or the opponent is still thinking before deciding.
+- The device tools below are executed by the agent after your reply; their results and a new observation arrive in the next message. You can put several calls in tool_calls executed SEQUENTIALLY (e.g. input text followed by Enter, or multiple taps followed by waiting for the result). Choose event-driven wait tools: `wait_for_text` when specific text will appear, `wait_until_gone` when a loading spinner will vanish, or `wait_for_screen_change` when waiting for another party to respond (an opponent's move, an incoming message). Use `target_text` for elements on upcoming screens. If a wait tool hands over on timeout, look at the attached screenshot to see if the app is still loading or the opponent is still thinking before deciding.
 
 # DEVICE TOOLS (JSON schemas)
 """
@@ -505,6 +505,25 @@ class AgyChatModel(BaseChatModel):
     @property
     def _llm_type(self) -> str:
         return "agy-cli"
+
+    def with_structured_output(self, schema: Any, **kwargs: Any):  # type: ignore[override]
+        """Structured answers go through a one-shot ``agy -p --json-schema`` run.
+
+        The conversation protocol returns ``{"thought", "tool_calls"}``; the
+        LangChain default would fake structured output with a tool call and
+        parse it back, which lost or misnamed fields (Checker reports with no
+        verdicts, ``verdict`` instead of ``status``). agy enforces the schema
+        itself in print mode. The call is stateless: the full message list is
+        rendered into the prompt, as with an API model.
+        """
+        from artemis.llm.agy_oneshot import AgyOneShotChatModel
+
+        oneshot = AgyOneShotChatModel(
+            model_name=self.model_name,
+            agy_bin=self.agy_bin,
+            timeout_s=max(120.0, min(self.turn_timeout_s, 300.0)),
+        )
+        return oneshot.with_structured_output(schema, **kwargs)
 
     def bind_tools(self, tools: Any, **kwargs: Any) -> "AgyChatModel":
         formatted = [convert_to_openai_tool(t) if not isinstance(t, dict) else t for t in tools]

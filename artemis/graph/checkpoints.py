@@ -1131,9 +1131,31 @@ def resolve_item_status(kind: str, records: list[dict]) -> str:
     substantive = [r for r in records if r.get("status") in _RESOLVABLE]
     if kind == "assert" and any(r.get("status") == "failed" for r in substantive):
         return "failed"
+    # An "inconclusive" that only says no judgment was made (the check timed out,
+    # errored, or left this item out of its report) must not erase an earlier
+    # evidence-backed verdict for the same item.
+    judged = [r for r in substantive if not is_no_judgment_record(r)]
+    if judged:
+        return judged[-1]["status"]
     if substantive:
         return substantive[-1]["status"]
     return "unchecked"
+
+
+#: Evidence prefixes of inconclusive records that carry no judgment at all.
+NO_JUDGMENT_EVIDENCE_PREFIXES: tuple[str, ...] = (
+    "no verdict produced",
+    "check timed out",
+    "check raised an exception",
+    "final check error",
+)
+
+
+def is_no_judgment_record(record: dict) -> bool:
+    if record.get("status") != "inconclusive":
+        return False
+    evidence = str(record.get("evidence") or "").strip().lower()
+    return evidence.startswith(NO_JUDGMENT_EVIDENCE_PREFIXES)
 
 
 def compute_test_summary(

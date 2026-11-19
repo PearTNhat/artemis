@@ -46,6 +46,8 @@ class ModelProvider(StrEnum):
     VLLM = "vllm"
     CUSTOM = "custom"
     AGY = "agy"
+    #: One independent ``agy -p`` run per call: helper models (see agy_oneshot.py).
+    AGY_ONESHOT = "agy_oneshot"
 
     @classmethod
     def from_string(cls, val: Any) -> "ModelProvider":
@@ -79,6 +81,8 @@ class ModelProvider(StrEnum):
             "agy": cls.AGY,
             "antigravity": cls.AGY,
             "geminicli": cls.AGY,
+            "agyoneshot": cls.AGY_ONESHOT,
+            "geminiclioneshot": cls.AGY_ONESHOT,
         }
         provider = mapping.get(s)
         if provider is None:
@@ -381,6 +385,17 @@ class ModelFactory:
                 # "acp" (default): screenshots inline, one model call per turn.
                 # "stream-json": the previous file + read_file protocol.
                 transport=os.environ.get("ARTEMIS_AGY_TRANSPORT", "acp"),
+            )
+
+        elif provider == ModelProvider.AGY_ONESHOT:
+            # Local Antigravity CLI, one independent ``agy -p`` run per call:
+            # the helper-model counterpart of a Gemini API key.
+            from artemis.llm.agy_oneshot import AgyOneShotChatModel
+
+            return AgyOneShotChatModel(
+                model_name=endpoint.model_name or None,
+                agy_bin=endpoint.api_base or os.environ.get("ARTEMIS_AGY_BIN", "agy"),
+                timeout_s=max(endpoint.timeout_seconds, 120.0),
             )
 
         elif provider in (ModelProvider.OLLAMA, ModelProvider.VLLM, ModelProvider.CUSTOM):

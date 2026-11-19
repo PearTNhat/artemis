@@ -572,9 +572,25 @@ export class SystemService {
     }
     return 'custom';
   });
+  /** Per-node backends reported by the server (null until loaded / on old servers). */
+  public modelRouting = computed<ModelRouting | null>(() => this.modelConfigEnv()?.model_routing ?? null);
+  /** Nodes that still call an API key although the agent runs on the Gemini CLI. */
+  public cliApiKeyNodes = computed<string[]>(() =>
+    this.activeModelPreset() === 'agy' ? (this.modelRouting()?.api_key_nodes ?? []) : []
+  );
+  /** On-demand nodes that need an API key (e.g. the ER grounding model), CLI preset only. */
+  public cliOnDemandApiNodes = computed<string[]>(() =>
+    this.activeModelPreset() === 'agy' ? (this.modelRouting()?.api_key_on_demand ?? []) : []
+  );
   public activeModelDisplayName = computed<string>(() => {
     const preset = this.activeModelPreset();
-    if (preset === 'agy') return `Gemini CLI (agy) · ${this.activeModelName() || 'default'}`;
+    if (preset === 'agy') {
+      const base = `Gemini CLI (agy) · ${this.activeModelName() || 'default'}`;
+      const apiNodes = this.cliApiKeyNodes();
+      // Say "CLI" only when it is the whole truth: helpers on an API key are
+      // limited by that key's quota even when the agent runs on the CLI.
+      return apiNodes.length ? `${base} + API key (${apiNodes.length} node)` : base;
+    }
     if (preset === 'fosta') return 'GPT-6.1 Sol (Fosta)';
     if (preset === 'qwen') return 'Qwen-27B Local';
     if (preset === 'gemini') return 'Gemini 3.6 Flash';
@@ -582,7 +598,7 @@ export class SystemService {
   });
   public activeModelBadgeIcon = computed<string>(() => {
     const preset = this.activeModelPreset();
-    if (preset === 'agy') return '🤖';
+    if (preset === 'agy') return this.cliApiKeyNodes().length ? '⚠️' : '🤖';
     if (preset === 'fosta') return '⚡';
     if (preset === 'qwen') return '🏠';
     if (preset === 'gemini') return '🌟';
@@ -727,7 +743,28 @@ export interface CliIntegrationsResponse {
   antigravity: CliItem;
 }
 
+/** One model-using node and the backend it really runs on (Gemini CLI or an API key). */
+export interface ModelRoutingNode {
+  node: string;
+  provider: string;
+  model: string;
+  uses_cli: boolean;
+  required: boolean;
+  note?: string;
+}
+
+export interface ModelRouting {
+  nodes: ModelRoutingNode[];
+  /** Nodes a run calls that still go through an API key. */
+  api_key_nodes: string[];
+  /** Called only on demand (Explorer grounding, video analysis) through an API key. */
+  api_key_on_demand?: string[];
+  /** True only when the agents AND every required helper run on the CLI. */
+  cli_only: boolean;
+}
+
 export interface ModelConfigEnvResponse {
+  model_routing?: ModelRouting | null;
   config_path: string;
   config_filename: string;
   config_content: string;

@@ -217,7 +217,7 @@ def mobile_run_task(
 
     Delegates a mobile workflow to a background agent. Non-blocking: returns
     immediately with `trace_id` (for `mobile_manage_task` / `mobile_inspect_trace`),
-    `device_serial`, `stdout_log`/`stderr_log` paths, and `notes_dir` (Pro only).
+    `device_serial`, `stdout_log`/`stderr_log` paths, and `notes_dir`.
     On completion (success or failure) a Reactive Wakeup notifies you — but only
     when `conversation_id` was provided; without it, rely on your fallback timer.
 
@@ -226,9 +226,10 @@ def mobile_run_task(
       UI path. No step cap by default (history is compressed, and the agent
       can recall earlier steps and query the session recording), but no ADB
       shell, no pre-execution safety net, no persistent plan or notes, and
-      no verification or written report — unsuitable for exploration,
-      multi-branch recovery, structured monitoring/polling, or tasks that
-      must report back large amounts of detail.
+      no verification — unsuitable for exploration, multi-branch recovery or
+      structured monitoring/polling. Its final report (Markdown, tables for
+      comparisons) is saved to `output.md` in `notes_dir`; pass
+      `expected_output_desc` to have it rebuilt from the full history.
     - **Pro**: complex, exploratory, or multi-branch tasks; continuous
       monitoring/polling; tasks needing ADB shell, system logs, verified
       checkpoints, multi-step planning, or detailed written output (via notes
@@ -247,8 +248,9 @@ def mobile_run_task(
     2. **Post-task inspection**: after completion, inspect the execution logs
        to verify success (`stderr_log` carries critical failures and Python
        tracebacks — essential for debugging).
-    3. **Pro notes**: for Pro runs, read `notes_dir` to extract the results and
-       plans the subagent recorded.
+    3. **Report & notes**: read `output.md` in `notes_dir` for the written
+       report (Flash always; Pro when `expected_output_desc` is set), and for
+       Pro runs the plans and notes the subagent recorded.
 
     Args:
         task_desc: Clear, self-contained task description with all context,
@@ -260,8 +262,10 @@ def mobile_run_task(
         locked_app_package: Optional package name to lock execution to; the
           agent auto-launches it and restricts actions to that app.
         app_path: Optional local APK path to install before running.
-        expected_output_desc: Optional, Pro only. If set, a summarization agent
-          writes a report to `output.md` in `notes_dir`. Ignored for Flash.
+        expected_output_desc: Optional. If set, a summarization agent writes a
+          report matching this description to `output.md` in `notes_dir`,
+          rebuilt from the full stored history (one extra model call). Without
+          it, Flash saves its own final report there and Pro writes none.
         device_serial: Optional device serial (e.g. "emulator-5554") to bind
           execution to a specific device; distinct devices run concurrently.
           If omitted, an available device is selected automatically. When
@@ -317,7 +321,7 @@ def mobile_run_task(
                     goal=task_desc,
                     profile=canonical_model.lower(),
                     device_serial=device_serial,
-                    expected_output=expected_output_desc if canonical_model != "Flash" else None,
+                    expected_output=expected_output_desc,
                     locked_app_package=locked_app_package,
                     app_path=app_path,
                     session_id=trace_id,
@@ -463,7 +467,7 @@ def mobile_run_task(
             cmd.extend(["--locked-app-package", locked_app_package])
         if app_path:
             cmd.extend(["--app-path", app_path])
-        if expected_output_desc and canonical_model != "Flash":
+        if expected_output_desc:
             cmd.extend(["--expected-output-desc", expected_output_desc])
         if device_serial:
             cmd.extend(["--device-serial", device_serial])

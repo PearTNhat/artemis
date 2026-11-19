@@ -28,6 +28,26 @@
   - **Khóa cứng chuẩn mực trong `AGENTS.md`:** Thêm các mục 2.7, 2.8, 2.9 cấm hardcode tên nút/từ khóa, bắt buộc tư duy theo UI Pattern và thuộc tính Accessibility chuẩn.
 - **Kiểm thử hồi quy:** Vượt qua 100% các bộ unit test (toàn bộ 263 tests trong `mcp` và `agents/flash`). Test mới: bỏ chờ ngay khi màn hình đã đổi cho `my_action`, giữ chờ cho `external`, chặn lặp qua thao tác xen giữa, lọc text cắt mép màn hình/ẩn.
 
+### 📌 Bản 3.2 (Gemini CLI thay hẳn API key)
+- **Vấn đề:** preset "Gemini CLI" chỉ đưa các agent (Flash/Operator/Planner/Checker/Outputter) lên agy; các helper vẫn gọi Gemini API bằng key miễn phí (Hopper, summarizer, step summarizer mỗi bước, nén lịch sử, pixel safety net, planner_validation) → hết quota ngày (flash-lite 500/ngày) là task kẹt (Hopper retry mãi). Giao diện vẫn hiện "Gemini CLI" nên không ai biết.
+- **Provider mới `agy_oneshot`** (`artemis/llm/agy_oneshot.py`): mỗi lần gọi là một `agy -p --mode plan --output-format json`, ảnh ghi ra thư mục tạm (`--add-dir`), `with_structured_output` dùng `--json-schema` của agy; tối đa 4 tiến trình song song. Đo thật: Hopper 9,2s, step summary có ảnh 8,7s.
+- **`agy:<model>`** cho các helper cấu hình bằng tên model (`flash.step_summarizer.model`, `memory.chunking.model`) qua `get_model_by_spec`; tên thường vẫn là Gemini API.
+- **`AgyChatModel.with_structured_output`** đi qua one-shot `--json-schema` thay cho tool-call giả (nguồn gốc khả dĩ của Checker trả report rỗng / sai key).
+- **Config** (`artemis.jsonc` + preset `artemis.agy.jsonc`): fallback mặc định chuyển sang agy medium; hopper, summarizer, pixel safety net, planner_validation → `agy_oneshot`; step summarizer + nén lịch sử → `agy:gemini-3.8-flash-low`. Giữ Explorer `flash` (model ER định vị tọa độ, chỉ có trên API, chỉ gọi khi `ask_explorer`).
+- **Sửa lỗi có sẵn:** khai báo `planner_validation` / `validator_pixel_safety_net` dưới `nodes` trước đây bị bỏ qua (`_expand_default_into_nodes`).
+- **Giao diện:** `/api/system/model-config-env` trả `model_routing` (từng node chạy CLI hay API key); badge chỉ ghi "Gemini CLI" khi mọi node bắt buộc chạy CLI, ngược lại ghi "+ API key (N node)" và liệt kê; node chỉ gọi API khi cần (ER, video) hiện dạng ghi chú.
+- **Kiểm thử:** `tests/unit` 2610 passed, 0 failed (2 test admin_console fail sẵn đã sửa để không phụ thuộc config máy). Test mới: `tests/unit/llm/test_agy_oneshot.py` (8, dùng agy giả), `tests/unit/test_model_routing.py` (3).
+
+### 📌 Bản 3.1 (Lớp thực thi dùng chung Flash + Pro)
+- **Chờ thông minh chuyển xuống action server** (`artemis/mcp/screen_effect.py`, móc trong `action_server.py`): server ghi nhận màn hình cuối cùng đưa cho agent (`observe_screen` của Flash, `take_screenshot` của Pro) và có thao tác thiết bị nào sau đó không. `wait_for_screen_change(after="my_action")`: màn hình đã đổi → chờ ổn định rồi trả ngay; không đổi mà đã có thao tác → trả `[NO_EFFECT]` (`ActionResult.no_effect=True`); không đổi và chưa thao tác → chờ thật. `after="external"` luôn chờ thật. Không có ảnh để so → chờ thật (uncertain).
+- **Flash runner bỏ ~240 dòng logic trùng**; chỉ còn: gặp `[NO_EFFECT]` hoặc timeout thì huỷ phần còn lại của burst (lệnh không chạy báo `error`).
+- **Guard nút cam kết bị "biến hình" cho Flash** (`McpActionExecutor._guard_morphed_commitment`): tap tọa độ/index sau thao tác đầu tiên trong burst đọc lại hierarchy thật; nếu điểm đó giờ là nút cam kết (`COMMITMENT_PATTERN`) mà trên màn model đã thấy thì không phải → chặn. Pro đã có safety net riêng.
+- **Checker chịu được verdict sai định dạng** (`verdict` thay `status`, thiếu `status`/`kind`).
+- **Checker:** review cuối trả report rỗng → hỏi lại một lần, liệt kê từng mục; bản ghi inconclusive kiểu "không có phán quyết" (no verdict / timeout / error) không còn ghi đè verdict có bằng chứng trước đó (`resolve_item_status`).
+- **Báo cáo Flash ngang Pro** (`artemis/agents/flash/report.py`): mọi run Flash lưu báo cáo cuối (Markdown, bảng khi so sánh — quy tắc mới trong `flash_runner.md`) vào `notes/output.md`; khi có `expected_output_desc` thì chạy Outputter (như Pro) dựng lại báo cáo từ toàn bộ lịch sử. MCP không còn bỏ `expected_output_desc` với Flash. 5 test mới. `tests/unit`: 2600 passed, 2 failed có sẵn từ trước ở `tests/unit/admin_console/test_model_service.py` (không liên quan).
+- Chưa làm: Operator của Pro chưa có `wait_for_screen_change` trong bộ công cụ (chỉ `wait_for_delay`), nên Pro chưa dùng được chờ thông minh.
+- **Kiểm thử:** 791 passed, 1 skipped (`tests/unit/mcp/ agents/ llm/`). Test mới: `tests/unit/mcp/test_screen_effect.py` (8, chạy qua MCP tool thật), guard biến hình (4), burst abort khi `[NO_EFFECT]`, cờ `verify_live_target`. Fixture `action_server_manifest.json` tái tạo: chỉ thêm `no_effect` vào output schema.
+
 ### 📌 Bản 2 (Tối ưu phản hồi & Giảm tải tài nguyên cơ bản)
 - **Trụ cột A:** Làm mới session agy khi context vượt ngưỡng (≥ 80k và tăng ≥ 15k; trần cứng 120k) để chống phình to token.
 - **Trụ cột C:** Tự động điều chỉnh thời gian chờ ổn định màn hình (settle) theo loại action (`manage_app` 1500ms, ENTER 1000ms, thao tác thường 400ms). Chụp lại kiểm tra bằng dHash khi màn hình nghi vấn chưa đổi.
@@ -101,6 +121,31 @@ Cùng nhiệm vụ "đi tới màn hình đặt hàng, không bấm đặt", Fla
 Cả hai dừng đúng ở màn hình đặt hàng, không bấm đặt.
 
 **Pro, Grab, `verification_level=checkpoints` — `a8445e7d-5dcf-4155-aa2f-bb7b6018cee9`** (giỏ có sẵn "Phở Bò Tái lớn", yêu cầu "Phở Bò Tái vừa"): ~9 phút. Operator làm đúng: tự phát hiện và xoá món cũ, giỏ cuối đúng 1 Phở Bò Tái vừa, ghi đủ chi tiết vào note. Safety net chặn 1 cú bấm tọa độ cũ của "Review address" khi nút đó đã đổi thành "Place Order". **Checker hỏng hoàn toàn:** model trả verdict thiếu `status`/`kind` (hoặc dùng key `verdict`) → `CheckReport` validation lỗi, run bị pause, 2 checkpoint timeout 180s, kết quả `inconclusive=4` và run vẫn được đánh PASS (fail-open). Đã sửa: `CheckVerdict` chấp nhận `verdict`, thiếu `status` → `inconclusive`, thiếu `kind` → lấy theo check item được trích dẫn (4 test mới). Chưa chạy lại trên máy.
+
+### 1.4. Bài so giá Grab (4 quán, rẻ nhất có điều kiện) — Flash vs Pro sau lớp thực thi chung (2026-11-19)
+| | Flash `a693e54c-93b9-4b83-b725-b24abba6d874` | Pro `14f3ebb7-ca1c-4434-8dec-a1aaca50b7b6` |
+|---|---|---|
+| Giỏ lúc bắt đầu | Có 1 món cũ của quán khác (khó hơn) | Trống |
+| Thời gian | ~268s, 43 bước | ~7 phút, 41 bước |
+| 4 quán đã xem | O Thuỷ 57k, Phở Trang 75k, Phở 24 Sun Ave 66k, Phở 24 Lexington 66k+1k | O Thuỷ 57k, Phở Trang 75k, Phở 24 Sun Ave 66k, **Phở Gánh 4 48k+2k** |
+| Chọn | O Thuỷ — tổng thật ở màn thanh toán **73.000₫** | Phở Gánh 4 — tổng thật **75.000₫** (phí giao 24k + phí đơn nhỏ 3k) |
+| Ghi chú | Lệnh chờ trả về ngay sau mỗi tap (server) | Ghi chú so sánh có bảng; gõ nhầm "Meet at lobby" vào ô Block/floor; Checker checkpoint pass 2/2 nhưng review cuối rỗng → bị ghi đè thành inconclusive=3 (đã sửa) |
+
+Bài học: phí giao hiển thị ở danh sách ("Free", "2.000đ") khác xa phí thật ở màn thanh toán (12–24k + phí đơn nhỏ). Cả hai đều chọn theo giá danh sách, nên "rẻ nhất" chưa chắc đúng; cần xác nhận tổng thật của 1–2 ứng viên đầu.
+
+### 1.5. Shopee lọc nhiều điều kiện + "Mua ngay" — Flash vs Pro, chế độ Gemini CLI hoàn toàn (2026-11-19)
+Cả hai bắt đầu từ Shopee đã force-stop, cùng đề, dừng ở trang Thanh toán (không đặt). 0 lỗi quota API.
+
+| | Flash `c08ce0fa-456e-4b57-87cf-934a4f833360` | Pro `64c570f2-0342-46c9-9720-8f42397e006f` (checkpoints) |
+|---|---|---|
+| Thời gian | ~3 phút 35 giây, 33 bước | ~4 phút 45 giây, 24 bước |
+| Sản phẩm chọn | Cáp Type-C 30cm QMP HOME (Mall) 11.900₫ | Giống Flash |
+| Tổng thanh toán | 17.900₫ | 17.900₫ |
+| Báo cáo | `output.md` Markdown, bảng 2 sản phẩm Mall | Ghi chú liệt kê 10 sản phẩm đầu (có dòng lặp) + lý do bật lọc Mall |
+| Kiểm chứng | — | Checker 1/1 passed, có bằng chứng (lần đầu không lỗi định dạng / không treo) |
+| Chi phí CLI | step summarizer qua CLI: 0 lỗi | pixel safety net qua CLI: 5 lần, 8–23 s/lần (~67 s) |
+
+Ghi chú: sản phẩm rẻ nhất có tag Mall chỉ có phân loại 30cm, cả hai áp dụng quy tắc dự phòng "gần 1m nhất" và ghi rõ trong báo cáo. Pro chỉ sinh 1 mục kiểm chứng (thiếu mục phân loại/giá).
 
 ## 2. TRẠNG THÁI TRIỂN KHAI (đến bản 3)
 

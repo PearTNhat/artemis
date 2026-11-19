@@ -20,6 +20,15 @@ import pytest
 from apps.admin_console.services.model_service import ModelService
 
 
+@pytest.fixture(autouse=True)
+def _google_config():
+    """Pin the provider: the real config file on a dev machine may use the Gemini CLI."""
+    with patch.object(
+        ModelService, "_get_llm_provider_and_model", return_value=("google", "gemini-3.8-flash")
+    ):
+        yield
+
+
 def test_get_active_model_info_pro_architecture():
     """Verify that pro profile returns Pro architecture while keeping real LLM model."""
     info = ModelService.get_active_model_info("pro")

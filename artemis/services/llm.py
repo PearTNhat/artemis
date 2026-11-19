@@ -919,6 +919,27 @@ def get_google_llm(
     return ModelFactory.create_model(ep)
 
 
+def get_model_by_spec(spec: str | None, temperature: float = 0.0) -> BaseChatModel:
+    """A chat model from a ``[provider:]model`` string, for helpers configured by name.
+
+    Plain names (``"gemini-3.5-flash-lite"``) keep their historical meaning, the
+    Gemini API. ``"agy:<model>"`` / ``"agy_oneshot:<model>"`` route the helper
+    through the local Gemini CLI, one ``agy -p`` run per call, so a CLI
+    subscription can replace the API key.
+    """
+    spec = (spec or "").strip()
+    provider, sep, model = spec.partition(":")
+    if sep and provider.strip().lower().replace("-", "_") in ("agy", "agy_oneshot", "gemini_cli"):
+        ep = ModelEndpoint(
+            provider=ModelProvider.AGY_ONESHOT,
+            model_name=model.strip(),
+            temperature=temperature,
+            timeout_seconds=120.0,
+        )
+        return ModelFactory.create_model(ep)
+    return get_google_llm(model_name=spec or "gemini-3.8-flash", temperature=temperature)
+
+
 def _resolve_endpoint(
     ctx: ArtemisContext,
     name: str,
