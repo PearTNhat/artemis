@@ -537,7 +537,7 @@ async def get_model_config_and_env():
 
 @router.post("/model-config/switch-preset")
 async def switch_model_preset_endpoint(req: SwitchPresetRequest):
-    """Switch active configuration preset between fosta, qwen, and gemini."""
+    """Switch active configuration preset between available presets (fosta, qwen, gemini, agy, etc.)."""
     preset = req.preset.strip().lower()
     from artemis.config.paths import get_config_path, get_env_file
     from artemis.config import settings
@@ -559,20 +559,29 @@ async def switch_model_preset_endpoint(req: SwitchPresetRequest):
     env_file = get_env_file()
     if env_file.exists():
         content = env_file.read_text(encoding="utf-8")
-        if preset == "qwen":
-            content = set_env_kv(content, "OPENAI_API_KEY", "aicf_Tm4oFe5upElh1a60eSsU_QEbrDv1K3DI")
-            content = set_env_kv(content, "OPENAI_BASE_URL", "http://192.168.1.40:18080/v1")
-            os.environ["OPENAI_API_KEY"] = "aicf_Tm4oFe5upElh1a60eSsU_QEbrDv1K3DI"
-            os.environ["OPENAI_BASE_URL"] = "http://192.168.1.40:18080/v1"
+        
+        # Dynamically resolve credentials from environment or .env without hardcoding secrets
+        preset_key_var = f"{preset.upper()}_API_KEY"
+        preset_url_var = f"{preset.upper()}_BASE_URL"
+
+        preset_api_key = os.getenv(preset_key_var)
+        preset_base_url = os.getenv(preset_url_var)
+
+        for line in content.splitlines():
+            clean = line.strip()
+            if clean.startswith(f"{preset_key_var}=") and not preset_api_key:
+                preset_api_key = clean.split("=", 1)[1].strip().strip('"').strip("'")
+            elif clean.startswith(f"{preset_url_var}=") and not preset_base_url:
+                preset_base_url = clean.split("=", 1)[1].strip().strip('"').strip("'")
+
+        if preset_api_key:
+            content = set_env_kv(content, "OPENAI_API_KEY", preset_api_key)
+            os.environ["OPENAI_API_KEY"] = preset_api_key
+        if preset_base_url:
+            content = set_env_kv(content, "OPENAI_BASE_URL", preset_base_url)
+            os.environ["OPENAI_BASE_URL"] = preset_base_url
             if hasattr(settings, "OPENAI_BASE_URL"):
-                settings.OPENAI_BASE_URL = "http://192.168.1.40:18080/v1"
-        elif preset == "fosta":
-            content = set_env_kv(content, "OPENAI_API_KEY", "sk-00eab046c62fd5b2-jxzbyu1ou83c2enk-6082a1b7")
-            content = set_env_kv(content, "OPENAI_BASE_URL", "https://codex.fosta.app/v1")
-            os.environ["OPENAI_API_KEY"] = "sk-00eab046c62fd5b2-jxzbyu1ou83c2enk-6082a1b7"
-            os.environ["OPENAI_BASE_URL"] = "https://codex.fosta.app/v1"
-            if hasattr(settings, "OPENAI_BASE_URL"):
-                settings.OPENAI_BASE_URL = "https://codex.fosta.app/v1"
+                settings.OPENAI_BASE_URL = preset_base_url
         env_file.write_text(content, encoding="utf-8")
 
     shutil.copy2(preset_file, target_file)
@@ -590,7 +599,18 @@ async def update_custom_config_endpoint(req: UpdateCustomConfigRequest):
     target_file = get_config_path("artemis.jsonc")
     if target_file.exists():
         content = target_file.read_text(encoding="utf-8")
-        content = re.sub(r'\"model\":\s*\"[^\"]*\"', f'\"model\": \"{req.model}\"', content)
+        # Safely update ONLY the default model inside "default": { ... }
+        # Preserving comments and critical specialized nodes such as "object_detector"
+        model_pattern = r'("default"\s*:\s*\{[^{}]*?"model"\s*:\s*)"[^"]*"'
+        if re.search(model_pattern, content, flags=re.DOTALL):
+            content = re.sub(model_pattern, rf'\g<1>"{req.model}"', content, count=1, flags=re.DOTALL)
+
+        # If a custom base_url is specified, ensure default provider is set to "openai"
+        if req.base_url and req.base_url.strip():
+            provider_pattern = r'("default"\s*:\s*\{[^{}]*?"provider"\s*:\s*)"[^"]*"'
+            if re.search(provider_pattern, content, flags=re.DOTALL):
+                content = re.sub(provider_pattern, r'\g<1>"openai"', content, count=1, flags=re.DOTALL)
+
         target_file.write_text(content, encoding="utf-8")
 
     def set_env_kv(content: str, key: str, value: str) -> str:
