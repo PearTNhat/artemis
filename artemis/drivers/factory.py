@@ -63,6 +63,14 @@ def create_driver(ctx: "ArtemisContext") -> BaseDeviceDriver:
             host=settings.ADB_HOST or "localhost", port=settings.ADB_PORT or 5037
         )
 
+    if getattr(ctx, "ui_adb_client", None) is None and getattr(ctx.device, "device_id", None):
+        try:
+            from artemis.clients.screen_client_factory import create_screen_client
+
+            ctx.ui_adb_client = create_screen_client(ctx.device.device_id)
+        except Exception as e:
+            logger.debug(f"Could not auto-create screen client for {ctx.device.device_id}: {e}")
+
     return AndroidAdbDriver(
         device_id=ctx.device.device_id,
         adb_client=ctx.adb_client,

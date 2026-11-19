@@ -606,3 +606,92 @@ def test_focused_full_page_webview_is_not_masked_so_board_changes_are_seen():
     masked_a = mask_noise(before, [search], w, h)
     masked_b = mask_noise(caret, [search], w, h)
     assert compare_screen_pixels(masked_a, masked_b, width=w, height=h) == (False, 0)
+
+
+@pytest.mark.asyncio
+async def test_screen_unchanged_neutral_feedback_without_hardcoded_keywords():
+    from artemis.mcp.action_types import ActionResult
+
+    executor = _make_executor(width=1000, height=2000)
+    state = _indexed_state()
+
+    elements_no_error = [
+        {"index": 1, "text": "Next", "center": [500, 300], "bounds": [100, 250, 900, 350], "class": "android.widget.Button"}
+    ]
+    elements_with_error = [
+        {
+            "index": 1,
+            "text": "Username",
+            "center": [500, 300],
+            "bounds": [100, 250, 900, 350],
+            "class": "android.widget.EditText",
+        },
+        {
+            "index": 2,
+            "text": "Submit",
+            "center": [600, 800],
+            "bounds": [100, 750, 900, 850],
+            "class": "android.widget.Button",
+            "error": "Field is required",
+        },
+    ]
+
+    session_mock = Mock()
+    session_mock.started = True
+    session_mock.call = AsyncMock(return_value=ActionResult.success("click", "Clicked"))
+
+    # 1. Baseline observation setting _last_elements_signature
+    obs_1 = Mock(ok=True, hierarchy_ok=True, elements=elements_no_error, screenshot_path=None, elements_text="")
+    session_mock.observe = AsyncMock(return_value=obs_1)
+    executor._session = session_mock
+    res_1 = await executor.execute("click", {"target": 1}, "call_1", state)
+    assert res_1.status == "success"
+    assert "no visible change" not in res_1.text_summary
+
+    # 2. Second call with unchanged screen, no element error:
+    obs_same = Mock(ok=True, hierarchy_ok=True, elements=elements_no_error, screenshot_path=None, elements_text="")
+    session_mock.observe = AsyncMock(return_value=obs_same)
+    res_2 = await executor.execute("click", {"target": 1}, "call_2", state)
+    assert res_2.status == "success"
+    assert "(no visible change)" in res_2.text_summary
+    assert "form feedback" not in res_2.text_summary
+    assert "Notice:" not in res_2.text_summary
+
+    # 3. Third call on different element with unchanged screen, but element has error property:
+    state.indexed_elements = elements_with_error
+    state.indexed_points = [[600, 800]]
+    executor._last_point_action = None  # Reset point action memory
+    executor._last_elements_signature = executor._elements_signature(elements_with_error)
+    obs_err = Mock(ok=True, hierarchy_ok=True, elements=elements_with_error, screenshot_path=None, elements_text="")
+    session_mock.observe = AsyncMock(return_value=obs_err)
+    res_3 = await executor.execute("click", {"target": 2}, "call_3", state)
+    assert res_3.status == "success"
+    assert "(no visible change; element error: 'Field is required')" in res_3.text_summary
+    assert "form feedback" not in res_3.text_summary
+    assert "Notice:" not in res_3.text_summary
+
+
+def test_commitment_pattern_covers_payment_only_not_routine_or_cancel_controls():
+    from artemis.utils.screen_diff import COMMITMENT_PATTERN
+
+    for s in ["place order", "PLACE ORDER", "đặt đơn", "đặt hàng", "pay now", "thanh toán",
+              "confirm purchase", "xác nhận mua"]:
+        assert COMMITMENT_PATTERN.search(s) is not None, f"Expected '{s}' to match"
+
+    # Cancel / clear / delete-a-character controls appear in every app and are often
+    # the SAFE choice in a dialog; the guard must not block or split bursts on them.
+    for s in ["submit", "continue", "search", "next", "Hủy bỏ", "Cancel", "Xóa", "xoá",
+              "Delete", "Clear", "Sign out", "Abort"]:
+        assert COMMITMENT_PATTERN.search(s) is None, f"Expected '{s}' NOT to match"
+
+
+@pytest.mark.asyncio
+async def test_target_text_commitment_guard_blocks_payment_text():
+    executor = _make_executor()
+    state = _indexed_state()
+
+    for sensitive_text in ["Place order", "Thanh toán", "Pay now"]:
+        res = await executor.execute("click", {"target_text": sensitive_text}, "call_sens", state)
+        assert res.status == "error"
+        assert "Commitment Guard" in res.text_summary
+

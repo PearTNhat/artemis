@@ -39,6 +39,7 @@ active window until its turn is chunked, whose user lines then carry it on.
 
 import asyncio
 import base64
+import io
 import time
 from dataclasses import dataclass, field
 import json
@@ -658,6 +659,86 @@ class FlashRunner:
             await self.summarizer.flush()
         return final_report
 
+    async def _observe_live(self, settle_ms: int):
+        """Observes the device through the executor's session (the guarded
+        observation pipeline), falling back to a direct capture. Returns
+        ``(obs, screenshot_bytes)``; ``obs`` is ``None`` when both fail."""
+        session = getattr(self.executor, "_session", None)
+        if session is not None and hasattr(session, "observe"):
+            try:
+                obs = await session.observe(settle_ms=settle_ms)
+                if obs is not None and obs.ok:
+                    shot = None
+                    if getattr(obs, "screenshot_path", None):
+                        try:
+                            shot = Path(obs.screenshot_path).read_bytes()
+                        except Exception:
+                            shot = None
+                    return obs, shot
+            except Exception as err:
+                logger.debug(f"Session observation failed, falling back: {err}")
+        try:
+            obs, shot = await observe(self.ctx, self.controller, settle_ms=settle_ms)
+            return (obs, shot) if obs is not None and obs.ok else (None, None)
+        except Exception as err:
+            logger.debug(f"Direct observation failed: {err}")
+            return None, None
+
+    # Settle delays (ms) before each look: a tap's effect (animation, page
+    # transition, a short network round trip) gets ~1s to show before the
+    # burst is judged to have had no effect.
+    _PRE_WAIT_SETTLE_STEPS_MS = (300, 700)
+
+    async def _burst_effect_in_region(self, region, baseline_bytes, baseline_elements):
+        """Did this turn's actions visibly change ``region`` (0-1000 scale)?
+
+        Returns ``(verdict, obs, screenshot_bytes)`` with verdict one of
+        ``"changed"``, ``"unchanged"`` or ``"uncertain"``. Only ``"unchanged"``
+        may skip a wait: it needs a pixel comparison (status bar and clocks
+        masked) AND an unchanged element list in the region. Without both
+        screenshots the answer is ``"uncertain"``: on canvas-drawn screens the
+        element list alone cannot see a change.
+        """
+        from PIL import Image
+
+        from artemis.utils.screen_diff import compare_screen_pixels, compare_xml_hierarchy, mask_noise
+
+        width, height = self.executor._screen_size()
+        obs, shot = None, None
+        verdict = "uncertain"
+        for settle_ms in self._PRE_WAIT_SETTLE_STEPS_MS:
+            obs, shot = await self._observe_live(settle_ms)
+            if obs is None:
+                return "uncertain", None, None
+            if not (shot and baseline_bytes):
+                return "uncertain", obs, shot
+            try:
+                img_pre = Image.open(io.BytesIO(baseline_bytes))
+                img_curr = Image.open(io.BytesIO(shot))
+                # Element bounds are in device pixels; a downscaled capture is
+                # brought to device size so the noise mask lands on the clocks.
+                if img_pre.size != (width, height):
+                    img_pre = img_pre.resize((width, height))
+                if img_curr.size != (width, height):
+                    img_curr = img_curr.resize((width, height))
+                pre_masked = mask_noise(img_pre, baseline_elements, width, height)
+                curr_masked = mask_noise(img_curr, obs.elements if obs.hierarchy_ok else None, width, height)
+                pixels_changed, _ = compare_screen_pixels(
+                    pre_masked, curr_masked, region=region, width=width, height=height
+                )
+            except Exception as err:
+                logger.debug(f"Pre-wait pixel comparison failed: {err}")
+                return "uncertain", obs, shot
+            xml_changed = False
+            if baseline_elements and obs.hierarchy_ok and obs.elements:
+                xml_changed, _ = compare_xml_hierarchy(
+                    baseline_elements, obs.elements, region=region, width=width, height=height
+                )
+            if pixels_changed or xml_changed:
+                return "changed", obs, shot
+            verdict = "unchanged"
+        return verdict, obs, shot
+
     def _rebase_screen_baseline(self, obs, screenshot_bytes) -> None:
         """Tells the executor about a screen captured outside it, so its
         screen-unchanged check (repeat-tap guard, post-tap recapture) compares
@@ -1033,6 +1114,11 @@ class FlashRunner:
         index_elements = self._turn_index_snapshot(state)
         total_calls = len(tool_calls)
         has_waited = False
+        # Screen the turn's actions start from: the pre-wait check asks whether the
+        # burst's own actions changed anything relative to it.
+        actions_executed_in_burst = 0
+        burst_baseline_bytes = pre_screenshot_bytes
+        burst_baseline_elements = list(index_elements) if index_elements else None
 
         for idx, tc in enumerate(tool_calls):
             name = tc["name"].split(":")[-1] if ":" in tc["name"] else tc["name"]
@@ -1201,6 +1287,56 @@ class FlashRunner:
                 )
                 return final_report, pre_screenshot_bytes, xml_list, action_sequence
 
+            # Pre-wait no-effect check: a wait_for_screen_change after the burst's own
+            # actions waits for an external change. If those actions left the wait region
+            # unchanged (a rejected move, an unresponsive control), waiting the full
+            # timeout teaches the model nothing; return the live screen instead.
+            if (
+                is_wait_tool
+                and name == "wait_for_screen_change"
+                and actions_executed_in_burst > 0
+            ):
+                verdict, obs_pre_wait, curr_shot_bytes = await self._burst_effect_in_region(
+                    args.get("region"), burst_baseline_bytes, burst_baseline_elements
+                )
+                if verdict == "unchanged":
+                    skip_msg = (
+                        "No visible change in the wait region since the start of this turn's actions "
+                        "(checked for ~1s); wait skipped. The previous action(s) may have had no effect: "
+                        "inspect the screen before repeating them."
+                    )
+                    logger.info(f"Wait tool '{name}' skipped: {skip_msg}")
+                    turn.step_keys.append(str(tc_id))
+                    turn.actions.append((name, "success", skip_msg))
+                    messages.append(
+                        ToolMessage(tool_call_id=tc_id, name=name, content=skip_msg, status="success")
+                    )
+                    if curr_shot_bytes:
+                        pre_screenshot_bytes = curr_shot_bytes
+                        self._rebase_screen_baseline(obs_pre_wait, curr_shot_bytes)
+                    if obs_pre_wait.elements_text:
+                        xml_list = obs_pre_wait.elements_text
+                    if state is not None:
+                        if obs_pre_wait.hierarchy_ok:
+                            state.indexed_points = [
+                                el["center"] for el in obs_pre_wait.elements if el.get("center")
+                            ]
+                            state.indexed_elements = obs_pre_wait.elements
+                        if obs_pre_wait.screenshot_path:
+                            state.latest_screenshot = obs_pre_wait.screenshot_path
+                    for rem_tc in tool_calls[idx + 1:]:
+                        rem_id = rem_tc.get("id") or str(uuid.uuid4())
+                        rem_name = rem_tc.get("name", "").split(":")[-1]
+                        messages.append(
+                            ToolMessage(
+                                tool_call_id=rem_id,
+                                name=rem_name,
+                                content="Action not executed: the preceding wait was skipped because the screen did not change; returning to AI for evaluation.",
+                                status="error",
+                            )
+                        )
+                    break
+
             elements_before = getattr(state, "indexed_elements", None)
             before_len = len(elements_before) if isinstance(elements_before, list) else 0
             pre_screenshot_bytes, xml_list, action_sequence = await self._execute_and_record_action(
@@ -1223,6 +1359,10 @@ class FlashRunner:
             if is_wait_tool:
                 has_waited = True
                 index_elements = getattr(state, "indexed_elements", None) or index_elements
+                # Later actions are judged against the screen after this wait.
+                actions_executed_in_burst = 0
+                burst_baseline_bytes = pre_screenshot_bytes
+                burst_baseline_elements = list(index_elements) if index_elements else None
                 timed_out_signal = (
                     "[TIMEOUT_REACHED]" in str(turn.actions[-1][2])
                     if turn.actions
@@ -1245,11 +1385,13 @@ class FlashRunner:
                             )
                         )
                     break
-            elif args.get("target_text"):
-                # An action targeting target_text may have altered the screen; mark has_waited
-                # so subsequent actions with stale index/coordinates are safely stopped.
-                has_waited = True
-                index_elements = getattr(state, "indexed_elements", None) or index_elements
+            elif name in action_names:
+                actions_executed_in_burst += 1
+                if args.get("target_text"):
+                    # An action targeting target_text may have altered the screen; mark has_waited
+                    # so subsequent actions with stale index/coordinates are safely stopped.
+                    has_waited = True
+                    index_elements = getattr(state, "indexed_elements", None) or index_elements
             elif name not in action_names:
                 index_elements = self._extend_index_snapshot(state, index_elements, before_len)
 

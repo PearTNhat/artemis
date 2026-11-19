@@ -435,3 +435,101 @@ async def test_index_click_after_target_text_click_is_aborted(mock_context):
     assert tool_msgs[1].status == "error"
     assert "targets an index or coordinate from an earlier screen" in tool_msgs[1].content
 
+
+# --- Pre-wait no-effect check ------------------------------------------------------
+
+
+def _png(tmp_path, name, mark=None) -> str:
+    """A 1080x2400 screenshot; ``mark`` paints a block (x1, y1, x2, y2) in pixels."""
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (1080, 2400), "white")
+    if mark:
+        ImageDraw.Draw(img).rectangle(list(mark), fill="black")
+    path = tmp_path / f"{name}.png"
+    img.save(path)
+    return str(path)
+
+
+class _ShotSession(_FakeSession):
+    """A session whose observations also carry a screenshot file."""
+
+    def __init__(self, observations, shots):
+        super().__init__(observations)
+        self._shots = list(shots)
+
+    async def observe(self, settle_ms=0, include_image=False, persist=True):
+        res = await super().observe(settle_ms=settle_ms)
+        shot = self._shots.pop(0) if self._shots else None
+        return res.model_copy(update={"screenshot_path": shot})
+
+
+def _burst_runner(mock_context, observations, shots):
+    runner = _runner(mock_context, observations)
+    runner.executor._session = _ShotSession(observations, shots)
+    runner._PRE_WAIT_SETTLE_STEPS_MS = (0, 0)
+    return runner
+
+
+def _wait_call():
+    return {
+        "name": "wait_for_screen_change",
+        "args": {"region": [0, 300, 1000, 800], "timeout_s": 60.0},
+        "id": "tc-wait",
+    }
+
+
+async def _run(runner, calls, state, pre_bytes):
+    messages: list = []
+    await runner._process_tool_calls(
+        calls, state, messages, "thought", {}, pre_bytes, "xml", 0, _TurnRecord()
+    )
+    return [m for m in messages if isinstance(m, ToolMessage)]
+
+
+@pytest.mark.asyncio
+async def test_pre_wait_skips_wait_when_burst_left_the_region_unchanged(mock_context, tmp_path):
+    """[click, wait_for_screen_change, click] with no change in the region: the wait is
+    skipped and the trailing action is not executed (reported as an error)."""
+    blank = _png(tmp_path, "blank")
+    pre_bytes = open(blank, "rb").read()
+    # Executor's post-click look, then the two pre-wait looks: all identical.
+    runner = _burst_runner(mock_context, [ORIGINAL] * 3, [blank] * 3)
+
+    tool_msgs = await _run(runner, [_click(5, "tc-click-5"), _wait_call(), _click(3, "tc-click-3")],
+                           _state(ORIGINAL), pre_bytes)
+
+    assert [name for name, _ in runner.executor._session.calls] == ["click"]
+    assert len(tool_msgs) == 3
+    assert tool_msgs[1].status == "success"
+    assert "wait skipped" in tool_msgs[1].content
+    assert tool_msgs[2].status == "error"
+
+
+@pytest.mark.asyncio
+async def test_pre_wait_keeps_wait_when_burst_changed_the_region(mock_context, tmp_path):
+    """The burst's own action changed the region (a legal move): the wait must run.
+    The baseline is the screen from the start of the turn, not the post-click look."""
+    blank = _png(tmp_path, "blank")
+    moved = _png(tmp_path, "moved", mark=(200, 900, 600, 1500))
+    pre_bytes = open(blank, "rb").read()
+    runner = _burst_runner(mock_context, [ORIGINAL] * 3, [moved] * 3)
+
+    tool_msgs = await _run(runner, [_click(5, "tc-click-5"), _wait_call()], _state(ORIGINAL), pre_bytes)
+
+    assert [name for name, _ in runner.executor._session.calls] == ["click", "wait_for_screen_change"]
+    assert len(tool_msgs) == 2
+    assert "wait skipped" not in tool_msgs[1].content
+
+
+@pytest.mark.asyncio
+async def test_pre_wait_without_screenshots_is_uncertain_and_keeps_wait(mock_context):
+    """No screenshot to compare (e.g. canvas screen whose element list never changes):
+    the element list alone cannot prove no effect, so the wait runs."""
+    runner = _runner(mock_context, observations=[ORIGINAL] * 3)
+    runner._PRE_WAIT_SETTLE_STEPS_MS = (0, 0)
+
+    tool_msgs = await _run(runner, [_click(5, "tc-click-5"), _wait_call()], _state(ORIGINAL), b"pre")
+
+    assert [name for name, _ in runner.executor._session.calls] == ["click", "wait_for_screen_change"]
+    assert len(tool_msgs) == 2

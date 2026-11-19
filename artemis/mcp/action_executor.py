@@ -240,13 +240,23 @@ class McpActionExecutor:
             try:
                 session = await self._session_or_start()
                 if raw_name in _POINT_TARGET_ACTIONS and args.get("target_text"):
+                    target_clean = str(args.get("target_text")).strip()
+                    if not target_clean:
+                        raise _ArgError(f"Error during {raw_name}: target_text cannot be empty.")
+
+                    from artemis.utils.screen_diff import COMMITMENT_PATTERN
+                    if COMMITMENT_PATTERN.search(target_clean):
+                        raise _ArgError(
+                            f"Commitment Guard: Action '{raw_name}' targeting commitment text '{target_clean}' "
+                            f"cannot be executed via target_text. Please verify the screen and use element index or explicit confirmation."
+                        )
+
                     # target_text always resolves against the live screen, never
                     # against the turn's snapshot: an earlier action in the burst
                     # may have changed the screen, and the same text at its old
                     # position would be tapped on the new screen. Poll up to 3s
                     # for the text; if it never shows up, resolve against the last
                     # live observation so the Anchor Guard reports "not found".
-                    target_clean = str(args.get("target_text")).strip()
                     last_live_elements: list[dict[str, Any]] | None = None
                     if session is not None and hasattr(session, "observe"):
                         from artemis.utils.screen_diff import find_matching_text_elements
@@ -395,20 +405,17 @@ class McpActionExecutor:
                                     curr_sig = retry_sig
                                     curr_hash = retry_h
 
-                        if screen_unchanged and obs.hierarchy_ok and obs.elements:
-                            form_notices = []
-                            for el in obs.elements:
-                                err = el.get("error")
-                                if err:
-                                    form_notices.append(f"Error: '{err}'")
-                                txt = str(el.get("text") or "")
-                                if txt and any(
-                                    kw in txt.lower()
-                                    for kw in ("vui lòng", "bắt buộc", "required", "invalid", "error", "không được để trống")
-                                ):
-                                    form_notices.append(f"Notice: '{txt}'")
-                            if form_notices:
-                                message += f" (Screen stayed; detected form feedback: {', '.join(form_notices[:2])})"
+                        if screen_unchanged:
+                            element_errors = []
+                            if obs.hierarchy_ok and obs.elements:
+                                for el in obs.elements:
+                                    err = el.get("error")
+                                    if err:
+                                        element_errors.append(str(err))
+                            if element_errors:
+                                message += f" (no visible change; element error: '{element_errors[0]}')"
+                            else:
+                                message += " (no visible change)"
 
                         self._last_elements_signature = curr_sig
                         if curr_hash:
