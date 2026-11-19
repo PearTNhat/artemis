@@ -35,7 +35,12 @@
 - **#181** `ui_filter` / `ocr_xml_fusion`: hộp thoại SystemUI / permissioncontroller toàn màn hình không còn bị coi là thanh trạng thái/điều hướng (nút trong hộp thoại bấm được, tọa độ OCR không lệch). Thanh hệ thống bị giới hạn cao ≤ 12% (trên) / ≤ 15% (dưới).
 - **#171** `AndroidAdbDriver.input_text`: chạy local cũng dán qua clipboard (Accessibility Helper), đọc lại ô đang focus để xác nhận chữ đã vào; trả `False` khi thấy rõ ô vẫn trống thay vì luôn báo thành công.
   - **Sửa thêm so với PR gốc:** PR gọi `clear_text` của helper cả khi `clear_existing=False` → xóa mất chữ có sẵn ở chế độ gõ nối. Đã chỉ xóa khi `clear_existing=True`, thêm test `test_input_text_append_mode_does_not_clear_via_helper`.
-- **Kiểm thử:** `tests/unit` 2635 passed, 9 skipped (bao gồm bộ regression bắt buộc `mcp/`, `agents/`, `llm/`). Chưa đo trên thiết bị thật.
+- **Sửa thêm lỗi có sẵn (không do PR):** lệnh xóa `input keyevent --meta 1 122` (Shift+MOVE_HOME) chỉ đưa con trỏ về đầu ô, không bôi đen → `input_text(clear_existing=True)` không xóa được gì. Đổi sang `MOVE_END; Ctrl+A (keycombination 113 29); DEL; 20×backspace` (dùng `;` để vẫn chạy backspace trên Android < 12). Luồng chạy thật của actuator không bị ảnh hưởng (nó xóa bằng `erase_text` trước, rồi gõ với `clear_existing=False`).
+- **Kiểm thử:** `tests/unit` 2639 passed, 5 skipped (bao gồm bộ regression bắt buộc `mcp/`, `agents/`, `llm/`).
+- **Kiểm thử trên emulator `Grab_API34` (Android 14, 2026-11-19):**
+  - #171: `adb input text` cũ với chữ có dấu → exception, ô trống. `input_text` mới (dán qua Accessibility Helper) → đúng nguyên văn `Xin chào, hôm nay trời đẹp quá`, `Đường phố Hà Nội – 36 phố phường`; gõ nối giữ chữ cũ; ~0,6–1,8 s/lần gõ.
+  - #216: AVD này khai báo `hw.keyboard=yes` nên lệnh `monkey` cũ vẫn mở được app (Settings, Chrome, Maps); lệnh mới cũng đúng. Lợi ích chỉ thấy trên máy không có phím (chưa đo).
+  - Lưu ý môi trường: `-gpu host` (NVIDIA PRIME) làm emulator crash (`DisplaySurfaceGlContextHelper context was preempted`); test chạy bằng `-gpu swiftshader_indirect`.
 
 ### 📌 Bản 3.3 (Kiểm chứng phủ toàn bộ đề bài)
 - **Vấn đề:** review cuối của Checker chỉ chấm các dòng Planner khai báo; Planner (quy tắc "tiết chế") có khi chỉ khai 1 dòng → Shopee 64c570f2 báo 1/1 passed mà không xem tag Mall, rẻ nhất, phân loại, số lượng.

@@ -473,11 +473,16 @@ class AndroidAdbDriver(BaseDeviceDriver):
 
             if not cleared:
                 if clear_existing:
-                    # Safe & robust clearing: Move to End -> Shift+Home selection -> Delete -> Fallback backspaces
+                    # Move to End -> Ctrl+A -> Delete -> fallback backspaces.
+                    # `--meta 1 122` (Shift+MOVE_HOME) only moves the caret to
+                    # the start without selecting, so the backspaces after it
+                    # deleted nothing (verified on API 34). `;` keeps the
+                    # backspace fallback running where `keycombination` is
+                    # unavailable (Android < 12).
                     clear_cmd = (
-                        "input keyevent 123 && "
-                        "input keyevent --meta 1 122 && "
-                        "input keyevent 67 && "
+                        "input keyevent 123; "
+                        "input keycombination 113 29; "
+                        "input keyevent 67; "
                         "input keyevent 67 67 67 67 67 67 67 67 67 67 67 67 67 67 67 67 67 67 67 67"
                     )
                     await asyncio.to_thread(self.device.shell, clear_cmd)
