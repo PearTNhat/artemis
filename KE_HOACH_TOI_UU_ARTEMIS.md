@@ -28,6 +28,15 @@
   - **Khóa cứng chuẩn mực trong `AGENTS.md`:** Thêm các mục 2.7, 2.8, 2.9 cấm hardcode tên nút/từ khóa, bắt buộc tư duy theo UI Pattern và thuộc tính Accessibility chuẩn.
 - **Kiểm thử hồi quy:** Vượt qua 100% các bộ unit test (toàn bộ 263 tests trong `mcp` và `agents/flash`). Test mới: bỏ chờ ngay khi màn hình đã đổi cho `my_action`, giữ chờ cho `external`, chặn lặp qua thao tác xen giữa, lọc text cắt mép màn hình/ẩn.
 
+### 📌 Bản 3.4 (Gộp PR upstream google/artemis — đợt 1, 2026-11-19)
+- Gộp 4 PR đang mở của `google/artemis` vào nhánh `adopt/upstream-prs-1`: **#216, #244, #181, #171**. Danh sách đầy đủ và trạng thái ở **Mục 11** (tránh gộp lại lần nữa).
+- **#216** `launch_app`: `monkey --pct-syskeys 0` — trên emulator / máy không phím cứng, lệnh `monkey` cũ không mở được app (mất ~45s cho 3 lần thử rồi agent phải tự mở từ app drawer).
+- **#244** `parse_swipe_parameters`: `duration=0` (số) không còn bị thay bằng 800ms.
+- **#181** `ui_filter` / `ocr_xml_fusion`: hộp thoại SystemUI / permissioncontroller toàn màn hình không còn bị coi là thanh trạng thái/điều hướng (nút trong hộp thoại bấm được, tọa độ OCR không lệch). Thanh hệ thống bị giới hạn cao ≤ 12% (trên) / ≤ 15% (dưới).
+- **#171** `AndroidAdbDriver.input_text`: chạy local cũng dán qua clipboard (Accessibility Helper), đọc lại ô đang focus để xác nhận chữ đã vào; trả `False` khi thấy rõ ô vẫn trống thay vì luôn báo thành công.
+  - **Sửa thêm so với PR gốc:** PR gọi `clear_text` của helper cả khi `clear_existing=False` → xóa mất chữ có sẵn ở chế độ gõ nối. Đã chỉ xóa khi `clear_existing=True`, thêm test `test_input_text_append_mode_does_not_clear_via_helper`.
+- **Kiểm thử:** `tests/unit` 2635 passed, 9 skipped (bao gồm bộ regression bắt buộc `mcp/`, `agents/`, `llm/`). Chưa đo trên thiết bị thật.
+
 ### 📌 Bản 3.3 (Kiểm chứng phủ toàn bộ đề bài)
 - **Vấn đề:** review cuối của Checker chỉ chấm các dòng Planner khai báo; Planner (quy tắc "tiết chế") có khi chỉ khai 1 dòng → Shopee 64c570f2 báo 1/1 passed mà không xem tag Mall, rẻ nhất, phân loại, số lượng.
 - **Checker** (`checker.py`, `checker.json`): `CheckReport.goal_requirements` — review cuối liệt kê MỌI yêu cầu cụ thể trong đề gốc chưa có dòng khai báo, chấm từng cái có bằng chứng; `verify` (kết quả phải đạt, failed → Operator nhận gợi ý và sửa) hoặc `assert` (điều cấm / trạng thái cuối). `merge_goal_requirements` đổi chúng thành dòng `[goal] ...` nên ledger, bảng pass/fail, vòng sửa lỗi, giao diện dùng nguyên. Mỗi verify failed phải có `suggestion` cụ thể.
@@ -180,6 +189,8 @@ Ghi chú: sản phẩm rẻ nhất có tag Mall chỉ có phân loại 30cm, c�
 | **B.** Bỏ lượt mở ảnh `read_file` | ⚠️ Đang xử lý | Thử nghiệm cho thấy agy stream-json chỉ hỗ trợ text; đã bổ sung thuộc tính UI & gợi ý |
 | **E2.** Chuỗi xuyên màn hình | ✅ Xong | Đã hoàn thành trong **Trụ cột G** |
 | **F2.** `find_and_reveal`, `scroll_and_collect` | ❌ Chưa | |
+| Gộp PR upstream đợt 1 (#216, #244, #181, #171) | ✅ Xong | Xem Mục 11; 2635 unit tests passed |
+| Gộp PR upstream đợt 2 (#189, #217, #219, #221) | ❌ Chưa | Xung đột với code đã sửa, phải gộp tay |
 | Test suite cho Trụ cột G & kiểm tra hồi quy | ✅ Xong | 757 unit tests passed (27/27 tests Trụ cột G & Turn Snapshot passed), khắc phục triệt để toàn bộ các lỗi phát hiện qua review (cho phép action không mục tiêu sau wait, lấy dữ liệu qua pipeline observe chuẩn cho target_text, flatten XML cây phân cấp lồng nhau, chuẩn hóa cờ timed_out có cấu trúc) |
 
 ---
@@ -461,3 +472,26 @@ Kèm 3 ví dụ ngắn: cờ vua (đi + chờ đối thủ), tìm kiếm (bấm 
 | Không có trạng thái triển khai | Thêm mục 2 | Theo dõi phần đã xong / còn lại |
 | — | Thêm **Trụ cột H** (rút gọn danh sách phần tử) | Trang web dài làm context tăng ~6k token/lượt |
 | Trụ cột F2, I nằm rải rác | Gom vào mục 5, I ghi rõ "không macro mù" | Theo review |
+
+---
+
+## 11. PR UPSTREAM (`google/artemis`) ĐÃ GỘP — KHÔNG GỘP LẠI
+
+> Trước khi gộp một PR của `google/artemis`, tra bảng này. Khi upstream merge chính các PR này, lúc `git merge upstream/main` sẽ đụng đúng các đoạn code đó: giữ bản đã có ở đây (riêng #171 giữ bản có sửa `clear_existing`).
+
+| PR | Tiêu đề | Gộp ngày | Nhánh | File chính | Ghi chú |
+|:-:|:--|:-:|:--|:--|:--|
+| [#216](https://github.com/google/artemis/pull/216) | fix(adb): launch apps with monkey --pct-syskeys 0 | 2026-11-19 | `adopt/upstream-prs-1` | `artemis/drivers/android/adb_driver.py` | Nguyên bản |
+| [#244](https://github.com/google/artemis/pull/244) | fix(coordinates): honor an explicit zero swipe/scroll duration | 2026-11-19 | `adopt/upstream-prs-1` | `artemis/utils/coordinates.py` | Nguyên bản |
+| [#181](https://github.com/google/artemis/pull/181) | fix(perception): keep system dialogs clickable, only filter true status/nav bars | 2026-11-19 | `adopt/upstream-prs-1` | `artemis/utils/ui_filter.py`, `artemis/utils/ocr_xml_fusion.py` | Nguyên bản |
+| [#171](https://github.com/google/artemis/pull/171) | fix(android): use clipboard paste and verify text entry in input_text | 2026-11-19 | `adopt/upstream-prs-1` | `artemis/drivers/android/adb_driver.py` | **Có sửa:** chỉ gọi helper `clear_text` khi `clear_existing=True` |
+
+### Đã xem, chưa gộp
+| PR | Lý do |
+|:-:|:--|
+| #189 (trùng #193) | Nên gộp — hiện `checked`/`enabled` cho công tắc. Xung đột `artemis/utils/visualization.py` |
+| #217 | Nên gộp — Flash dừng sau 5 lượt liền không gọi tool. Xung đột `artemis/agents/flash/runner.py` |
+| #219 | Nên gộp — prompt "progress note". Xung đột `flash_runner.md` |
+| #221 | Nên gộp — Checker không chép lại verdict FAIL cũ. Xung đột `checker.json`, test |
+| #226, #148, #130 | Có thể gộp (vòng lặp Operator không ra action; Checker dùng tool calling cho endpoint OpenAI; gõ Unicode khi clipboard bị chặn) |
+| #163, #176, #175, #112, #161 | Không gộp lúc này — tính năng lớn hoặc dựa trên lịch sử repo cũ |

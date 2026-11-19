@@ -101,6 +101,12 @@ async def test_android_driver_with_mock_adb():
     await driver.press_key(KeyCode.BACK)
     mock_adb_device.shell.assert_called_with("input keyevent 4")
 
+    # Launch through the LAUNCHER category without system-key events (keyless devices)
+    assert await driver.launch_app("com.example.themesim") is True
+    mock_adb_device.shell.assert_called_with(
+        "monkey --pct-syskeys 0 -p com.example.themesim -c android.intent.category.LAUNCHER 1"
+    )
+
 
 @pytest.mark.asyncio
 async def test_android_driver_preserves_elements_from_combined_screen_data():
@@ -199,3 +205,31 @@ async def test_find_element_prefers_fresh_bounds_over_stale_center():
 
     assert error is None
     assert center == [140, 1820]
+
+
+@pytest.mark.asyncio
+async def test_input_text_append_mode_does_not_clear_via_helper():
+    """clear_existing=False must keep the field's text: the helper's clear_text
+    is only for the clearing path."""
+    from artemis.drivers.android.adb_driver import AndroidAdbDriver
+
+    client = MagicMock()
+    client.clear_text.return_value = True
+    client.set_clipboard.return_value = True
+    client.get_hierarchy.return_value = (
+        '<node class="android.widget.EditText" focused="true" text="hello world" />'
+    )
+    driver = AndroidAdbDriver(
+        device_id="emulator-5554", adb_client=MagicMock(), ui_adb_client=client
+    )
+    device = MagicMock()
+    driver._device = device
+
+    assert await driver.input_text(" world", clear_existing=False) is True
+    client.clear_text.assert_not_called()
+    shell_cmds = [c.args[0] for c in device.shell.call_args_list]
+    assert "input keyevent 123" in shell_cmds  # cursor moved to end, text kept
+
+    client.clear_text.reset_mock()
+    assert await driver.input_text("hello world", clear_existing=True) is True
+    client.clear_text.assert_called_once()
