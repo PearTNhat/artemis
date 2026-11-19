@@ -695,3 +695,157 @@ async def test_target_text_commitment_guard_blocks_payment_text():
         assert res.status == "error"
         assert "Commitment Guard" in res.text_summary
 
+
+@pytest.mark.asyncio
+async def test_ineffective_taps_history_guard_blocks_repeat_across_intervening_actions():
+    """Regression (Grab trace step 24-32): tapping 'Confirm address' leaves the screen unchanged.
+    Intervening waits or non-point actions must NOT clear the memory. Subsequent taps on the same
+    control (even slightly drifting coordinates like [500, 940] vs [500, 936]) must be rejected."""
+    from artemis.mcp.action_types import ActionResult
+
+    executor = _make_executor(width=1000, height=2000)
+    state = _indexed_state()
+
+    elements = [
+        {"index": 1, "text": "Confirm address", "center": [500, 940], "bounds": [100, 900, 900, 980], "class": "android.widget.Button"}
+    ]
+    state.indexed_elements = elements
+    state.indexed_points = [[500, 940]]
+
+    session_mock = Mock()
+    session_mock.started = True
+    session_mock.call = AsyncMock(return_value=ActionResult.success("click", "Clicked"))
+
+    # Baseline observation
+    obs = Mock(ok=True, hierarchy_ok=True, elements=elements, screenshot_path=None, elements_text="")
+    session_mock.observe = AsyncMock(return_value=obs)
+    executor._session = session_mock
+
+    # 1. First tap establishes baseline
+    res_1 = await executor.execute("click", {"target": [500, 940], "target_description": "Confirm address"}, "c1", state)
+    assert res_1.status == "success"
+
+    # 2. Second tap leaves screen unchanged -> recorded in _ineffective_taps
+    res_2 = await executor.execute("click", {"target": [500, 940], "target_description": "Confirm address"}, "c2", state)
+    assert res_2.status == "success"
+    assert "(no visible change)" in res_2.text_summary
+
+    # 3. Intervening action: e.g. wait_for_delay (non-point action)
+    session_mock.call.return_value = ActionResult.success("wait_for_delay", "Waited")
+    await executor.execute("wait_for_delay", {"time_in_ms": 500}, "c_wait", state)
+
+    # 4. Third tap with slightly drifting coordinates [500, 936] (4px drift) on the same screen
+    res_4 = await executor.execute("click", {"target": [500, 936], "target_description": "Confirm address"}, "c4", state)
+    assert res_4.status == "error"
+    assert "Repeated tap rejected" in res_4.text_summary
+
+
+@pytest.mark.asyncio
+async def test_ineffective_tap_allowed_again_after_another_interaction():
+    """Regression (Grab trace step 28-32): 'Confirm address' did nothing because a required
+    option was unset. Picking the option (a custom-drawn radio that changes neither the
+    element list nor the coarse image hash) must make Confirm tappable again."""
+    from artemis.mcp.action_types import ActionResult
+
+    executor = _make_executor(width=1000, height=2000)
+    state = _indexed_state()
+    elements = [
+        {"index": 1, "text": "Meet at lobby", "center": [500, 700], "bounds": [100, 660, 900, 740], "class": "android.view.View"},
+        {"index": 2, "text": "Confirm address", "center": [500, 940], "bounds": [100, 900, 900, 980], "class": "android.widget.Button"},
+    ]
+    state.indexed_elements = elements
+    state.indexed_points = [[500, 700], [500, 940]]
+
+    session_mock = Mock()
+    session_mock.started = True
+    session_mock.call = AsyncMock(return_value=ActionResult.success("click", "Clicked"))
+    session_mock.observe = AsyncMock(
+        return_value=Mock(ok=True, hierarchy_ok=True, elements=elements, screenshot_path=None, elements_text="")
+    )
+    executor._session = session_mock
+
+    await executor.execute("click", {"target": [500, 940], "target_description": "button"}, "c1", state)  # baseline
+    res_2 = await executor.execute("click", {"target": [500, 940], "target_description": "button"}, "c2", state)
+    assert "(no visible change)" in res_2.text_summary
+
+    # The model picks the required option; the screen signature does not notice.
+    await executor.execute("click", {"target": [500, 700], "target_description": "button"}, "c3", state)
+
+    res_4 = await executor.execute("click", {"target": [500, 938], "target_description": "button"}, "c4", state)
+    assert res_4.status == "success"
+    assert "Repeated tap rejected" not in res_4.text_summary
+
+
+@pytest.mark.asyncio
+async def test_ineffective_tap_memory_ignores_a_different_screen():
+    """A known-ineffective point on one screen does not block the same point on another
+    screen (different element signature)."""
+    from artemis.mcp.action_types import ActionResult
+
+    executor = _make_executor(width=1000, height=2000)
+    state = _indexed_state()
+    screen_a = [{"index": 1, "text": "Confirm", "center": [500, 940], "bounds": [100, 900, 900, 980]}]
+    screen_b = [{"index": 1, "text": "Next", "center": [500, 940], "bounds": [100, 900, 900, 980]}]
+    state.indexed_elements = screen_a
+    state.indexed_points = [[500, 940]]
+
+    session_mock = Mock()
+    session_mock.started = True
+    session_mock.call = AsyncMock(return_value=ActionResult.success("click", "Clicked"))
+    obs_a = Mock(ok=True, hierarchy_ok=True, elements=screen_a, screenshot_path=None, elements_text="")
+    session_mock.observe = AsyncMock(return_value=obs_a)
+    executor._session = session_mock
+
+    await executor.execute("click", {"target": [500, 940], "target_description": "button"}, "c1", state)
+    res_2 = await executor.execute("click", {"target": [500, 940], "target_description": "button"}, "c2", state)
+    assert "(no visible change)" in res_2.text_summary  # ineffective on A
+
+    # Some external event moved the app to screen B (seen via a runner observation).
+    executor.record_observation(screen_b, None)
+    session_mock.observe = AsyncMock(
+        return_value=Mock(ok=True, hierarchy_ok=True, elements=screen_b, screenshot_path=None, elements_text="")
+    )
+    res = await executor.execute("click", {"target": [500, 940], "target_description": "button"}, "c3", state)
+    assert res.status == "success"
+    assert "Repeated tap rejected" not in res.text_summary
+
+
+def test_find_matching_text_elements_ignores_edge_clipped_or_invisible_text():
+    """Regression (Grab trace step 26): 'Total' was found on a bottom sheet peeking at the edge,
+    causing wait_for_text to report false-positive completion before navigation."""
+    w, h = 1080, 2400
+
+    elements = [
+        # 1. Cut off at the bottom edge: only 10px visible out of 50px height
+        {
+            "index": 1,
+            "text": "Total",
+            "bounds": [100, 2390, 400, 2440],
+            "class": "android.widget.TextView",
+        },
+        # 2. Explicitly invisible to user
+        {
+            "index": 2,
+            "text": "Total",
+            "bounds": [100, 500, 400, 550],
+            "visible-to-user": "false",
+            "class": "android.widget.TextView",
+        },
+        # 3. Fully visible valid element
+        {
+            "index": 3,
+            "text": "Order summary",
+            "bounds": [100, 200, 900, 280],
+            "class": "android.widget.TextView",
+        },
+    ]
+
+    # "Total" is rejected because element 1 is cut off at the edge and element 2 is invisible-to-user
+    matches_total = find_matching_text_elements(elements, "Total", width=w, height=h)
+    assert len(matches_total) == 0
+
+    # "Order summary" is fully visible and must match
+    matches_summary = find_matching_text_elements(elements, "Order summary", width=w, height=h)
+    assert len(matches_summary) == 1
+    assert matches_summary[0]["index"] == 3
+

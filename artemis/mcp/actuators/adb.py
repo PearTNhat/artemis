@@ -365,7 +365,10 @@ class AdbActuator:
         )
 
     async def wait_for_screen_change(
-        self, timeout_ms: int = 25000, region: list[int] | None = None
+        self,
+        timeout_ms: int = 25000,
+        region: list[int] | None = None,
+        after: str = "my_action",
     ) -> ActionResult:
         timeout_s = max(1.0, float(timeout_ms) / 1000.0)
         start_time = time.monotonic()

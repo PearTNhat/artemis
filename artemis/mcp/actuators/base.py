@@ -89,7 +89,10 @@ class Actuator(Protocol):
     async def wait_for_delay(self, time_in_ms: int) -> ActionResult: ...
 
     async def wait_for_screen_change(
-        self, timeout_ms: int = 25000, region: list[int] | None = None
+        self,
+        timeout_ms: int = 25000,
+        region: list[int] | None = None,
+        after: str = "my_action",
     ) -> ActionResult: ...
 
     async def wait_for_text(

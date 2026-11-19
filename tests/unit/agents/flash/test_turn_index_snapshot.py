@@ -471,10 +471,10 @@ def _burst_runner(mock_context, observations, shots):
     return runner
 
 
-def _wait_call():
+def _wait_call(after="external"):
     return {
         "name": "wait_for_screen_change",
-        "args": {"region": [0, 300, 1000, 800], "timeout_s": 60.0},
+        "args": {"region": [0, 300, 1000, 800], "timeout_s": 60.0, "after": after},
         "id": "tc-wait",
     }
 
@@ -519,7 +519,42 @@ async def test_pre_wait_keeps_wait_when_burst_changed_the_region(mock_context, t
 
     assert [name for name, _ in runner.executor._session.calls] == ["click", "wait_for_screen_change"]
     assert len(tool_msgs) == 2
-    assert "wait skipped" not in tool_msgs[1].content
+
+
+@pytest.mark.asyncio
+async def test_my_action_wait_returns_once_changed_screen_has_settled(mock_context, tmp_path):
+    """after='my_action': the tap already changed the screen (navigated into a page), so
+    the wait returns as soon as two consecutive looks match, without running the wait."""
+    blank = _png(tmp_path, "blank")
+    moved = _png(tmp_path, "moved", mark=(200, 900, 600, 1500))
+    pre_bytes = open(blank, "rb").read()
+    runner = _burst_runner(mock_context, [ORIGINAL] * 6, [moved] * 6)
+    runner._SETTLE_POLL_MS = 0
+
+    tool_msgs = await _run(runner, [_click(5, "tc-click-5"), _wait_call(after="my_action")],
+                           _state(ORIGINAL), pre_bytes)
+
+    assert [name for name, _ in runner.executor._session.calls] == ["click"]
+    assert len(tool_msgs) == 2
+    assert tool_msgs[1].status == "success"
+    assert "has settled" in tool_msgs[1].content
+
+
+@pytest.mark.asyncio
+async def test_my_action_wait_reports_screen_still_moving(mock_context, tmp_path):
+    """The page keeps changing between looks (skeleton filling in): the result says so
+    instead of claiming the screen settled."""
+    blank = _png(tmp_path, "blank")
+    frames = [_png(tmp_path, f"f{i}", mark=(100 + 120 * i, 900, 220 + 120 * i, 1500)) for i in range(9)]
+    pre_bytes = open(blank, "rb").read()
+    runner = _burst_runner(mock_context, [ORIGINAL] * 9, frames)
+    runner._SETTLE_POLL_MS = 0
+
+    tool_msgs = await _run(runner, [_click(5, "tc-click-5"), _wait_call(after="my_action")],
+                           _state(ORIGINAL), pre_bytes)
+
+    assert [name for name, _ in runner.executor._session.calls] == ["click"]
+    assert "still moving" in tool_msgs[1].content
 
 
 @pytest.mark.asyncio
@@ -533,3 +568,34 @@ async def test_pre_wait_without_screenshots_is_uncertain_and_keeps_wait(mock_con
 
     assert [name for name, _ in runner.executor._session.calls] == ["click", "wait_for_screen_change"]
     assert len(tool_msgs) == 2
+
+
+@pytest.mark.asyncio
+async def test_turn_opening_my_action_wait_returns_when_page_already_loaded(mock_context, tmp_path):
+    """Regression (Shopee trace step 5): the model saw a loading skeleton and opened its
+    turn with wait_for_screen_change. The results had already loaded, so the wait must
+    return at once instead of taking a fresh baseline and timing out."""
+    skeleton = _png(tmp_path, "skeleton")
+    loaded = _png(tmp_path, "loaded", mark=(100, 800, 900, 1800))
+    runner = _burst_runner(mock_context, [ORIGINAL] * 6, [loaded] * 6)
+    runner._SETTLE_POLL_MS = 0
+
+    tool_msgs = await _run(runner, [_wait_call(after="my_action")], _state(ORIGINAL),
+                           open(skeleton, "rb").read())
+
+    assert runner.executor._session.calls == []
+    assert "has settled" in tool_msgs[0].content
+
+
+@pytest.mark.asyncio
+async def test_turn_opening_wait_on_unchanged_screen_still_waits(mock_context, tmp_path):
+    """Nothing acted this turn and the screen is unchanged: that is a genuine wait for
+    loading to finish, not a sign of an ineffective action."""
+    blank = _png(tmp_path, "blank")
+    runner = _burst_runner(mock_context, [ORIGINAL] * 6, [blank] * 6)
+
+    tool_msgs = await _run(runner, [_wait_call(after="my_action")], _state(ORIGINAL),
+                           open(blank, "rb").read())
+
+    assert [name for name, _ in runner.executor._session.calls] == ["wait_for_screen_change"]
+    assert "wait skipped" not in tool_msgs[0].content

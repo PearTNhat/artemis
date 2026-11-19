@@ -229,6 +229,7 @@ async def _wire_wait_for_screen_change(actuator: Any, a: dict[str, Any]) -> Acti
     return await actuator.wait_for_screen_change(
         a.get("timeout_ms", 25000),
         a.get("region"),
+        a.get("after", "my_action"),
     )
 
 
@@ -680,6 +681,16 @@ _SPECS: tuple[ActionSpec, ...] = (
                             "specific area (e.g. chessboard or message feed)."
                         ),
                     },
+                    "after": {
+                        "type": "string",
+                        "enum": ["my_action", "external"],
+                        "description": (
+                            "What change to wait for: 'my_action' (default) waits for the screen to reflect "
+                            "the effect of your own preceding action (if the screen has already changed, returns immediately). "
+                            "'external' waits for a third party to respond (e.g. opponent move in chess, incoming chat message) "
+                            "after your own action has already settled."
+                        ),
+                    },
                 },
             },
         ),
@@ -688,6 +699,7 @@ _SPECS: tuple[ActionSpec, ...] = (
             params=(
                 ParamSpec("timeout_ms", int, required=False, default=25000),
                 ParamSpec("region", list[int] | None, required=False, default=None),
+                ParamSpec("after", str, required=False, default="my_action"),
             ),
             bind=_wire_wait_for_screen_change,
         ),

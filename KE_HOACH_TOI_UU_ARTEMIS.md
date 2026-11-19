@@ -19,12 +19,14 @@
   - **Soft Handover thông minh**: Hết giờ chờ không ngắt ngang tác vụ; chụp ảnh gửi AI kèm thông tin đếm số lần và thời gian chờ để AI nhìn thực tế và phán đoán.
   - **Phòng thủ cấu trúc phẳng (`flatten_hierarchy`)**: Tương thích 100% mọi dòng máy và Accessibility Service dù XML lồng nhau nhiều cấp.
   - **Tín hiệu Timeout có cấu trúc**: Bổ sung `timed_out: bool = False` trên `ActionResult` và metadata thay vì tìm chuỗi thô.
-- **Tối ưu Fail-Fast & Phản hồi trung tính độc lập ngôn ngữ (Trace cờ vua / Form validation):**
-  - **Kiểm tra trước lệnh chờ (Pre-wait no-effect check):** Trong chuỗi `[thao tác..., wait_for_screen_change]`, trước khi chờ, so màn hình với ảnh **đầu lượt** (không phải ảnh sau tap) trong đúng `region`, có che status bar/đồng hồ, kích thước lấy theo thiết bị thật. Cho thao tác ~1s để hiện hiệu ứng (2 lần nhìn: 300ms + 700ms, thoát sớm khi thấy đổi). Kết quả 3 trạng thái `changed / unchanged / uncertain`; chỉ `unchanged` (pixel không đổi VÀ XML vùng đó không đổi) mới bỏ lệnh chờ. Không có ảnh để so (màn canvas chỉ có XML) → `uncertain` → vẫn chờ. Các lệnh còn lại sau khi bỏ chờ trả `status="error"` (không chạy). Tiết kiệm tới 60s/lượt khi thao tác không có tác dụng.
-  - **Phản hồi trung tính & độc lập ngôn ngữ:** Bỏ từ khóa cứng (`"vui lòng"`, `"bắt buộc"`, `"required"`...); chỉ dùng thuộc tính `error` của accessibility node, hoặc ghi chú `(no visible change)`. Giữ `ok=True` và 1 `ToolMessage`/tool call.
-  - **Commitment Guard giữ phạm vi tiền/đơn hàng:** Thử mở rộng `COMMITMENT_PATTERN` (resign, xóa, hủy bỏ, delete, logout...) đã bị **hoàn tác** vì thiên về app cờ vua và chặn nhầm nút an toàn phổ biến (Cancel/"Hủy bỏ", nút xóa ô tìm kiếm), đồng thời cắt ngang burst trên mọi app. Giữ kiểm tra fail-fast ở đầu `target_text` (tránh 3s dò text vô ích). Prompt hướng dẫn xác nhận hai bước viết tổng quát, không liệt kê từ khóa.
-  - **Prompt:** Bỏ ví dụ riêng cờ vua; mẫu "thao tác → `wait_for_screen_change`" tổng quát kèm hướng dẫn khi lệnh chờ bị bỏ.
-- **Kiểm thử hồi quy:** `uv run pytest tests/unit/mcp/ tests/unit/agents/ tests/unit/llm/` → **768 passed, 5 skipped**. Test mới: bỏ chờ khi vùng không đổi (lệnh sau bị báo error), vẫn chờ khi vùng đổi, vẫn chờ khi không có ảnh (uncertain), regex không bắt Cancel/Xóa/Delete/Sign out.
+- **Tối ưu Fail-Fast & Phản hồi trung tính độc lập ngôn ngữ (Trace cờ vua & Grab Food):**
+  - **Cắt chờ khi màn hình đã đổi xong (`after="my_action" | "external"`):** Thêm tham số `after` cho `wait_for_screen_change`. Khi `after="my_action"` (mặc định), nếu thao tác trước đó của chính AI đã làm màn hình đổi và ổn định xong (ví dụ bấm vào Food, mở giỏ), hệ thống lập tức hoàn thành lệnh chờ và trả về kết quả, tiết kiệm ~66s chờ vô ích mỗi tác vụ (cắt 1/4 tổng thời gian). Khi `after="external"`, hệ thống giữ lệnh chờ để đợi đối thủ/bên ngoài phản hồi (cờ vua, chat).
+  - **Bộ nhớ chặn lặp bền vững (`_ineffective_taps`):** Chặn bấm lặp lại cùng một nút trên cùng trạng thái màn hình (ngưỡng 20 đơn vị tọa độ) ngay cả khi có các thao tác khác (như `wait_for_delay`, bấm thử mục khác) xen vào giữa.
+  - **Visibility Guard nâng cấp (`find_matching_text_elements`):** Bỏ qua các phần tử có `visible-to-user="false"` hoặc bị cắt ở mép màn hình (chiều cao nhìn thấy `< 14px` hoặc bị che `> 60%`), giải quyết triệt để lỗi "nhìn xuyên thấu" text `Total` trên thanh đáy trước khi chuyển trang.
+  - **Quy tắc UI Pattern tổng quát (Sticky Bottom CTA & Form Review):** Xóa toàn bộ hardcode tên nút tiếng Anh khỏi prompt. Hướng dẫn AI nhận diện thanh hành động ghim đáy và cuộn kiểm tra hết các trường bắt buộc khi màn hình có dấu hiệu còn nội dung (`[Scroll: scrollable container detected]`).
+  - **Kiểm tra trạng thái có sẵn (Pre-existing state caution):** Bổ sung vào Operator, Planner và Checker quy tắc coi giỏ hàng hoặc form điền sẵn từ phiên trước là trạng thái lạ, bắt buộc đối chiếu nội dung thực tế (tên món, số lượng) với yêu cầu người dùng thay vì "nhận vơ" hoàn thành.
+  - **Khóa cứng chuẩn mực trong `AGENTS.md`:** Thêm các mục 2.7, 2.8, 2.9 cấm hardcode tên nút/từ khóa, bắt buộc tư duy theo UI Pattern và thuộc tính Accessibility chuẩn.
+- **Kiểm thử hồi quy:** Vượt qua 100% các bộ unit test (toàn bộ 263 tests trong `mcp` và `agents/flash`). Test mới: bỏ chờ ngay khi màn hình đã đổi cho `my_action`, giữ chờ cho `external`, chặn lặp qua thao tác xen giữa, lọc text cắt mép màn hình/ẩn.
 
 ### 📌 Bản 2 (Tối ưu phản hồi & Giảm tải tài nguyên cơ bản)
 - **Trụ cột A:** Làm mới session agy khi context vượt ngưỡng (≥ 80k và tăng ≥ 15k; trần cứng 120k) để chống phình to token.
@@ -86,6 +88,19 @@ Chess.com trên Chrome, emulator 720×1280, profile `flash`. 22 lượt, ~312s.
 - Bước 7 mất 37s model: một lần agy nghẽn đơn lẻ, không lặp lại.
 
 ---
+
+### 1.3. Grab & Shopee trên máy thật — sau `after=my_action/external`, chờ ổn định, guard bấm lặp thuần (2026-11-19)
+Cùng nhiệm vụ "đi tới màn hình đặt hàng, không bấm đặt", Flash, điện thoại thật:
+
+| Trace | Thời gian | Bước | Lệnh chờ hết giờ | Ghi chú |
+|---|---|---|---|---|
+| Grab trước — `d912751d-3b47-4b81-82b4-da6e99a2927f` | ~292s | 37 | 9 (≈66s) | Bấm Confirm address 4 lần; không cuộn xem lựa chọn giao hàng |
+| Grab sau — `3fddc4e1-1632-44a2-9d70-92f09bcd824b` | 181s | 21 | **0** | Lệnh chờ trả về ngay khi màn hình ổn định; Confirm không tác dụng → bỏ chờ, cuộn xem lựa chọn rồi chọn "Meet at lobby" |
+| Shopee — `7a16cfb5-4da0-44bf-990b-5a63a145a885` | 115s | 14 | 1 (≈14s) | Lệnh chờ mở đầu lượt khi kết quả đã tải xong → đã sửa: chờ mở đầu lượt cũng so với ảnh model vừa thấy |
+
+Cả hai dừng đúng ở màn hình đặt hàng, không bấm đặt.
+
+**Pro, Grab, `verification_level=checkpoints` — `a8445e7d-5dcf-4155-aa2f-bb7b6018cee9`** (giỏ có sẵn "Phở Bò Tái lớn", yêu cầu "Phở Bò Tái vừa"): ~9 phút. Operator làm đúng: tự phát hiện và xoá món cũ, giỏ cuối đúng 1 Phở Bò Tái vừa, ghi đủ chi tiết vào note. Safety net chặn 1 cú bấm tọa độ cũ của "Review address" khi nút đó đã đổi thành "Place Order". **Checker hỏng hoàn toàn:** model trả verdict thiếu `status`/`kind` (hoặc dùng key `verdict`) → `CheckReport` validation lỗi, run bị pause, 2 checkpoint timeout 180s, kết quả `inconclusive=4` và run vẫn được đánh PASS (fail-open). Đã sửa: `CheckVerdict` chấp nhận `verdict`, thiếu `status` → `inconclusive`, thiếu `kind` → lấy theo check item được trích dẫn (4 test mới). Chưa chạy lại trên máy.
 
 ## 2. TRẠNG THÁI TRIỂN KHAI (đến bản 3)
 

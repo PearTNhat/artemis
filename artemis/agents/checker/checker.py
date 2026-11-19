@@ -42,7 +42,8 @@ from typing import Any, Literal
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from artemis.core.tool_failure import ToolFailure, is_tool_failure
 from artemis.constants import CHECKER_MAX_ITERATIONS
@@ -94,6 +95,33 @@ class CheckVerdict(BaseModel):
         default="",
         description="For failed verify items only: actionable repair hint.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _tolerate_malformed_verdict(cls, data: Any) -> Any:
+        """Repairs the shapes models actually emit instead of failing the whole
+        report (a failed structured call errors the LLM request and pauses the
+        run): ``verdict`` used as the status key, and ``kind`` or ``status``
+        left out. A missing status is ``inconclusive``, never ``passed``; a
+        missing kind is provisional and ``_normalize_report`` replaces it with
+        the kind of the check item whose text it quotes."""
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        if "status" not in data:
+            raw = str(data.pop("verdict", "") or "").strip().lower()
+            data["status"] = raw if raw in ("passed", "failed", "inconclusive") else "inconclusive"
+        if "kind" not in data:
+            data["kind"] = "verify"
+            data["_kind_inferred"] = True
+        data.setdefault("evidence", "")
+        data.setdefault("item_text", "")
+        return data
+
+    # Internal flag, hidden from the schema the model is asked to fill.
+    kind_inferred: SkipJsonSchema[bool] = Field(default=False, alias="_kind_inferred", exclude=True)
+
+    model_config = {"populate_by_name": True}
 
 
 class CheckReport(BaseModel):
@@ -433,7 +461,10 @@ def _normalize_report(report: CheckReport, check_items: list) -> CheckReport:
     """Node-side hygiene: vague failed verdicts downgrade to inconclusive; every
     expected item gets a verdict (missing ones are inconclusive)."""
     verdicts: list[CheckVerdict] = []
+    kind_by_text = {ci.text: ci.kind for ci in check_items}
     for v in report.verdicts:
+        if v.kind_inferred and v.item_text in kind_by_text:
+            v = v.model_copy(update={"kind": kind_by_text[v.item_text], "kind_inferred": False})
         if v.status == "failed" and not v.evidence.strip():
             verdicts.append(
                 CheckVerdict(

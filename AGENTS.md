@@ -46,6 +46,30 @@ Không suy đoán theo loại app, chỉ phân loại theo điều kiện mà t�
 ### 2.6. Bất biến 1-to-1 ToolMessage
 - Mỗi `tool_call` gửi lên mô hình LLM bắt buộc phải có đúng một `ToolMessage` tương ứng (trả về kết quả thực thi hoặc trạng thái lỗi/bị chặn an toàn) nhằm đảm bảo tính tương thích Function Calling chuẩn toàn cầu và không bao giờ gây lỗi HTTP 400 Bad Request.
 
+### 2.7. Quy tắc CẤM Hardcode chuỗi & Tư duy theo UI Pattern tổng quát
+- **Tuyệt đối KHÔNG hardcode danh sách text cụ thể vào code hoặc prompt:**
+  - Không liệt kê các tên nút riêng của một app (ví dụ: KHÔNG viết `"Add to Basket"`, `"Place Order"`, `"Confirm address"`, `"Vui lòng nhập"`, `"Bắt buộc"`, v.v.).
+  - Sang các app khác hoặc ngôn ngữ khác (tiếng Việt, tài chính, đặt vé, dịch vụ công), các chuỗi này sẽ hoàn toàn khác và làm hệ thống phán đoán sai lệch.
+- **Luôn quy về UI Pattern và thuộc tính Accessibility chuẩn:**
+  - Thay vì gọi tên nút bấm, hãy gọi đúng bản chất UI: **"Sticky Bottom CTA / Primary Action Bar"** (nút hành động chính ghim cố định ở đáy màn hình).
+  - Thay vì tìm chuỗi text báo lỗi tiếng Việt/Anh, hãy đọc thuộc tính chuẩn của Accessibility node: `el.get("error")`, `el.get("enabled")`, `el.get("checked")`, `el.get("selected")`, `el.get("focused")`.
+  - Khi màn hình đứng yên, chỉ trả về thông báo trung tính: `(no visible change)` hoặc `(no visible change; element error: '{err}')`.
+
+### 2.8. Quy tắc Form có nút ghim đáy & Trạng thái có sẵn (Pre-existing State)
+- **Nút ghim đáy không có nghĩa là đã xem hết trang:**
+  - Khi màn hình có thanh hành động chính ghim ở đáy nhưng nội dung form ở giữa còn cuộn được (`screen_scrollable` hoặc phần tử bị che khuất ở mép dưới), AI bắt buộc phải cuộn kiểm tra các trường bắt buộc ẩn bên dưới trước khi bấm xác nhận.
+- **Thận trọng với dữ liệu có sẵn (Giỏ hàng cũ, form điền sẵn):**
+  - Khi app mở ra đã có sẵn giỏ hàng (ví dụ: `1 Item`) hoặc form điền sẵn từ phiên trước, AI tuyệt đối không được "nhận vơ" là tác vụ đã xong.
+  - Phải coi đó là trạng thái lạ, bắt buộc phải vào kiểm tra chi tiết nội dung (tên món, số lượng, thông số) có trùng khớp chính xác với yêu cầu của người dùng hay không rồi mới được tiến hành tiếp.
+
+### 2.9. Tối ưu thời gian chờ & Bộ nhớ chặn lặp bền vững
+- **Cắt chờ ngay khi màn hình đã đổi xong (`wait_for_screen_change`):**
+  - Hỗ trợ tham số `after="my_action"` (mặc định) và `after="external"`.
+  - Nếu sau cú bấm của chính mình mà màn hình đã đổi và ổn định xong (`after="my_action"`), lệnh chờ phải trả về ngay (`"Screen already changed..."`), tuyệt đối không được ngồi chờ đến hết giờ timeout.
+  - Chỉ khi chờ bên ngoài (`after="external"`, như cờ vua/chat) mới giữ lệnh chờ sau khi thao tác của mình đã hoàn tất.
+- **Chặn bấm lặp bền vững (`_ineffective_taps`):**
+  - Bộ nhớ ghi nhận các cú bấm không tác dụng phải lưu theo vùng và hash/signature màn hình, **không được bị reset** bởi các thao tác xen giữa (như lệnh chờ `wait`, hoặc thao tác thử nghiệm khác). Chặn ngay việc bấm lặp lại cùng một nút trên cùng trạng thái màn hình.
+
 ---
 
 ## 3. Quy trình làm việc bắt buộc cho AI Agent sau khi hoàn thành nhiệm vụ

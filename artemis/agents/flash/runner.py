@@ -739,6 +739,57 @@ class FlashRunner:
             verdict = "unchanged"
         return verdict, obs, shot
 
+    # After a change is seen, how often and how long to look for the screen to
+    # stop moving (page slide-in, skeleton filling in) before handing it over.
+    _SETTLE_POLL_MS = 300
+    _SETTLE_MAX_LOOKS = 6
+
+    def _masked_region(self, shot: bytes, elements, region):
+        """The noise-masked device-size image of ``shot``, cropped to ``region``."""
+        from PIL import Image
+
+        from artemis.utils.screen_diff import crop_region, mask_noise
+
+        width, height = self.executor._screen_size()
+        img = Image.open(io.BytesIO(shot))
+        if img.size != (width, height):
+            img = img.resize((width, height))
+        return crop_region(mask_noise(img, elements, width, height), region, width, height)
+
+    async def _wait_until_settled(self, obs, shot, region):
+        """Looks again until two consecutive looks match in ``region``.
+
+        Returns ``(obs, shot, settled)``; on giving up after
+        ``_SETTLE_MAX_LOOKS`` looks the latest look is returned with
+        ``settled=False`` so the model knows the screen may still be moving.
+        """
+        from artemis.utils.screen_diff import compare_screen_pixels
+
+        if not shot:
+            return obs, shot, False
+        try:
+            prev = self._masked_region(shot, obs.elements if obs.hierarchy_ok else None, region)
+        except Exception as err:
+            logger.debug(f"Settle check unavailable: {err}")
+            return obs, shot, False
+        for _ in range(self._SETTLE_MAX_LOOKS):
+            new_obs, new_shot = await self._observe_live(self._SETTLE_POLL_MS)
+            if new_obs is None or not new_shot:
+                return obs, shot, False
+            try:
+                curr = self._masked_region(
+                    new_shot, new_obs.elements if new_obs.hierarchy_ok else None, region
+                )
+                w, h = curr.size
+                moved, _ = compare_screen_pixels(prev, curr, width=w, height=h)
+            except Exception as err:
+                logger.debug(f"Settle comparison failed: {err}")
+                return new_obs, new_shot, False
+            obs, shot, prev = new_obs, new_shot, curr
+            if not moved:
+                return obs, shot, True
+        return obs, shot, False
+
     def _rebase_screen_baseline(self, obs, screenshot_bytes) -> None:
         """Tells the executor about a screen captured outside it, so its
         screen-unchanged check (repeat-tap guard, post-tap recapture) compares
@@ -1294,12 +1345,19 @@ class FlashRunner:
             if (
                 is_wait_tool
                 and name == "wait_for_screen_change"
-                and actions_executed_in_burst > 0
+                # A wait opening the turn (no action before it) is also checked for
+                # after="my_action": the page may have finished loading between the
+                # screenshot the model saw and now, and a fresh baseline would then
+                # wait for a change that already happened.
+                and (actions_executed_in_burst > 0 or args.get("after", "my_action") == "my_action")
             ):
+                after = args.get("after", "my_action")
                 verdict, obs_pre_wait, curr_shot_bytes = await self._burst_effect_in_region(
                     args.get("region"), burst_baseline_bytes, burst_baseline_elements
                 )
-                if verdict == "unchanged":
+                # "No change" only proves something when this turn acted; a wait that
+                # opens the turn on an unchanged screen is a genuine wait.
+                if verdict == "unchanged" and actions_executed_in_burst > 0:
                     skip_msg = (
                         "No visible change in the wait region since the start of this turn's actions "
                         "(checked for ~1s); wait skipped. The previous action(s) may have had no effect: "
@@ -1336,6 +1394,42 @@ class FlashRunner:
                             )
                         )
                     break
+                elif verdict == "changed" and after == "my_action":
+                    obs_pre_wait, curr_shot_bytes, settled = await self._wait_until_settled(
+                        obs_pre_wait, curr_shot_bytes, args.get("region")
+                    )
+                    skip_msg = (
+                        "Screen already changed since the screen you last saw and has settled; no further wait needed."
+                        if settled
+                        else "Screen already changed since the screen you last saw but was still moving at the last look "
+                        "(loading or animating); check the screen and wait again if needed."
+                    )
+                    logger.info(f"Wait tool '{name}' satisfied immediately: {skip_msg}")
+                    turn.step_keys.append(str(tc_id))
+                    turn.actions.append((name, "success", skip_msg))
+                    messages.append(
+                        ToolMessage(tool_call_id=tc_id, name=name, content=skip_msg, status="success")
+                    )
+                    if curr_shot_bytes:
+                        pre_screenshot_bytes = curr_shot_bytes
+                        self._rebase_screen_baseline(obs_pre_wait, curr_shot_bytes)
+                    if obs_pre_wait.elements_text:
+                        xml_list = obs_pre_wait.elements_text
+                    if state is not None:
+                        if obs_pre_wait.hierarchy_ok:
+                            state.indexed_points = [
+                                el["center"] for el in obs_pre_wait.elements if el.get("center")
+                            ]
+                            state.indexed_elements = obs_pre_wait.elements
+                        if obs_pre_wait.screenshot_path:
+                            state.latest_screenshot = obs_pre_wait.screenshot_path
+
+                    has_waited = True
+                    index_elements = getattr(state, "indexed_elements", None) or index_elements
+                    actions_executed_in_burst = 0
+                    burst_baseline_bytes = pre_screenshot_bytes
+                    burst_baseline_elements = list(index_elements) if index_elements else None
+                    continue
 
             elements_before = getattr(state, "indexed_elements", None)
             before_len = len(elements_before) if isinstance(elements_before, list) else 0

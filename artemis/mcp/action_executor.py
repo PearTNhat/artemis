@@ -107,6 +107,7 @@ class McpActionExecutor:
         self.agent_name = agent_name
         self._session: ActionSession | None = None
         self._last_point_action: dict[str, Any] | None = None
+        self._ineffective_taps: list[dict[str, Any]] = []
         self._last_elements_signature: str | None = None
         self._last_image_hash: str | None = None
         # dHash distance at or below which two screenshots count as the same
@@ -122,6 +123,56 @@ class McpActionExecutor:
             )
         except Exception as exc:
             logger.debug(f"Similarity distance config unavailable; using 5: {exc}")
+
+    # Within ~2% of the screen (0-1000 scale), two taps aim at the same control.
+    _SAME_POINT_SQ_DIST = 400
+
+    @classmethod
+    def _same_point(cls, a: Any, b: Any) -> bool:
+        if not a or not b:
+            return False
+        dx = a[0] - b[0]
+        dy = a[1] - b[1]
+        return dx * dx + dy * dy <= cls._SAME_POINT_SQ_DIST
+
+    def _note_interaction(self, raw_name: str, target_coordinates: Any) -> None:
+        """Forgets ineffective taps that another interaction may have fixed.
+
+        A tap that did nothing (a submit with a required option unset) becomes
+        legitimate again once anything else on the screen was touched: an
+        option picked, a field typed into, a toggle flipped, a scroll. Waits do
+        not touch the screen, so they keep the memory. A custom-drawn option
+        may change too little for the screen signature to notice, so the guard
+        must not rely on seeing that change: any other interaction clears it.
+        """
+        if raw_name.startswith("wait"):
+            return
+        self._ineffective_taps = [
+            e for e in self._ineffective_taps
+            if self._same_point(e.get("target_coordinates"), target_coordinates)
+        ]
+
+    def _is_known_ineffective_tap(self, target_coordinates: Any) -> bool:
+        """True when this point already had no effect on the current screen.
+
+        "Current screen" needs the element signature AND (when both exist) the
+        image hash to match: the 64-bit image hash alone cannot see a small
+        change such as a selected option or a red outline turning green.
+        """
+        screen_sig = self._last_elements_signature
+        if not screen_sig:
+            return False
+        screen_h = self._last_image_hash
+        for entry in self._ineffective_taps:
+            if entry.get("sig") != screen_sig:
+                continue
+            if screen_h and entry.get("hash"):
+                dist = hamming_distance_hex(screen_h, entry["hash"])
+                if dist is None or dist > self._same_screen_max_distance:
+                    continue
+            if self._same_point(entry.get("target_coordinates"), target_coordinates):
+                return True
+        return False
 
     def record_observation(self, elements: list[dict[str, Any]] | None, image_bytes: bytes | None) -> None:
         """Re-bases the screen-change baseline on an observation taken outside
@@ -303,18 +354,31 @@ class McpActionExecutor:
                     # coordinates of an index target (the model named an index,
                     # not a point).
                     target_coordinates = wire_args.get("target")
-                    if target_coordinates and self._last_point_action:
-                        last_coords = self._last_point_action.get("target_coordinates")
-                        last_unchanged = self._last_point_action.get("screen_unchanged", False)
-                        if last_coords and last_unchanged:
-                            dx = target_coordinates[0] - last_coords[0]
-                            dy = target_coordinates[1] - last_coords[1]
-                            if (dx * dx + dy * dy) <= 400:  # <= 20 units (~2% threshold)
-                                raise _ArgError(
-                                    f"Repeated tap rejected: Point {target_coordinates} was already tapped in the "
-                                    f"previous step and did not change the screen. If you are confirming a form, "
-                                    f"please check if there is an unselected option, required field, or validation notice on screen."
-                                )
+                    if target_coordinates:
+                        # 1. Immediate consecutive repeated tap check
+                        if self._last_point_action:
+                            last_coords = self._last_point_action.get("target_coordinates")
+                            last_unchanged = self._last_point_action.get("screen_unchanged", False)
+                            if last_coords and last_unchanged:
+                                dx = target_coordinates[0] - last_coords[0]
+                                dy = target_coordinates[1] - last_coords[1]
+                                if (dx * dx + dy * dy) <= 400:  # <= 20 units (~2% threshold)
+                                    raise _ArgError(
+                                        f"Repeated tap rejected: Point {target_coordinates} was already tapped in the "
+                                        f"previous step and did not change the screen. If you are confirming a form, "
+                                        f"please check if there is an unselected option, required field, or validation notice on screen."
+                                    )
+
+                        # 2. Pure-repetition check: the same point was already tapped on
+                        # this exact screen with no effect, and nothing was interacted
+                        # with since (waits do not count). See _note_interaction.
+                        if self._is_known_ineffective_tap(target_coordinates):
+                            raise _ArgError(
+                                f"Repeated tap rejected: Point {target_coordinates} was already tapped on this "
+                                f"screen and did not change anything, and nothing else was changed since. "
+                                f"Inspect the screen for an unselected required option, a disabled control, "
+                                f"a validation notice or content below the fold before trying again."
+                            )
                 extension = raw_name not in (REQUIRED_ACTIONS | OPTIONAL_ACTIONS)
 
                 action_started = time.monotonic()
@@ -335,6 +399,8 @@ class McpActionExecutor:
                         res = res.model_copy(update={"message": res.message + res_note})
                     message = finalize(res) if finalize else res.message
                 action_s = time.monotonic() - action_started
+                if res.ok:
+                    self._note_interaction(raw_name, target_coordinates)
 
                 if (res.ok or self._observe_despite_failure(raw_name, res)) and not skip_observe:
                     observe_started = time.monotonic()
@@ -426,7 +492,7 @@ class McpActionExecutor:
                             state.indexed_elements = obs.elements
                             state.screen_scrollable = obs.scrollable
 
-                        # Reset or update _last_point_action
+                        # Reset or update _last_point_action and ineffective taps memory
                         if raw_name in _POINT_TARGET_ACTIONS and target_coordinates:
                             if screen_unchanged:
                                 self._last_point_action = {
@@ -434,6 +500,12 @@ class McpActionExecutor:
                                     "target_coordinates": target_coordinates,
                                     "screen_unchanged": True,
                                 }
+                                self._ineffective_taps.append({
+                                    "target_coordinates": target_coordinates,
+                                    "sig": curr_sig,
+                                    "hash": curr_hash,
+                                })
+                                del self._ineffective_taps[:-10]
                             else:
                                 self._last_point_action = None
                         else:
@@ -626,6 +698,7 @@ class McpActionExecutor:
                 {
                     "timeout_ms": timeout_ms,
                     "region": args.get("region"),
+                    "after": args.get("after", "my_action"),
                 },
                 None,
                 {},

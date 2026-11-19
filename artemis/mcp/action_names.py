@@ -176,6 +176,7 @@ def to_canonical_call(
         return "wait_for_screen_change", {
             "timeout_ms": action_item.get("timeout_ms", 25000),
             "region": action_item.get("region"),
+            "after": action_item.get("after", "my_action"),
         }
 
     if verb == "wait_for_text":

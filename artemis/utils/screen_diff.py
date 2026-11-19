@@ -337,6 +337,18 @@ def find_matching_text_elements(
         if r <= l or b <= t or r <= 0 or b <= 0 or l >= width or t >= height:
             continue
 
+        # Check explicit visibility flags from Android accessibility / XML
+        if el.get("visible-to-user") in (False, "false", "False") or el.get("displayed") in (False, "false", "False"):
+            continue
+
+        # Check minimum visible overlap with viewport: avoid matching elements peeking at edges
+        visible_w = min(r, width) - max(l, 0)
+        visible_h = min(b, height) - max(t, 0)
+        if visible_w < 14 or visible_h < 14:
+            continue
+        if visible_h < (b - t) * 0.4:
+            continue
+
         raw_text = str(el.get("text") or "").strip().lower()
         raw_desc = str(el.get("content-desc") or el.get("content_description") or "").strip().lower()
         raw_hint = str(el.get("hint") or "").strip().lower()

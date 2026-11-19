@@ -927,6 +927,11 @@
           ],
           "default": null,
           "title": "Region"
+        },
+        "after": {
+          "default": "my_action",
+          "title": "After",
+          "type": "string"
         }
       },
       "title": "wait_for_screen_changeArguments",
