@@ -72,7 +72,7 @@ def test_targeted_frame_extraction_uses_requested_timestamps():
     assert all(data.startswith(b"\xff\xd8") for _, data in frames)
 
 
-_SCRCPY3_HELP = "    --capture-orientation[=value]\n    --no-window\n    --video-bit-rate=value\n"
+_SCRCPY3_HELP = "    --capture-orientation[=value]\n    --no-window\n    --video-bit-rate=value\n    --no-audio\n"
 _SCRCPY1_HELP = "    --lock-video-orientation[=value]\n    -N, --no-display\n    -b, --bit-rate=value\n"
 
 
@@ -84,6 +84,7 @@ def test_scrcpy_recording_locks_each_segment_orientation(tmp_path, monkeypatch):
 
     assert "--capture-orientation=@" in command
     assert "--no-window" in command
+    assert "--no-audio" in command
     assert command[command.index("--video-bit-rate") + 1] == "2M"
     assert command[command.index("--record") + 1] == str(output_path)
 
@@ -97,6 +98,7 @@ def test_scrcpy_recording_uses_legacy_flags_on_scrcpy_1(tmp_path, monkeypatch):
 
     assert "--no-display" in command
     assert "--no-window" not in command
+    assert "--no-audio" not in command
     assert command[command.index("--bit-rate") + 1] == "2M"
     assert "--video-bit-rate" not in command
     assert "--lock-video-orientation=initial" in command

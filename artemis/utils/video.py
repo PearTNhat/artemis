@@ -117,6 +117,8 @@ def build_scrcpy_record_command(
         bit_rate_flag,
         video_bit_rate,
     ]
+    if _scrcpy_supports(help_text, "--no-audio"):
+        command.append("--no-audio")
     if lock_capture_orientation:
         if supports("--capture-orientation"):
             command.append("--capture-orientation=@")

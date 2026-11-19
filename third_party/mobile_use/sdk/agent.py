@@ -46,6 +46,7 @@ from pydantic import BaseModel
 
 from artemis.agents.flash.runner import FlashRunner
 from artemis.agents.flash.report import save_flash_report
+from artemis.agents.outputter.pro_report import save_pro_report
 from artemis.agents.outputter.outputter import outputter
 from artemis.clients.screen_client_factory import (
     ScreenClient,
@@ -670,6 +671,7 @@ class AgentBase:
                             run_outcome = getattr(last_state, "run_outcome", None)
                             context.run_outcome = run_outcome
                             output = attach_test_summary(output, run_outcome)
+                            save_pro_report(context, last_state, run_outcome, output)
                             task_status_axis = (
                                 run_outcome.get("task_status") if run_outcome else None
                             )

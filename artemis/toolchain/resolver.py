@@ -155,12 +155,15 @@ class ToolchainResolver:
 
         elif platform.os_type == OSType.LINUX:
             if desc.name == "adb":
+                candidates.append(home / ".local" / "bin" / "adb")
                 candidates.append(home / "Android" / "Sdk" / "platform-tools" / "adb")
                 candidates.append(Path("/usr/lib/android-sdk/platform-tools/adb"))
+                candidates.append(Path("/usr/local/bin/adb"))
                 candidates.append(Path("/usr/bin/adb"))
             elif desc.name in ("ffmpeg", "scrcpy"):
-                candidates.append(Path(f"/usr/bin/{desc.name}"))
+                candidates.append(home / ".local" / "bin" / desc.name)
                 candidates.append(Path(f"/usr/local/bin/{desc.name}"))
+                candidates.append(Path(f"/usr/bin/{desc.name}"))
 
         return candidates
 

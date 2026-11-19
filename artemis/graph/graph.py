@@ -28,7 +28,11 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import InjectedState
 from pydantic import BaseModel, Field
 
-from artemis.agents.checker.checker import run_final_check, verdicts_allow_release
+from artemis.agents.checker.checker import (
+    GOAL_ITEM_PREFIX,
+    run_final_check,
+    verdicts_allow_release,
+)
 from artemis.agents.operator.operator import OperatorNode
 from artemis.agents.planner.planner import (
     PlannerNode,
@@ -88,6 +92,7 @@ from artemis.utils.notes import (
     get_note_file_path,
 )
 from artemis.utils.plan_grammar import (
+    CheckItem,
     milestones_changed,
     missing_check_items,
     new_top_level_completions,
@@ -107,6 +112,27 @@ from third_party.mobile_use.graph import (
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _goal_items_from_ledger(ledger: list[dict]) -> list[CheckItem]:
+    """``[goal]`` lines an earlier final review derived from the user's goal.
+
+    Re-declared on later final attempts so the Checker judges the same wording
+    again instead of inventing new phrasings (which would leave a stale failed
+    line beside a new passed one in the test summary).
+    """
+    seen: set[tuple[str, str]] = set()
+    items: list[CheckItem] = []
+    for rec in ledger:
+        text = str(rec.get("item_text") or "")
+        kind = rec.get("kind")
+        if not text.startswith(GOAL_ITEM_PREFIX) or kind not in ("verify", "assert"):
+            continue
+        if (kind, text) in seen:
+            continue
+        seen.add((kind, text))
+        items.append(CheckItem(kind=kind, when="at_end", text=text, parent_key=None))
+    return items
 
 
 def _notify_history_chunker(ctx: ArtemisContext, method: str, *args) -> None:
@@ -316,7 +342,7 @@ async def exit_settlement_node(state: State, ctx: ArtemisContext):
                     goal=getattr(state, "initial_goal", ""),
                     plan_text=plan_text,
                     ledger=ledger,
-                    check_items=list(snapshot.all_check_items),
+                    check_items=list(snapshot.all_check_items) + _goal_items_from_ledger(ledger),
                     attempt_id=final_attempt_id,
                 ),
                 timeout=checkpoint_timeout,

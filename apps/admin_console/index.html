@@ -259,10 +259,25 @@
         <h2>Sessions</h2>
         <div style="display: flex; gap: 10px; margin-bottom: 10px;">
             <button class="refresh-btn" style="flex: 1; margin-bottom: 0;" onclick="loadSessions()">Refresh List</button>
-            <button class="refresh-btn" style="flex: 1; margin-bottom: 0; background-color: #e53e3e;" onclick="cleanupHistory()">Clean History</button>
+            <button class="refresh-btn" style="flex: 1; margin-bottom: 0; background-color: #e53e3e;" onclick="cleanupHistory()">Clean All</button>
         </div>
-        <div style="margin-bottom: 15px;">
+        <div style="margin-bottom: 8px;">
             <input type="text" id="session-search-input" oninput="filterSessionsList()" placeholder="🔍 Filter by Session ID or Goal..." style="width: 100%; padding: 8px 12px; border-radius: 6px; border: 1px solid #cbd5e0; font-size: 0.85rem; box-sizing: border-box; outline: none; background-color: #fff; color: #1e293b; transition: border-color 0.2s, box-shadow 0.2s;" onfocus="this.style.borderColor='#3182ce'; this.style.boxShadow='0 0 0 2px rgba(49,130,206,0.2)';" onblur="this.style.borderColor='#cbd5e0'; this.style.boxShadow='none';"/>
+        </div>
+        <!-- Bulk Action Controls -->
+        <div id="bulk-toolbar" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; padding: 6px 8px; background-color: #f1f5f9; border-radius: 6px; font-size: 0.8rem;">
+            <label style="display: flex; align-items: center; gap: 5px; cursor: pointer; color: #475569; user-select: none; font-weight: 500;">
+                <input type="checkbox" id="select-all-sessions-cb" onchange="toggleSelectAllSessions(this.checked)" style="cursor: pointer;" />
+                <span>Select All</span>
+            </label>
+            <div style="display: flex; gap: 6px; align-items: center;">
+                <button id="delete-selected-btn" onclick="deleteSelectedSessions()" style="display: none; padding: 4px 8px; font-size: 0.75rem; border-radius: 4px; border: none; background-color: #e53e3e; color: white; cursor: pointer; font-weight: 600;" title="Delete selected sessions">
+                    🗑️ Delete (<span id="selected-count">0</span>)
+                </button>
+                <button onclick="deleteFailedSessions()" style="padding: 4px 8px; font-size: 0.75rem; border-radius: 4px; border: 1px solid #cbd5e0; background-color: #fff; color: #64748b; cursor: pointer; font-weight: 500;" title="Delete all failed or cancelled sessions">
+                    🧹 Clear Failed
+                </button>
+            </div>
         </div>
         <div id="session-list">Loading sessions...</div>
     </div>
@@ -1182,6 +1197,107 @@
             }
         }
 
+        function getSelectedSessionIds() {
+            const checked = document.querySelectorAll('.session-checkbox:checked');
+            return Array.from(checked).map(cb => cb.value);
+        }
+
+        function updateSelectedCount() {
+            const ids = getSelectedSessionIds();
+            const btn = document.getElementById('delete-selected-btn');
+            const countSpan = document.getElementById('selected-count');
+            const selectAllCb = document.getElementById('select-all-sessions-cb');
+            if (countSpan) countSpan.textContent = ids.length;
+            if (btn) btn.style.display = ids.length > 0 ? 'inline-block' : 'none';
+            
+            const allCbs = document.querySelectorAll('.session-checkbox');
+            if (selectAllCb) {
+                selectAllCb.checked = allCbs.length > 0 && ids.length === allCbs.length;
+                selectAllCb.indeterminate = ids.length > 0 && ids.length < allCbs.length;
+            }
+        }
+
+        function toggleSelectAllSessions(checked) {
+            const allCbs = document.querySelectorAll('.session-checkbox');
+            allCbs.forEach(cb => { cb.checked = checked; });
+            updateSelectedCount();
+        }
+
+        async function deleteSelectedSessions() {
+            const ids = getSelectedSessionIds();
+            if (ids.length === 0) return;
+            if (!confirm(`Are you sure you want to delete ${ids.length} selected session(s) and their files?`)) {
+                return;
+            }
+            try {
+                const res = await fetch('/api/sessions/bulk-delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_ids: ids })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    if (ids.includes(currentSessionId)) {
+                        currentSessionId = null;
+                        updateMiniVideoPlayer(null);
+                        document.getElementById('session-header').innerHTML = '<h1>Select a session from the sidebar</h1>';
+                        document.getElementById('session-tabs-bar').style.display = 'none';
+                        document.getElementById('steps-container').style.display = 'none';
+                        document.getElementById('traces-container-wrapper').style.display = 'none';
+                        document.getElementById('replay-container-wrapper').style.display = 'none';
+                        if (eventSource) {
+                            eventSource.close();
+                            eventSource = null;
+                        }
+                    }
+                    loadSessions();
+                } else {
+                    alert(`Failed to delete sessions: ${data.detail || 'Unknown error'}`);
+                }
+            } catch (err) {
+                alert(`Error: ${err.message}`);
+            }
+        }
+
+        async function deleteFailedSessions() {
+            const failedSessions = allSessionsData.filter(s => {
+                const st = (s.status || '').toLowerCase();
+                return st === 'failed' || st === 'cancelled' || st === 'error';
+            });
+            if (failedSessions.length === 0) {
+                alert('No failed or cancelled sessions found.');
+                return;
+            }
+            const ids = failedSessions.map(s => s.session_id);
+            if (!confirm(`Found ${ids.length} failed/cancelled session(s). Delete them all to free space?`)) {
+                return;
+            }
+            try {
+                const res = await fetch('/api/sessions/bulk-delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_ids: ids })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    if (ids.includes(currentSessionId)) {
+                        currentSessionId = null;
+                        updateMiniVideoPlayer(null);
+                        document.getElementById('session-header').innerHTML = '<h1>Select a session from the sidebar</h1>';
+                        document.getElementById('session-tabs-bar').style.display = 'none';
+                        document.getElementById('steps-container').style.display = 'none';
+                        document.getElementById('traces-container-wrapper').style.display = 'none';
+                        document.getElementById('replay-container-wrapper').style.display = 'none';
+                    }
+                    loadSessions();
+                } else {
+                    alert(`Failed to delete sessions: ${data.detail || 'Unknown error'}`);
+                }
+            } catch (err) {
+                alert(`Error: ${err.message}`);
+            }
+        }
+
         let allSessionsData = [];
 
         async function loadSessions() {
@@ -1232,7 +1348,8 @@
                 const devicePrefix = deviceSerial ? `${escapeHtml(deviceSerial)} · ` : '';
                 
                 div.innerHTML = `
-                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;">
+                        <input type="checkbox" class="session-checkbox" value="${escapeHtml(session.session_id)}" onclick="event.stopPropagation(); updateSelectedCount();" style="margin-top: 4px; cursor: pointer; flex-shrink: 0;" />
                         <div style="flex: 1; min-width: 0;">
                             <h3 style="font-size: 0.95rem; margin-bottom: 3px; margin-top: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(titleText)}">${escapeHtml(titleText)}</h3>
                             <div style="font-size: 0.75rem; font-family: monospace; opacity: 0.85; margin-bottom: 3px; word-break: break-all; color: ${session.session_id === currentSessionId ? '#edf2f7' : '#4a5568'};">ID: ${escapeHtml(sidDisplay)}</div>
@@ -1243,6 +1360,7 @@
                 `;
                 list.appendChild(div);
             });
+            updateSelectedCount();
         }
 
         let sessionStartTime = null;

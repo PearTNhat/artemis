@@ -28,6 +28,14 @@
   - **Khóa cứng chuẩn mực trong `AGENTS.md`:** Thêm các mục 2.7, 2.8, 2.9 cấm hardcode tên nút/từ khóa, bắt buộc tư duy theo UI Pattern và thuộc tính Accessibility chuẩn.
 - **Kiểm thử hồi quy:** Vượt qua 100% các bộ unit test (toàn bộ 263 tests trong `mcp` và `agents/flash`). Test mới: bỏ chờ ngay khi màn hình đã đổi cho `my_action`, giữ chờ cho `external`, chặn lặp qua thao tác xen giữa, lọc text cắt mép màn hình/ẩn.
 
+### 📌 Bản 3.3 (Kiểm chứng phủ toàn bộ đề bài)
+- **Vấn đề:** review cuối của Checker chỉ chấm các dòng Planner khai báo; Planner (quy tắc "tiết chế") có khi chỉ khai 1 dòng → Shopee 64c570f2 báo 1/1 passed mà không xem tag Mall, rẻ nhất, phân loại, số lượng.
+- **Checker** (`checker.py`, `checker.json`): `CheckReport.goal_requirements` — review cuối liệt kê MỌI yêu cầu cụ thể trong đề gốc chưa có dòng khai báo, chấm từng cái có bằng chứng; `verify` (kết quả phải đạt, failed → Operator nhận gợi ý và sửa) hoặc `assert` (điều cấm / trạng thái cuối). `merge_goal_requirements` đổi chúng thành dòng `[goal] ...` nên ledger, bảng pass/fail, vòng sửa lỗi, giao diện dùng nguyên. Mỗi verify failed phải có `suggestion` cụ thể.
+- **Nhất quán giữa các lần kiểm:** dòng `[goal]` của lần trước được khai báo lại nguyên văn ở lần review cuối tiếp theo (`_goal_items_from_ledger` trong `graph.py`).
+- **Planner** (`planner.json`): quy tắc "Goal coverage" — mỗi yêu cầu người dùng nêu (đối tượng, giá trị thuộc tính/bộ lọc, số lượng, tiêu chí chọn, điều kiện dừng/điều cấm) thành một dòng kiểm; quy tắc tiết chế chỉ áp dụng cho kiểm tra tự nghĩ ra.
+- **Chạy thật qua Gemini CLI:** ca Shopee đúng → 7 yêu cầu `[goal]` đều passed (29 s); ca sai cố ý (không Mall, không rẻ nhất trong nhóm, số lượng 2) → bắt đủ 3 lỗi, mỗi lỗi kèm gợi ý sửa (21 s).
+- **Kiểm thử:** 7 test mới (`tests/unit/agents/test_checker_goal_requirements.py`); `tests/unit` 2626 passed.
+
 ### 📌 Bản 3.2 (Gemini CLI thay hẳn API key)
 - **Vấn đề:** preset "Gemini CLI" chỉ đưa các agent (Flash/Operator/Planner/Checker/Outputter) lên agy; các helper vẫn gọi Gemini API bằng key miễn phí (Hopper, summarizer, step summarizer mỗi bước, nén lịch sử, pixel safety net, planner_validation) → hết quota ngày (flash-lite 500/ngày) là task kẹt (Hopper retry mãi). Giao diện vẫn hiện "Gemini CLI" nên không ai biết.
 - **Provider mới `agy_oneshot`** (`artemis/llm/agy_oneshot.py`): mỗi lần gọi là một `agy -p --mode plan --output-format json`, ảnh ghi ra thư mục tạm (`--add-dir`), `with_structured_output` dùng `--json-schema` của agy; tối đa 4 tiến trình song song. Đo thật: Hopper 9,2s, step summary có ảnh 8,7s.

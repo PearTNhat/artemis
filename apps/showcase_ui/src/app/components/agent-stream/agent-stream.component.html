@@ -908,25 +908,31 @@ limitations under the License.
                                     </span>
                                   </div>
                                   <!-- Compact preview body (when collapsed, matches standard action card) -->
-                                  @if (!isActionExpanded('action-' + block.id + '-' + itemIdx) && getReportStatusExplanation(item.data)) {
+                                  @if (!isActionExpanded('action-' + block.id + '-' + itemIdx)) {
                                     <div class="action-card-body">
                                       <div class="action-detail-row">
-                                        <span class="detail-label">Summary:</span>
-                                        <span class="detail-value">"{{ getReportStatusExplanation(item.data) }}"</span>
+                                        <span class="detail-label">Status:</span>
+                                        @if (outputterReport()) {
+                                          <span class="detail-value">Task execution finalized. See complete report in <strong>Task Report</strong> below.</span>
+                                        } @else if (getReportStatusExplanation(item.data)) {
+                                          <span class="detail-value">"{{ getCompactReportExplanation(item.data) }}"</span>
+                                        }
                                       </div>
                                     </div>
                                   }
                                   <!-- Detailed expanded view (when clicked, matches standard action card structure) -->
                                   @if (isActionExpanded('action-' + block.id + '-' + itemIdx)) {
                                     <div class="action-card-expanded-details" (click)="$event.stopPropagation()">
-                                      <div class="expanded-grid">
-                                        @if (getReportStatusExplanation(item.data); as expText) {
-                                          <div class="grid-item full-width">
-                                            <span class="grid-label">Report & Findings</span>
-                                            <span class="grid-value report-markdown-body" [innerHTML]="renderMarkdown(expText, 'report-' + block.id + '-' + itemIdx)"></span>
-                                          </div>
-                                        }
-                                      </div>
+                                      @if (!outputterReport()) {
+                                        <div class="expanded-grid">
+                                          @if (getReportStatusExplanation(item.data); as expText) {
+                                            <div class="grid-item full-width">
+                                              <span class="grid-label">Report & Findings</span>
+                                              <span class="grid-value report-markdown-body" [innerHTML]="renderMarkdown(expText, 'report-' + block.id + '-' + itemIdx)"></span>
+                                            </div>
+                                          }
+                                        </div>
+                                      }
                                       <!-- Final Verified Screenshot -->
                                       @if (getStepPreImageUrl(block.data, item.data) || getStepPostImageUrl(block.data, item.data)) {
                                         <div class="expanded-screenshots-container">

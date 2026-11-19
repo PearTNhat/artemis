@@ -124,8 +124,57 @@ class CheckVerdict(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+#: Prefix of check lines the final review derives from the user's goal itself
+#: (requirements the plan declared no line for).
+GOAL_ITEM_PREFIX = "[goal] "
+
+
+class GoalRequirement(BaseModel):
+    """Final review only: one concrete requirement of the user's original goal."""
+
+    requirement: str = Field(
+        description=(
+            "One concrete requirement stated in the user's goal (an item, attribute or"
+            " filter value, quantity, selection criterion, stopping condition or"
+            " forbidden action), in the user's own words and values."
+        )
+    )
+    kind: Literal["verify", "assert"] = Field(
+        description=(
+            "'verify' for an outcome the run must reach (a wrong choice can be"
+            " repaired); 'assert' for a prohibition or an end-state fact."
+        )
+    )
+    status: Literal["passed", "failed", "inconclusive"]
+    evidence: str = Field(description="Concrete observation backing the status.")
+    suggestion: str = Field(default="", description="For failed 'verify' requirements: how to fix it.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _tolerate_malformed(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        if "requirement" not in data:
+            data["requirement"] = data.pop("item_text", None) or data.pop("text", "") or ""
+        if "status" not in data:
+            raw = str(data.pop("verdict", "") or "").strip().lower()
+            data["status"] = raw if raw in ("passed", "failed", "inconclusive") else "inconclusive"
+        data.setdefault("kind", "verify")
+        data.setdefault("evidence", "")
+        return data
+
+
 class CheckReport(BaseModel):
     verdicts: list[CheckVerdict] = Field(default_factory=list)
+    goal_requirements: list[GoalRequirement] = Field(
+        default_factory=list,
+        description=(
+            "Final review only: EVERY concrete requirement of the user's original goal"
+            " that no declared check item already covers, each judged against the"
+            " final state and history. Empty at checkpoints."
+        ),
+    )
     unmet_subgoals: list[str] = Field(
         default_factory=list,
         description=(
@@ -489,7 +538,48 @@ def _normalize_report(report: CheckReport, check_items: list) -> CheckReport:
                     evidence="no verdict produced for this item",
                 )
             )
-    return CheckReport(verdicts=verdicts, unmet_subgoals=list(report.unmet_subgoals))
+    return CheckReport(
+        verdicts=verdicts,
+        goal_requirements=list(report.goal_requirements),
+        unmet_subgoals=list(report.unmet_subgoals),
+    )
+
+
+def _goal_key(text: str) -> str:
+    text = text.strip()
+    if text.startswith(GOAL_ITEM_PREFIX):
+        text = text[len(GOAL_ITEM_PREFIX):]
+    return " ".join(text.lower().split())
+
+
+def merge_goal_requirements(report: CheckReport) -> CheckReport:
+    """Turns the final review's goal requirements into ``[goal]`` check verdicts.
+
+    Downstream (ledger, test summary, repair loop, UI) then treats them like
+    declared lines: a failed ``verify`` requirement sends the Operator back with
+    the suggestion, a failed ``assert`` is recorded. A requirement whose text
+    matches a verdict already in the report is not added twice.
+    """
+    seen = {_goal_key(v.item_text) for v in report.verdicts}
+    added: list[CheckVerdict] = []
+    for req in report.goal_requirements:
+        key = _goal_key(req.requirement)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        text = req.requirement.strip()
+        added.append(
+            CheckVerdict(
+                item_text=text if text.startswith(GOAL_ITEM_PREFIX) else GOAL_ITEM_PREFIX + text,
+                kind=req.kind,
+                status=req.status,
+                evidence=req.evidence,
+                suggestion=req.suggestion,
+            )
+        )
+    if not added:
+        return report
+    return report.model_copy(update={"verdicts": [*report.verdicts, *added]})
 
 
 async def _run_check_loop(
@@ -902,7 +992,8 @@ async def run_final_check(
     ]
     with CheckerStreamCapture(ctx) as capture:
         try:
-            return await _run_check_loop(ctx, messages, tools, items)
+            report = await _run_check_loop(ctx, messages, tools, items)
+            return merge_goal_requirements(report)
         finally:
             _persist_stream(
                 ctx, capture, attempt_id=attempt_id, phase="final", checkpoint_id="final"

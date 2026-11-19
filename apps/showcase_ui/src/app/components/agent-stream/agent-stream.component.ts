@@ -1876,6 +1876,18 @@ export class AgentStreamComponent implements AfterViewInit {
     return getReportStatusExplanation(action);
   }
 
+  public getCompactReportExplanation(action: any): string {
+    const full = this.getReportStatusExplanation(action);
+    if (!full) return '';
+    if (this.outputterReport()) {
+      const lines = full.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0 && !l.startsWith('#') && !l.startsWith('|'));
+      const firstLine = lines.length > 0 ? lines[0] : full;
+      const clean = firstLine.replace(/^[#*\-•\s]+/, '').trim();
+      return clean.length > 200 ? clean.substring(0, 200) + '...' : clean;
+    }
+    return full;
+  }
+
   public isHumanThinking(text: string | null): boolean {
     return isHumanThinking(text);
   }

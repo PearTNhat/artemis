@@ -17,6 +17,7 @@ import json
 import time
 from uuid import UUID
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from artemis.config import DB_PATH, TRACES_PATH
 from artemis.runtime import trace_store
@@ -248,3 +249,34 @@ async def delete_session_endpoint(session_id: str):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class BulkDeleteRequest(BaseModel):
+    session_ids: list[str]
+
+
+@router.post("/api/sessions/bulk-delete")
+async def bulk_delete_sessions_endpoint(req: BulkDeleteRequest):
+    try:
+        from artemis.data_engine.storage import StorageManager
+
+        storage = StorageManager(DB_PATH, TRACES_PATH)
+        deleted: list[str] = []
+        errors: list[str] = []
+        for sid in req.session_ids:
+            try:
+                storage.delete_session(UUID(sid))
+                deleted.append(sid)
+            except Exception as exc:
+                errors.append(f"{sid}: {exc}")
+
+        return {
+            "status": "success",
+            "deleted_count": len(deleted),
+            "deleted_ids": deleted,
+            "errors": errors,
+            "message": f"Deleted {len(deleted)} of {len(req.session_ids)} sessions",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+

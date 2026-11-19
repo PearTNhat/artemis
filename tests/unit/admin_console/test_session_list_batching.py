@@ -96,3 +96,25 @@ async def test_list_sessions_extracts_device_serial(monkeypatch):
     assert result[0]["device_id"] == "63191FDKX00062"
     assert result[1]["device_serial"] == "emulator-5554"
     assert result[1]["device_id"] == "emulator-5554"
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_sessions_endpoint(monkeypatch):
+    mock_storage = MagicMock()
+    monkeypatch.setattr(
+        "artemis.data_engine.storage.StorageManager",
+        MagicMock(return_value=mock_storage),
+    )
+
+    req = sessions_router.BulkDeleteRequest(
+        session_ids=[
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+        ]
+    )
+    res = await sessions_router.bulk_delete_sessions_endpoint(req)
+
+    assert res["status"] == "success"
+    assert res["deleted_count"] == 2
+    assert mock_storage.delete_session.call_count == 2
+
