@@ -384,6 +384,57 @@ async def update_credentials(request: UpdateCredentialsRequest):
         raise HTTPException(status_code=500, detail=f"Failed to update credentials: {exc}")
 
 
+class DebugAiIoRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/debug-ai-io")
+async def get_debug_ai_io():
+    """Returns the current state of ARTEMIS_DEBUG_AI_IO."""
+    from artemis.utils.ai_io_logger import is_ai_io_debug_enabled
+
+    return {"enabled": is_ai_io_debug_enabled()}
+
+
+@router.post("/debug-ai-io")
+async def set_debug_ai_io(payload: DebugAiIoRequest):
+    """Dynamically toggle ARTEMIS_DEBUG_AI_IO at runtime and persist to .env."""
+    import logging
+    import os
+    from artemis.config.paths import get_env_file
+    from artemis.utils.ai_io_logger import set_ai_io_debug_enabled
+
+    app_logger = logging.getLogger("artemis.system")
+    enabled = payload.enabled
+    set_ai_io_debug_enabled(enabled)
+    os.environ["ARTEMIS_DEBUG_AI_IO"] = "true" if enabled else "false"
+
+    # Persist to .env
+    try:
+        env_file = get_env_file()
+        if env_file.exists():
+            lines = env_file.read_text(encoding="utf-8").splitlines()
+            new_lines = []
+            found = False
+            for line in lines:
+                if (
+                    line.startswith("ARTEMIS_DEBUG_AI_IO=")
+                    or line.startswith("#ARTEMIS_DEBUG_AI_IO=")
+                    or line.startswith("# ARTEMIS_DEBUG_AI_IO=")
+                ):
+                    new_lines.append(f"ARTEMIS_DEBUG_AI_IO={'true' if enabled else 'false'}")
+                    found = True
+                else:
+                    new_lines.append(line)
+            if not found:
+                new_lines.append(f"ARTEMIS_DEBUG_AI_IO={'true' if enabled else 'false'}")
+            env_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    except Exception as e:
+        app_logger.warning(f"Could not persist ARTEMIS_DEBUG_AI_IO to .env: {e}")
+
+    return {"status": "success", "enabled": enabled}
+
+
 @router.get("/model-config-env")
 async def get_model_config_and_env():
     """Retrieve the current active artemis.jsonc configuration and .env status for custom setup."""

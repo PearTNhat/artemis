@@ -41,6 +41,7 @@ from artemis.tools.tool_wrapper import (
     invoke_tool_with_injection,
     tool_result_messages,
 )
+from artemis.utils.ai_io_logger import log_ai_input, log_ai_output
 from artemis.utils.coordinates import (
     COORDINATE_SPACE_KEY,
     COORDINATE_SPACE_PIXEL,
@@ -503,7 +504,24 @@ class OperatorNode:
                 )
 
             bound_llm = base_llm.bind_tools(tools=traced_tools)
+
+            # Log AI Input if ARTEMIS_DEBUG_AI_IO is enabled
+            log_ai_input(
+                messages=current_messages,
+                tools=traced_tools,
+                turn=getattr(state, "step_count", None) or iteration,
+            )
+
+            llm_start_time = time.monotonic()
             response = await invoke_llm_with_timeout_message(acomplete(bound_llm, current_messages))
+            llm_duration = time.monotonic() - llm_start_time
+
+            # Log AI Output if ARTEMIS_DEBUG_AI_IO is enabled
+            log_ai_output(
+                response=response,
+                latency_s=llm_duration,
+                turn=getattr(state, "step_count", None) or iteration,
+            )
 
             usage = usage_from_message(response)
             # The ledger's compaction thresholds read the operator's own

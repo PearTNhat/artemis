@@ -1921,6 +1921,17 @@
               </div>
               }
             </div>
+
+            <!-- Debug AI I/O Toggle Button -->
+            <button type="button" class="btn-debug-toggle"
+              [class.active]="isDebugAiIo()"
+              [disabled]="isTogglingDebugAiIo()"
+              (click)="toggleDebugAiIo()"
+              [title]="isDebugAiIo() ? 'Debug AI I/O đang BẬT: Bấm để TẮT in log Android Output & AI Input/Output' : 'Debug AI I/O đang TẮT: Bấm để BẬT in log chi tiết từng turn'">
+              <span class="material-symbols-outlined debug-icon">{{ isDebugAiIo() ? 'bug_report' : 'pest_control' }}</span>
+              <span class="debug-text">Debug AI</span>
+              <span class="debug-status-pill" [class.on]="isDebugAiIo()">{{ isDebugAiIo() ? 'ON' : 'OFF' }}</span>
+            </button>
           </div>
 
           <div class="bar-right">

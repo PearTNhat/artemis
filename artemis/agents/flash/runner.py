@@ -127,6 +127,11 @@ def _has_stale_screen_target(name: str, args: dict) -> bool:
     return False
 
 
+from artemis.utils.ai_io_logger import (
+    log_ai_input,
+    log_ai_output,
+    log_android_output,
+)
 from artemis.utils.coordinates import (
     COORDINATE_SPACE_KEY,
     COORDINATE_SPACE_NORMALIZED,
@@ -1564,6 +1569,21 @@ class FlashRunner:
                 messages = ledger.render([tail])
                 turn_base = len(messages) - 1
 
+                # Log Android Output & AI Input if ARTEMIS_DEBUG_AI_IO is enabled
+                log_android_output(
+                    width=getattr(getattr(self.ctx, "device", None), "device_width", None),
+                    height=getattr(getattr(self.ctx, "device", None), "device_height", None),
+                    screenshot_bytes=current_pre_screenshot_bytes,
+                    xml_list=current_xml_list,
+                    scrollable=getattr(state, "screen_scrollable", None),
+                    turn=turns,
+                )
+                log_ai_input(
+                    messages=messages,
+                    tools=current_tools,
+                    turn=turns,
+                )
+
                 llm_started = time.monotonic()
                 prep_s += llm_started - prep_started
                 try:
@@ -1598,6 +1618,13 @@ class FlashRunner:
             self._turn_timing_pending = True
 
             messages.append(response)
+
+            # Log AI Output if ARTEMIS_DEBUG_AI_IO is enabled
+            log_ai_output(
+                response=response,
+                latency_s=self._turn_timing.get("llm_s"),
+                turn=turns,
+            )
 
             # Extract thought and tool calls
             raw_text = self._extract_response_text(response)

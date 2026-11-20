@@ -97,6 +97,23 @@
 
 **Chỉ số chính:** **số action trên mỗi lượt AI** (hiện ~1.0, mục tiêu ≥ 2.0) và **số lượt AI mỗi tác vụ**.
 
+### 0.1. HƯỚNG ĐI CHIẾN LƯỢC: CHỈ TỐI ƯU FLASH, SAU ĐÓ GỘP PRO VÀO FLASH (quyết định 2026-11-19)
+
+> [!IMPORTANT]
+> **Không đầu tư tối ưu riêng cho Pro nữa.** Mọi công sức tối ưu dồn vào **Flash** (`artemis/agents/flash/runner.py`, `artemis/mcp/action_executor.py`, `artemis/mcp/observation.py` và tầng thiết bị dùng chung). Pro chỉ sửa khi có lỗi làm hỏng tác vụ hoặc test hồi quy, không thêm tính năng/tối ưu mới.
+
+**Lý do:**
+- Người dùng chỉ muốn **một chế độ vừa chính xác vừa nhanh**; phải chọn giữa 2 chế độ là gánh nặng.
+- Số liệu thực nghiệm: cùng đề, Flash ra **kết quả giống Pro** nhưng nhanh hơn (Mục 1.5: 3p35s vs 4p45s, cùng sản phẩm và tổng tiền; Mục 1.4: ~268s vs ~7 phút). Pro tốn thêm lượt gọi AI ở Planner, Checker và pixel safety net (~67s riêng safety net ở Mục 1.5).
+
+**Lộ trình:**
+1. **Tối ưu Flash** theo danh sách O1–O8 trong [`docs/FLOW_DIEU_KHIEN_THIET_BI.md`](docs/FLOW_DIEU_KHIEN_THIET_BI.md) Mục 8.2:
+   - Đợt 1 (tốc độ, rủi ro thấp): O1 bỏ settle 0.3s cộng dồn, O2 bọc HTTP snapshot bằng `asyncio.to_thread`, O6 lưu ảnh nền trong `observe()`.
+   - Đợt 2 (chính xác): O3 đưa icon không nhãn nhưng clickable vào list; đưa vào Flash các thành phần **thuần code** của Pro: XML safety net trước khi bấm, Execution Incident.
+   - Đợt 3: O5 tap/swipe qua RPC helper thay `adb shell input` (thử trên máy thật).
+2. **Kiểm chứng Flash trên các loại task Pro mạnh hơn** trước khi gộp: task dài nhiều nhánh, có nút cam kết (thanh toán/xác nhận/xoá), UI khó (icon không chữ, popup, load chậm), task giám sát/chờ lâu (`[Loop:continuous]`).
+3. **Gộp:** Flash thành chế độ duy nhất. Các phần tốn LLM của Pro chỉ bật **theo tình huống**: plan qua tool `update_plan` khi task dài, Checker duyệt 1 lần lúc `report_task_status`, pixel safety net chỉ cho nút cam kết hoặc khi XML không đủ, tự nâng Explorer khi bấm trượt liên tiếp. Tham số `profile` giữ làm alias tương thích; `verification_level` giữ làm tuỳ chọn mức kiểm tra. Chỉ xoá đồ thị LangGraph khi Flash đạt tỉ lệ thành công ≥ Pro trên benchmark.
+
 ---
 
 ## 1. DỮ LIỆU THỰC NGHIỆM

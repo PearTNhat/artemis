@@ -1259,6 +1259,13 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.selectedProfile.set(profile);
   }
 
+  public isDebugAiIo = computed(() => this.systemService.isDebugAiIo());
+  public isTogglingDebugAiIo = computed(() => this.systemService.isTogglingDebugAiIo());
+
+  public toggleDebugAiIo(): void {
+    this.systemService.toggleDebugAiIo().subscribe();
+  }
+
   public setCategory(cat: SuggestionCategory): void {
     this.selectedCategory.set(cat);
   }

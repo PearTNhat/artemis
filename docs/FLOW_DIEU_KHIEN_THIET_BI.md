@@ -302,6 +302,11 @@ Sau Validator → **Summarizer** (tóm tắt ảnh step chạy nền) → **Conv
 
 ### 8.2. Cơ hội tối ưu đã quan sát được trong code (chưa sửa)
 
+> [!IMPORTANT]
+> **Hướng đi (2026-11-19): chỉ tối ưu Flash, sau đó gộp Pro vào Flash** — xem `KE_HOACH_TOI_UU_ARTEMIS.md` Mục 0.1.
+> - **Làm (Flash + tầng thiết bị dùng chung):** O1, O2, O3, O5, O6, O8.
+> - **Không làm (chỉ thuộc Pro):** O4, O7 — Pro chỉ sửa lỗi, không tối ưu thêm.
+
 | # | Vấn đề | Vị trí | Hướng tối ưu |
 |---|---|---|---|
 | O1 | **Settle cộng dồn:** perception/observe sleep 0.4s rồi `AdbDriver.get_screen_data()` sleep thêm 0.3s (controller không truyền `skip_settling`). Ngay cả nhánh "skip settling" vẫn mất 0.3s. | `unified_controller.py:165`, `adb_driver.py:129` | Truyền `skip_settling=True` từ controller vì tầng trên đã tự settle → tiết kiệm 0.3s/lần chụp. |
@@ -311,7 +316,7 @@ Sau Validator → **Summarizer** (tóm tắt ảnh step chạy nền) → **Conv
 | O5 | **Tap qua `adb shell input`** (spawn process mỗi lần) trong khi helper đã có RPC `tap`/`swipe`. | `adb_driver.py:239`, `accessibility_client.py:413` | Ưu tiên RPC helper (đã có kết nối HTTP), fallback adb shell. |
 | O6 | **Flash lưu ảnh đồng bộ** (`get_or_create_image`: sha256 + ghi đĩa) trong `observe()`, Pro thì chạy nền. | `observation.py:135` | Offload `asyncio.to_thread` như Pro. |
 | O7 | **Pro Operator không có `wait_for_text/screen_change/until_gone`** trong `OPERATOR_SHELL_ORDER`, trái với nguyên tắc 2.1 của AGENTS.md → Pro phải dùng `wait_for_delay` cố định. | `action_specs.py:815` | Cân nhắc thêm các tool chờ có điều kiện vào shell Operator (cần cập nhật `_translate_and_validate_tool_inner` + `to_canonical_call`). |
-| O8 | Ảnh gửi nguyên kích thước mỗi turn; token ảnh chiếm phần lớn prompt. | `ObservationPromptComponent` | Downscale/nén JPEG theo `max_side` cấu hình; scrub ảnh cũ sớm hơn khi UI list đủ thông tin. |
+| O8 | Ảnh gửi nguyên kích thước mỗi turn; token ảnh chiếm phần lớn prompt. | Flash: `FlashRunner._build_tail` (`flash/runner.py:409`); Pro: `ObservationPromptComponent` | Downscale/nén JPEG theo `max_side` cấu hình; scrub ảnh cũ sớm hơn khi UI list đủ thông tin. |
 
 > Khi xử lý một mục ở trên: chuyển nó sang Nhật ký (Mục 10), ghi số liệu trước/sau vào `KE_HOACH_TOI_UU_ARTEMIS.md`.
 
@@ -339,3 +344,4 @@ Sau Validator → **Summarizer** (tóm tắt ảnh step chạy nền) → **Conv
 |---|---|---|---|
 | 2026-11-19 | Tạo tài liệu từ code tại commit `9f6866c` | — | Baseline |
 | 2026-11-19 | Áp dụng PR upstream #193, #217, #219, #221 | `visualization.py`, `runner.py`, `flash_runner.md`, `prompts.py`, `checker.py`, `agent.py` | Bổ sung trạng thái `[checkable]`/`[checked]`/`[disabled]` vào UI list; ngắt vòng lặp silent turns ở Flash runner; chuyển prompt reasoning sang progress notes tránh từ chối trên Claude 5.x; cách ly final reviews trước đó trong Checker. |
+| 2026-11-20 | Thêm cơ chế toggle debug AI I/O (`ARTEMIS_DEBUG_AI_IO`) | `ai_io_logger.py`, `runner.py`, `operator.py`, `constants.py`, `.env` | Cho phép bật/tắt in log trực quan 3 chặng: (1) Output Android (UI list, screen size) -> (2) Input AI (Prompt/messages đã rút gọn base64) -> (3) Output AI (Thinking & Tool calls). |

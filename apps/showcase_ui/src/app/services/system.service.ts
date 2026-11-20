@@ -160,6 +160,7 @@ export class SystemService {
 
   constructor() {
     this.startAutoPolling(3000);
+    this.fetchDebugAiIo().subscribe();
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', this.onVisibilityChange);
     }
@@ -723,6 +724,45 @@ export class SystemService {
         error: (err) => {
           this.isConnectingCli.set(null);
           console.error(`Failed to install MCP for ${target}:`, err);
+        }
+      })
+    );
+  }
+
+  public isDebugAiIo = signal<boolean>(false);
+  public isTogglingDebugAiIo = signal<boolean>(false);
+
+  /**
+   * Fetch current status of ARTEMIS_DEBUG_AI_IO
+   */
+  public fetchDebugAiIo(): Observable<{ enabled: boolean }> {
+    return this.http.get<{ enabled: boolean }>('/api/system/debug-ai-io').pipe(
+      tap({
+        next: (data) => {
+          this.isDebugAiIo.set(data.enabled);
+        },
+        error: (err) => {
+          console.error('Failed to fetch debug AI I/O status:', err);
+        }
+      })
+    );
+  }
+
+  /**
+   * Toggle ARTEMIS_DEBUG_AI_IO state
+   */
+  public toggleDebugAiIo(enabled?: boolean): Observable<{ status: string; enabled: boolean }> {
+    const nextVal = enabled !== undefined ? enabled : !this.isDebugAiIo();
+    this.isTogglingDebugAiIo.set(true);
+    return this.http.post<{ status: string; enabled: boolean }>('/api/system/debug-ai-io', { enabled: nextVal }).pipe(
+      tap({
+        next: (data) => {
+          this.isDebugAiIo.set(data.enabled);
+          this.isTogglingDebugAiIo.set(false);
+        },
+        error: (err) => {
+          console.error('Failed to toggle debug AI I/O:', err);
+          this.isTogglingDebugAiIo.set(false);
         }
       })
     );
