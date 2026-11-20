@@ -435,6 +435,79 @@ async def set_debug_ai_io(payload: DebugAiIoRequest):
     return {"status": "success", "enabled": enabled}
 
 
+class RecordingToggleRequest(BaseModel):
+    enabled: bool
+
+
+def _is_video_recording_active() -> bool:
+    """Helper to detect if screen recording is currently active."""
+    v = os.getenv("ARTEMIS_VIDEO_RECORDING_ENABLED")
+    if v is not None:
+        v_clean = v.strip().lower()
+        if v_clean in ("1", "true", "yes", "on"):
+            return True
+        if v_clean in ("0", "false", "no", "off"):
+            return False
+    from artemis.config.agent import load_agent_config
+
+    try:
+        cfg = load_agent_config()
+        if cfg.video_analyzer and cfg.video_analyzer.enabled is not None:
+            return bool(cfg.video_analyzer.enabled)
+    except Exception:
+        pass
+    from artemis.utils.video import detect_video_tools_enabled
+
+    return detect_video_tools_enabled()
+
+
+@router.get("/recording")
+async def get_recording_status():
+    """Returns whether automated video recording via scrcpy is enabled."""
+    return {"enabled": _is_video_recording_active()}
+
+
+@router.post("/recording")
+async def set_recording_status(payload: RecordingToggleRequest):
+    """Dynamically toggle automated video recording and persist to .env."""
+    import logging
+    import os
+    from artemis.config.paths import get_env_file
+
+    app_logger = logging.getLogger("artemis.system")
+    enabled = payload.enabled
+    os.environ["ARTEMIS_VIDEO_RECORDING_ENABLED"] = "true" if enabled else "false"
+
+    # Persist to .env
+    try:
+        env_file = get_env_file()
+        if env_file.exists():
+            lines = env_file.read_text(encoding="utf-8").splitlines()
+            new_lines = []
+            found = False
+            for line in lines:
+                if (
+                    line.startswith("ARTEMIS_VIDEO_RECORDING_ENABLED=")
+                    or line.startswith("#ARTEMIS_VIDEO_RECORDING_ENABLED=")
+                    or line.startswith("# ARTEMIS_VIDEO_RECORDING_ENABLED=")
+                ):
+                    new_lines.append(
+                        f"ARTEMIS_VIDEO_RECORDING_ENABLED={'true' if enabled else 'false'}"
+                    )
+                    found = True
+                else:
+                    new_lines.append(line)
+            if not found:
+                new_lines.append(
+                    f"ARTEMIS_VIDEO_RECORDING_ENABLED={'true' if enabled else 'false'}"
+                )
+            env_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    except Exception as e:
+        app_logger.warning(f"Could not persist ARTEMIS_VIDEO_RECORDING_ENABLED to .env: {e}")
+
+    return {"status": "success", "enabled": enabled}
+
+
 @router.get("/model-config-env")
 async def get_model_config_and_env():
     """Retrieve the current active artemis.jsonc configuration and .env status for custom setup."""

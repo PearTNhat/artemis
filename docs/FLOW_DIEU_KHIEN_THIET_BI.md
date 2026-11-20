@@ -98,14 +98,21 @@ Nếu điện thoại offline thì **không** fallback mà ném `DeviceOfflineEr
 6. Lưu ảnh + XML + OCR vào DataEngine **ở background thread** (tên file = sha256 ảnh).
 7. Trả về state: `latest_screenshot` (path), `latest_ui_hierarchy` (fused), `operator_raw_data` {screenshot_b64, xml, ocr, w, h}.
 
-### 2.2. Flash: `observe()` — `artemis/mcp/observation.py:70`
+### 2.2. Flash: `observe()` — `artemis/mcp/observation.py:84`
 
 Gọi qua MCP tool nội bộ `observe_screen` (`ActionSession.observe`). Giống trên nhưng:
 - `settle_ms` do executor quyết định (`action_executor.py:199`): `manage_app` 1500ms, `press_key ENTER/SEARCH` 1000ms, còn lại 400ms.
 - Tính thêm `scrollable` (`has_large_scrollable`: có container cuộn ≥25% màn hình) → hiển thị `[Scroll: ...]` cho AI.
+- **OCR cục bộ ONNX** (`_local_ocr` → `artemis/utils/local_ocr.py`), cấu hình `agent.flash.ocr` trong `config/artemis.jsonc`:
+  - `mode`: `off` (mặc định trong code) | `auto` (chỉ khi số node app có nhãn < `min_xml_labels`=5: game, canvas, WebView, XML trống) | `always` (mọi lần quan sát, đọc cả chữ trong banner/ảnh). Config dự án đang bật `auto`.
+  - Pipeline: cắt status bar (node `com.android.systemui` gần đỉnh) → RapidOCR (detector PP-OCRv4) + recognizer **PaddleOCR `latin_PP-OCRv5_mobile_rec`** (Apache-2.0, ghim commit `89d3a50`, kiểm SHA-256, tải 1 lần vào `<app_dir>/models/ocr/`) → `use_cls=False`, 4 luồng → chạy trong `asyncio.to_thread`.
+  - ~0.7–1 s/màn hình trên CPU laptop; cache 4 frame theo hash ảnh → guard look `persist=False` cùng frame tốn ~0 ms.
+  - Ghép bằng `fuse_ocr_with_xml(..., xml_first=True)` trên **bản sao** XML (XML gốc lưu trace không đổi): node đã có `text` thì **XML thắng** (OCR không ghi đè); node chỉ có `content-desc` (vd banner `FEED_ADS_EXTERNAL`) nhận chữ OCR; dòng OCR **không nằm trong node nào** thành **node ảo** `ocr_virtual` (trước đây bị bỏ) → hiện `[n] OCR Text: '...'`.
+  - Lỗi thiếu thư viện/model/ONNX crash → bỏ qua OCR, quan sát vẫn thành công.
+  - Tiếng Việt: model Latin thiếu dấu hỏi/nặng/dấu chồng (xem `KE_HOACH_TOI_UU_ARTEMIS.md` 1.6); đổi `rec_model_path`/`rec_keys_path` để dùng model tiếng Việt.
 - Gọi luôn `format_minimal_list_with_elements` và lưu ảnh **đồng bộ** vào DataEngine.
 
-### 2.3. Biến XML thành danh sách AI đọc được — `artemis/utils/visualization.py:363`
+### 2.3. Biến XML thành danh sách AI đọc được — `artemis/utils/visualization.py:368`
 
 `format_minimal_list_with_elements(fused_xml, w, h)` trả `(text_list, elements, labels)`:
 
@@ -122,7 +129,7 @@ Quy tắc lọc (quan trọng khi tối ưu):
 - Bỏ trùng: cùng text và tâm cách nhau < 8px.
 - Sau phần tử thứ 80 chỉ giữ phần tử tương tác; sau 100 bỏ hẳn phần tử không tương tác.
 - Hiện trạng thái `checked/enabled` cho control checkable; `error` của accessibility.
-- `_inject_mutual_occlusion_warnings` chèn cảnh báo khi các phần tử đè lên nhau.
+- `_inject_mutual_occlusion_warnings` chèn cảnh báo khi các phần tử đè lên nhau (và đặt `occluded=True` trên element). **Bỏ qua cặp có node OCR ảo** (`ocr_virtual`): chữ đọc từ pixel luôn nằm trên phần tử vẽ ra nó, đó không phải bị che.
 - `elements[i]["center"]` (pixel thật) được lưu vào `state.indexed_elements` để dịch `target=index` sau này.
 
 ---
@@ -163,7 +170,9 @@ Nếu transcript tắt (`agent.memory.transcript.enabled=false`) → Pro dùng c
 
 Các block per-turn được đánh dấu **ephemeral** → bị xoá khỏi lịch sử khi rời cửa sổ gần đây.
 
-Flash (`FlashRunner._build_tail`, `flash/runner.py:409`) có tail tương tự nhưng gọn hơn: header + `[Scroll: ...]` + ảnh + list UI + notices + guidance + cảnh báo turn cuối.
+Flash (`FlashRunner._build_tail`, `flash/runner.py:418`) có tail tương tự nhưng gọn hơn: header + `[Scroll: ...]` + ảnh + list UI + notices + guidance + cảnh báo turn cuối.
+
+**Ảnh gửi AI ở Flash được thu nhỏ** (`shrink_for_model`, `artemis/utils/model_image.py`), cấu hình `agent.flash.model_image` (`max_side`, `jpeg_quality`; mặc định code `max_side=0` = giữ nguyên, config dự án `1280` / q75): cạnh dài ≤ `max_side`, resize Lanczos (không làm mờ), JPEG lại; ảnh đã nhỏ hơn giới hạn thì giữ nguyên byte. **Chỉ bản gửi AI** bị thu nhỏ — OCR, guard, so sánh màn hình, trace vẫn dùng ảnh gốc. Toạ độ 0–1000 nên không đổi gì phía dịch lệnh. Ảnh này cũng là ảnh nằm lại trong vùng A của transcript (tới khi bị scrub).
 
 ### 3.3. Tool khai báo cho AI
 
@@ -316,7 +325,7 @@ Sau Validator → **Summarizer** (tóm tắt ảnh step chạy nền) → **Conv
 | O5 | **Tap qua `adb shell input`** (spawn process mỗi lần) trong khi helper đã có RPC `tap`/`swipe`. | `adb_driver.py:239`, `accessibility_client.py:413` | Ưu tiên RPC helper (đã có kết nối HTTP), fallback adb shell. |
 | O6 | **Flash lưu ảnh đồng bộ** (`get_or_create_image`: sha256 + ghi đĩa) trong `observe()`, Pro thì chạy nền. | `observation.py:135` | Offload `asyncio.to_thread` như Pro. |
 | O7 | **Pro Operator không có `wait_for_text/screen_change/until_gone`** trong `OPERATOR_SHELL_ORDER`, trái với nguyên tắc 2.1 của AGENTS.md → Pro phải dùng `wait_for_delay` cố định. | `action_specs.py:815` | Cân nhắc thêm các tool chờ có điều kiện vào shell Operator (cần cập nhật `_translate_and_validate_tool_inner` + `to_canonical_call`). |
-| O8 | Ảnh gửi nguyên kích thước mỗi turn; token ảnh chiếm phần lớn prompt. | Flash: `FlashRunner._build_tail` (`flash/runner.py:409`); Pro: `ObservationPromptComponent` | Downscale/nén JPEG theo `max_side` cấu hình; scrub ảnh cũ sớm hơn khi UI list đủ thông tin. |
+| ~~O8~~ | ✅ **Flash xong 2026-11-20** (`agent.flash.model_image`, mục 3.2). Còn lại: đo `prompt_tokens` trước/sau trên task thật; scrub ảnh cũ sớm hơn. Pro không làm. | Flash: `FlashRunner._build_tail` (`flash/runner.py:418`) | — |
 
 > Khi xử lý một mục ở trên: chuyển nó sang Nhật ký (Mục 10), ghi số liệu trước/sau vào `KE_HOACH_TOI_UU_ARTEMIS.md`.
 
@@ -328,7 +337,7 @@ Sau Validator → **Summarizer** (tóm tắt ảnh step chạy nền) → **Conv
 |---|---|
 | Điểm vào | `third_party/mobile_use/sdk/agent.py` |
 | Capture | `artemis/clients/accessibility_client.py`, `artemis/clients/screen_client_factory.py`, `artemis/drivers/android/adb_driver.py`, `third_party/mobile_use/controllers/unified_controller.py`, `artemis/runtime/helper_manager.py` |
-| Perception | `artemis/graph/perception.py`, `artemis/mcp/observation.py`, `artemis/utils/ocr_xml_fusion.py`, `artemis/utils/visualization.py` (`format_minimal_list_with_elements`) |
+| Perception | `artemis/graph/perception.py`, `artemis/mcp/observation.py`, `artemis/utils/ocr_xml_fusion.py`, `artemis/utils/local_ocr.py`, `artemis/utils/visualization.py` (`format_minimal_list_with_elements`) |
 | Prompt | `artemis/agents/operator/prompts.py`, `artemis/agents/operator/operator.json`, `artemis/memory/transcript.py`, `artemis/memory/chunking.py`, `artemis/agents/flash/runner.py` (`_build_tail`), `artemis/agents/flash/flash_runner.md` |
 | LLM | `artemis/services/llm.py`, `artemis/config/model_routing.py` |
 | Dịch lệnh | `artemis/agents/operator/operator.py`, `artemis/mcp/action_names.py`, `artemis/mcp/action_specs.py`, `artemis/mcp/action_manifest.py`, `artemis/mcp/action_executor.py` |
@@ -345,3 +354,6 @@ Sau Validator → **Summarizer** (tóm tắt ảnh step chạy nền) → **Conv
 | 2026-11-19 | Tạo tài liệu từ code tại commit `9f6866c` | — | Baseline |
 | 2026-11-19 | Áp dụng PR upstream #193, #217, #219, #221 | `visualization.py`, `runner.py`, `flash_runner.md`, `prompts.py`, `checker.py`, `agent.py` | Bổ sung trạng thái `[checkable]`/`[checked]`/`[disabled]` vào UI list; ngắt vòng lặp silent turns ở Flash runner; chuyển prompt reasoning sang progress notes tránh từ chối trên Claude 5.x; cách ly final reviews trước đó trong Checker. |
 | 2026-11-20 | Thêm cơ chế toggle debug AI I/O (`ARTEMIS_DEBUG_AI_IO`) | `ai_io_logger.py`, `runner.py`, `operator.py`, `constants.py`, `.env` | Cho phép bật/tắt in log trực quan 3 chặng: (1) Output Android (UI list, screen size) -> (2) Input AI (Prompt/messages đã rút gọn base64) -> (3) Output AI (Thinking & Tool calls). |
+| 2026-11-20 | Thu nhỏ ảnh gửi AI ở Flash (O8): `agent.flash.model_image` (`max_side` 1280, q75 trong config dự án) | `model_image.py` (mới), `flash/runner.py`, `config/agent.py`, `config/artemis.jsonc` | Tầng 3 (Flash): ảnh trong tail ~76 KB thay ~203 KB (−63%); OCR/guard/trace vẫn dùng ảnh gốc; toạ độ không đổi. |
+| 2026-11-20 | OCR cục bộ ONNX cho Flash (RapidOCR + PaddleOCR Latin v5), `agent.flash.ocr.mode` = off/auto/always; ghép `xml_first`; node OCR ảo; bỏ cảnh báo che khuất cho OCR ảo. Sửa thiếu `import time` trong `operator.py` (Pro crash từ commit `0f7693b`). | `local_ocr.py` (mới), `observation.py`, `ocr_xml_fusion.py`, `visualization.py`, `config/agent.py`, `config/artemis.jsonc`, `pyproject.toml`, `operator.py` | Tầng 2 (Flash): màn hình XML nghèo nay có `[n] OCR Text` kèm toạ độ → AI chọn bằng index thay vì đoán toạ độ; `target_text` tìm được chữ OCR. Pro không đổi hành vi (vẫn Google Vision khi có key). |
+| 2026-11-20 | Thêm cơ chế toggle quay video màn hình (`ARTEMIS_VIDEO_RECORDING_ENABLED`) trên UI | `system.py`, `system.service.ts`, `home.component.html`, `.env` | Thêm nút Record ON/OFF trên UI cho phép bật/tắt quay video qua scrcpy, giúp giảm tải CPU/mạng và tăng tốc phản hồi khi không cần video. |

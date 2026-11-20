@@ -153,11 +153,20 @@ def _map_coordinates_back(
 
 
 def fuse_ocr_with_xml(
-    xml_hierarchy: list[dict[str, Any]], ocr_results: list[dict[str, Any]]
+    xml_hierarchy: list[dict[str, Any]],
+    ocr_results: list[dict[str, Any]],
+    *,
+    xml_first: bool = False,
 ) -> list[dict[str, Any]]:
     """Fuse OCR results with XML hierarchy with advanced line-grouping aggregation.
 
     Assumes ocr_results coordinates are already mapped back to full screen.
+
+    ``xml_first`` (Flash local OCR): the accessibility ``text`` is authoritative,
+    so OCR never replaces a node that already has one (OCR misreads such as a
+    merged strike-through price would otherwise overwrite exact XML text), and
+    OCR lines that fall inside no node are kept as virtual OCR nodes instead of
+    being dropped, which is the case OCR exists for (canvas, games, images).
     """
     # 0. Detect screen dimensions to calculate screen area
     max_width = 1080
@@ -266,7 +275,7 @@ def fuse_ocr_with_xml(
 
         # Discard Strategy (Deduplication)
         # We synthesize the full text to check for redundancy against XML text
-        discard = False
+        discard = bool(xml_first and xml_text)
         if xml_text and (aggregated_ocr_text in xml_text):
             discard = True
         if xml_text and not discard:
@@ -324,5 +333,24 @@ def fuse_ocr_with_xml(
             orig_class = str(node.get("className") or node.get("class") or "")
             if "[OCR]" not in orig_class:
                 node["class"] = f"{orig_class} [OCR]".strip()
+
+    if xml_first:
+        for item in unmatched_ocrs:
+            text = item["ocr"].get("text", "").strip()
+            if _is_low_value_text(text):
+                continue
+            b = item["bounds"]
+            if b["right"] <= b["left"] or b["bottom"] <= b["top"]:
+                continue
+            bounds_str = f"[{b['left']},{b['top']}][{b['right']},{b['bottom']}]"
+            xml_hierarchy.append(
+                {
+                    "text": "",
+                    "bounds": bounds_str,
+                    "class": "[OCR]",
+                    "ocr_virtual": True,
+                    "ocr_elements": [{"text": text, "bounds": bounds_str}],
+                }
+            )
 
     return xml_hierarchy

@@ -75,6 +75,7 @@ from artemis.config import (
     StepSummarizerConfig,
     load_agent_config,
 )
+from artemis.config.agent import FlashModelImageConfig
 from artemis.context import ArtemisContext
 from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.data_engine.trace import trace
@@ -96,6 +97,7 @@ from artemis.services.llm import (
 )
 from artemis.tools.history import history_tool_declarations
 from artemis.tools.tool_wrapper import tool_result_messages
+from artemis.utils.model_image import shrink_for_model
 from artemis.utils.screen_diff import COMMITMENT_PATTERN
 
 
@@ -215,6 +217,7 @@ class FlashRunner:
             self.max_silent_turns = getattr(cfg.flash, "max_silent_turns", 5)
             self.fast_burst = getattr(cfg.flash, "fast_burst", False)
             self.step_summarizer_cfg = cfg.flash.step_summarizer
+            self.model_image_cfg = getattr(cfg.flash, "model_image", FlashModelImageConfig())
             self.memory_runtime_cfg = cfg.memory.runtime
             self.transcript_cfg = cfg.memory.transcript
             self.chunking_cfg = cfg.memory.chunking
@@ -223,6 +226,7 @@ class FlashRunner:
             self.max_silent_turns = 5
             self.fast_burst = False
             self.step_summarizer_cfg = StepSummarizerConfig()
+            self.model_image_cfg = FlashModelImageConfig()
             self.memory_runtime_cfg = MemoryRuntimeConfig()
             self.transcript_cfg = MemoryTranscriptConfig()
             self.chunking_cfg = None
@@ -452,6 +456,10 @@ class FlashRunner:
             {"type": "text", "text": obs_header}
         ]
         if img_bytes:
+            # Only the model's copy shrinks; OCR, guards and traces keep the original.
+            image_cfg = getattr(self, "model_image_cfg", None)
+            if image_cfg is not None and getattr(image_cfg, "max_side", 0):
+                img_bytes = shrink_for_model(img_bytes, image_cfg.max_side, image_cfg.jpeg_quality)
             img_b64 = base64.b64encode(img_bytes).decode("utf-8")
             blocks.append({"type": "text", "text": "--- Current Screenshot ---"})
             blocks.append(

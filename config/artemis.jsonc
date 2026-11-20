@@ -160,6 +160,23 @@
       "max_turns": 0, // Maximum reactive turns before stopping (0 = unlimited; history is bounded by transcript compression, not by a turn cap)
       "explorer_mode": "flash", // 'flash' grounds with the ER model (object_detector, Gemini API; called only on ask_explorer) Explorer tier for the Flash runner: 'flash' | 'pro' | 'ultra' (see top-level "explorer")
       "fast_burst": true, // Execute consecutive actions in multi-action turns without intermediate screen captures
+      // 🖼️ Screenshot sent to the AI each turn (only the AI's copy; OCR/guards/traces keep the original)
+      // Coordinates are 0-1000 normalized, so shrinking changes none. Never blurred (Lanczos downscale).
+      // Measured on trace screenshots: 1280 q75 → ~76 KB vs ~203 KB original (-63%), UI text incl. Vietnamese tones still sharp.
+      "model_image": {
+        "max_side": 1280, // longest side in px; 0 = send the original
+        "jpeg_quality": 75
+      },
+      // 🔤 Local OCR (ONNX Runtime on this PC: RapidOCR detector + PaddleOCR Latin v5 recognizer)
+      // Reads the screenshot the phone already sends (no extra transfer), ~0.5 s/screen on CPU.
+      // OCR lines appear in the UI list as "[n] OCR Text: '...'" so the AI can target them by index.
+      // English + basic accents; Vietnamese hook/dot-below tones need a Vietnamese rec model (rec_model_path).
+      "ocr": {
+        "mode": "auto", // 'off' | 'auto' (only when the accessibility tree is poor: games, canvas, WebView) | 'always' (also banners/images; +~0.5 s per observation)
+        "min_xml_labels": 5, // 'auto': run OCR when fewer labeled app elements than this are visible
+        "threads": 4 // ONNX Runtime CPU threads (more is slower on hybrid P/E-core CPUs)
+        // "rec_model_path": "/path/to/model.onnx", "rec_keys_path": "/path/to/dict.txt" // optional custom recognizer
+      },
       // 🧠 Step Summarizer: Asynchronous visual context compressor
       // Summarizes intermediate steps in background without blocking the runner,
       // replacing images only after strictly objective, high-density summaries are ready.

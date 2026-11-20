@@ -67,6 +67,20 @@ def has_large_scrollable(nodes, width, height, min_fraction: float = 0.25) -> bo
             stack.extend(children if isinstance(children, list) else [children])
     return False
 
+async def _local_ocr(ctx: ArtemisContext, screenshot_bytes: bytes, xml_hierarchy) -> list:
+    """Local ONNX OCR for this frame when the Flash OCR config asks for it, else []."""
+    from artemis.utils.local_ocr import local_ocr_settings, recognize_screenshot, should_run_ocr
+
+    try:
+        cfg = local_ocr_settings(ctx)
+        if not should_run_ocr(cfg, xml_hierarchy):
+            return []
+        return await asyncio.to_thread(recognize_screenshot, screenshot_bytes, xml_hierarchy, cfg)
+    except Exception as e:
+        logger.warning(f"Local OCR skipped for this observation: {e}")
+        return []
+
+
 async def observe(
     ctx: ArtemisContext,
     controller: UnifiedMobileController,
@@ -120,7 +134,17 @@ async def observe(
             ctx.device.device_height = height
 
         scrollable = has_large_scrollable(xml_hierarchy, width, height)
-        fused_xml = fuse_ocr_with_xml(xml_hierarchy, ocr_results)
+        xml_first = False
+        if not ocr_results:
+            ocr_results = await _local_ocr(ctx, screenshot_bytes, xml_hierarchy)
+            xml_first = bool(ocr_results)
+        # Fuse into copies: the raw hierarchy is what gets persisted and diffed.
+        source = (
+            [dict(n) if isinstance(n, dict) else n for n in (xml_hierarchy or [])]
+            if ocr_results
+            else xml_hierarchy
+        )
+        fused_xml = fuse_ocr_with_xml(source, ocr_results, xml_first=xml_first)
         minimal_list_str, elements, _ = format_minimal_list_with_elements(fused_xml, width, height)
     except Exception as e:
         logger.error(f"Failed to fetch or fuse UI hierarchy: {e}")

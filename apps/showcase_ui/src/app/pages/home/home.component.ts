@@ -1266,6 +1266,13 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.systemService.toggleDebugAiIo().subscribe();
   }
 
+  public isRecordingEnabled = computed(() => this.systemService.isRecordingEnabled());
+  public isTogglingRecording = computed(() => this.systemService.isTogglingRecording());
+
+  public toggleRecording(): void {
+    this.systemService.toggleRecording().subscribe();
+  }
+
   public setCategory(cat: SuggestionCategory): void {
     this.selectedCategory.set(cat);
   }

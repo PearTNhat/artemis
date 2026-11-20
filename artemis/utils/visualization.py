@@ -192,6 +192,9 @@ def _inject_mutual_occlusion_warnings(
 
     warnings_map: dict[int, list[int]] = {}
     n = len(items_bounds)
+    # Text read from pixels (a virtual OCR node) is drawn by whatever element
+    # lies under it: overlapping that element is expected, never occlusion.
+    virtual_ocr = {el.get("index") for el in (elements or []) if el.get("ocr_virtual")}
 
     for i in range(n):
         idx_i, b_i = items_bounds[i]
@@ -200,6 +203,8 @@ def _inject_mutual_occlusion_warnings(
 
         for j in range(i + 1, n):
             idx_j, b_j = items_bounds[j]
+            if idx_i in virtual_ocr or idx_j in virtual_ocr:
+                continue
             l_j, t_j, r_j, bot_j = b_j
             area_j = max(1, (r_j - l_j) * (bot_j - t_j))
 
@@ -426,6 +431,7 @@ def format_minimal_list_with_elements(
                             "class": node.get("class"),
                             "resource_id": node.get("resource-id"),
                             "is_ocr": True,
+                            **({"ocr_virtual": True} if node.get("ocr_virtual") else {}),
                         }
                     )
                     labels.append(str(idx))

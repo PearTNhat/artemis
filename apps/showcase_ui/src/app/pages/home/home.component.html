@@ -1932,6 +1932,17 @@
               <span class="debug-text">Debug AI</span>
               <span class="debug-status-pill" [class.on]="isDebugAiIo()">{{ isDebugAiIo() ? 'ON' : 'OFF' }}</span>
             </button>
+
+            <!-- Screen Recording Toggle Button -->
+            <button type="button" class="btn-record-toggle"
+              [class.active]="isRecordingEnabled()"
+              [disabled]="isTogglingRecording()"
+              (click)="toggleRecording()"
+              [title]="isRecordingEnabled() ? 'Quay video màn hình đang BẬT: Bấm để TẮT quay video (giúp tăng tốc điều khiển, giảm tải máy và mạng)' : 'Quay video màn hình đang TẮT: Bấm để BẬT quay video qua scrcpy'">
+              <span class="material-symbols-outlined record-icon">{{ isRecordingEnabled() ? 'videocam' : 'videocam_off' }}</span>
+              <span class="record-text">Record</span>
+              <span class="record-status-pill" [class.on]="isRecordingEnabled()">{{ isRecordingEnabled() ? 'ON' : 'OFF' }}</span>
+            </button>
           </div>
 
           <div class="bar-right">

@@ -161,6 +161,7 @@ export class SystemService {
   constructor() {
     this.startAutoPolling(3000);
     this.fetchDebugAiIo().subscribe();
+    this.fetchRecordingStatus().subscribe();
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', this.onVisibilityChange);
     }
@@ -763,6 +764,45 @@ export class SystemService {
         error: (err) => {
           console.error('Failed to toggle debug AI I/O:', err);
           this.isTogglingDebugAiIo.set(false);
+        }
+      })
+    );
+  }
+
+  public isRecordingEnabled = signal<boolean>(true);
+  public isTogglingRecording = signal<boolean>(false);
+
+  /**
+   * Fetch current status of screen recording (ARTEMIS_VIDEO_RECORDING_ENABLED)
+   */
+  public fetchRecordingStatus(): Observable<{ enabled: boolean }> {
+    return this.http.get<{ enabled: boolean }>('/api/system/recording').pipe(
+      tap({
+        next: (data) => {
+          this.isRecordingEnabled.set(data.enabled);
+        },
+        error: (err) => {
+          console.error('Failed to fetch recording status:', err);
+        }
+      })
+    );
+  }
+
+  /**
+   * Toggle automated screen recording
+   */
+  public toggleRecording(enabled?: boolean): Observable<{ status: string; enabled: boolean }> {
+    const nextVal = enabled !== undefined ? enabled : !this.isRecordingEnabled();
+    this.isTogglingRecording.set(true);
+    return this.http.post<{ status: string; enabled: boolean }>('/api/system/recording', { enabled: nextVal }).pipe(
+      tap({
+        next: (data) => {
+          this.isRecordingEnabled.set(data.enabled);
+          this.isTogglingRecording.set(false);
+        },
+        error: (err) => {
+          console.error('Failed to toggle recording:', err);
+          this.isTogglingRecording.set(false);
         }
       })
     );

@@ -28,6 +28,20 @@
   - **Khóa cứng chuẩn mực trong `AGENTS.md`:** Thêm các mục 2.7, 2.8, 2.9 cấm hardcode tên nút/từ khóa, bắt buộc tư duy theo UI Pattern và thuộc tính Accessibility chuẩn.
 - **Kiểm thử hồi quy:** Vượt qua 100% các bộ unit test (toàn bộ 263 tests trong `mcp` và `agents/flash`). Test mới: bỏ chờ ngay khi màn hình đã đổi cho `my_action`, giữ chờ cho `external`, chặn lặp qua thao tác xen giữa, lọc text cắt mép màn hình/ẩn.
 
+### 📌 Bản 3.6 (Thu nhỏ ảnh gửi AI ở Flash — O8, 2026-11-20)
+- **`artemis/utils/model_image.py` (mới) — `shrink_for_model`:** cạnh dài ≤ `max_side`, resize Lanczos (không làm mờ), JPEG `jpeg_quality`; ảnh đã nhỏ giữ nguyên; lỗi giải mã → gửi ảnh gốc; nhớ kết quả frame gần nhất.
+- **Chỉ ảnh trong tail gửi AI** (`FlashRunner._build_tail`) bị thu nhỏ; OCR, guard, so sánh màn hình, trace vẫn dùng ảnh gốc. Toạ độ 0–1000 nên không ảnh hưởng dịch lệnh.
+- **Cấu hình `agent.flash.model_image`:** mặc định code `max_side=0` (tắt); `config/artemis.jsonc` bật `1280` / q75.
+- Số liệu offline: Mục 1.7. Kiểm chứng: 1010 unit test pass (7 test mới `tests/unit/agents/test_flash_model_image.py`).
+
+### 📌 Bản 3.5 (OCR cục bộ ONNX cho Flash, 2026-11-20)
+- **`artemis/utils/local_ocr.py` (mới):** RapidOCR (detector) + recognizer PaddleOCR `latin_PP-OCRv5_mobile_rec` (ONNX, Apache-2.0, ghim commit + SHA-256, tải 1 lần). Chạy trên ảnh điện thoại đã gửi về (không truyền thêm), `use_cls=False`, 4 luồng CPU (2.1 s → ~0.7–1 s/màn hình), cache 4 frame theo hash, lỗi thì bỏ qua OCR không làm hỏng quan sát.
+- **Cấu hình `agent.flash.ocr`:** `mode` = `off` (mặc định code) / `auto` (bật trong `config/artemis.jsonc`: chỉ khi < 5 node app có nhãn) / `always`; `threads`; `rec_model_path` + `rec_keys_path` để thay model (vd tiếng Việt).
+- **`fuse_ocr_with_xml(xml_first=True)`** (chỉ Flash dùng): XML `text` thắng OCR; dòng OCR ngoài mọi node thành node ảo (trước đây bị bỏ nên OCR vô dụng trên màn hình canvas/game). Pro giữ nguyên hành vi.
+- **Cảnh báo che khuất** bỏ qua node OCR ảo (trước đó có thể đặt `occluded=True` sai và khiến Occlusion Guard chặn bấm).
+- **Sửa lỗi Pro:** `operator.py` thiếu `import time` (từ commit `0f7693b`) làm Operator crash ngay lượt đầu và 28 unit test hỏng.
+- Kiểm chứng: 1003 unit test pass (`tests/unit/mcp`, `agents`, `llm`, `utils`), gồm 19 test mới `tests/unit/mcp/test_local_ocr.py`; chạy thật trên ảnh trace: màn hình XML trống từ 0 → 18 dòng `OCR Text` có toạ độ.
+
 ### 📌 Bản 3.4 (Gộp PR upstream google/artemis — đợt 1, 2026-11-19)
 - Gộp 4 PR đang mở của `google/artemis` vào nhánh `adopt/upstream-prs-1`: **#216, #244, #181, #171**. Danh sách đầy đủ và trạng thái ở **Mục 11** (tránh gộp lại lần nữa).
 - **#216** `launch_app`: `monkey --pct-syskeys 0` — trên emulator / máy không phím cứng, lệnh `monkey` cũ không mở được app (mất ~45s cho 3 lần thử rồi agent phải tự mở từ app drawer).
@@ -105,6 +119,14 @@
 **Lý do:**
 - Người dùng chỉ muốn **một chế độ vừa chính xác vừa nhanh**; phải chọn giữa 2 chế độ là gánh nặng.
 - Số liệu thực nghiệm: cùng đề, Flash ra **kết quả giống Pro** nhưng nhanh hơn (Mục 1.5: 3p35s vs 4p45s, cùng sản phẩm và tổng tiền; Mục 1.4: ~268s vs ~7 phút). Pro tốn thêm lượt gọi AI ở Planner, Checker và pixel safety net (~67s riêng safety net ở Mục 1.5).
+
+**Đích triển khai (quyết định 2026-11-20): Gemini API key với model bản thấp** (preset `config/artemis.gemini.jsonc`: Flash chính + `flash-lite` cho tác vụ phụ), không phải agy/Gemini CLI. Tối ưu model chỉ nhắm đường API:
+- Context do ARTEMIS kiểm soát (transcript ledger: ảnh giữ 3 lượt gần nhất, list XML 1 lượt, nén chunk) → giữ prompt ổn định, không phình như agy.
+- **Prompt cache**: giữ phần S (system prompt) byte-ổn định để Gemini cache ngầm; đo `cached_ratio`.
+- **Token ảnh**: thu nhỏ ảnh (đã có `agent.flash.model_image`) + cân nhắc `media_resolution` của Gemini API (chưa có trong code).
+- **Model bản thấp** suy luận yếu hơn → danh sách phần tử phải rõ (O3 icon không nhãn, OCR) và guard bằng code quan trọng hơn.
+- Bỏ các tối ưu riêng cho agy (ngưỡng làm mới phiên `max_context_tokens`, giao thức `finish`).
+- Điểm nghẽn ngoài model vẫn giữ: `wait_for_screen_change` (~29% thời gian), `hopper` (~6%).
 
 **Lộ trình:**
 1. **Tối ưu Flash** theo danh sách O1–O8 trong [`docs/FLOW_DIEU_KHIEN_THIET_BI.md`](docs/FLOW_DIEU_KHIEN_THIET_BI.md) Mục 8.2:
@@ -186,6 +208,87 @@ Cả hai bắt đầu từ Shopee đã force-stop, cùng đề, dừng ở trang
 
 Ghi chú: sản phẩm rẻ nhất có tag Mall chỉ có phân loại 30cm, cả hai áp dụng quy tắc dự phòng "gần 1m nhất" và ghi rõ trong báo cáo. Pro chỉ sinh 1 mục kiểm chứng (thiếu mục phân loại/giá).
 
+### 1.6. Thử OCR cục bộ bằng ONNX (RapidOCR) trên ảnh trong `traces/` — offline (2026-11-20)
+30 ảnh màn hình (5 ảnh/phiên: Grab ×2, Shopee ×2, Lichess/Chrome, app cờ vua), so với XML accessibility lưu cùng ảnh. CPU i5-12450HX, onnxruntime 1.32 (CPU), cắt status bar trước khi OCR.
+
+| Chỉ số | RapidOCR mặc định (`ch_PP-OCRv4`, Trung+Anh) | Latin chính thức (`latin_PP-OCRv5_mobile_rec_onnx`) |
+|---|---|---|
+| Thời gian/ảnh (trung vị / p90) | ~2.1 s / 2.5 s | ~1.9 s / 2.35 s |
+| Chữ OCR khớp đúng nguyên văn XML | 28% | 39% |
+| Lỗi dấu tiếng Việt | ~99% chữ có dấu bị mất dấu ("Mức độ cay" → "Murc do cay") | 37%; bỏ hẳn ký tự thiếu trong từ điển ("Trà Đen Sữa" → "Trà Đen Sa") |
+
+- Từ điển Latin chính thức **thiếu 38 ký tự tiếng Việt** (dấu hỏi, nặng, dấu chồng: ả ạ ậ ể ộ ợ ự…) → chưa có model ONNX chính thức đọc đúng tiếng Việt. Các model tiếng Việt cộng đồng trên Hugging Face đều ở dạng Paddle (cần chuyển ONNX), ít lượt dùng, có model cấm thương mại (CC-BY-NC).
+- Trên app native (Grab, Shopee) XML **đã có gần đủ text**; phần OCR "thêm" chủ yếu là bản đọc sai của text đã có. OCR chỉ thật sự thêm thông tin ở màn hình XML trống (1/30 ảnh).
+- Thiếu hụt lớn hơn là **phần tử bấm được không có nhãn**: trung bình ~22–24/màn hình Shopee, ~6 ở app cờ — OCR không giải quyết được (→ ưu tiên O3 trong `docs/FLOW_DIEU_KHIEN_THIET_BI.md`).
+- Thu nhỏ ảnh xuống rộng 576px trước khi OCR chỉ nhanh hơn ~15% nhưng mất ~50% chữ → OCR phải chạy trên ảnh gốc; chỉ ảnh gửi cho AI mới thu nhỏ.
+- XML lưu trong trace có cả node `com.android.systemui` (đồng hồ, icon thông báo) → lọt vào danh sách UI như `[1] Text: '5:07'`, là nhiễu.
+
+**Vòng 2 — tìm OCR đọc tốt tiếng Việt (cùng 30 ảnh, cùng bộ tìm vùng chữ RapidOCR, chỉ đổi bộ đọc chữ; đúng = chữ OCR nằm trong text của node XML chứa nó):**
+
+| Bộ đọc chữ | Đúng (mọi chữ) | Đúng (chữ có dấu) | Thời gian đọc/màn hình | Định dạng / license |
+|---|---|---|---|---|
+| RapidOCR mặc định (Trung+Anh) | 40% | 3% | ~0.58 s | ONNX / Apache-2.0 |
+| PaddleOCR Latin v5 chính thức | 48% | 19% | ~0.30 s | ONNX / Apache-2.0 |
+| **VietOCR `vgg_seq2seq`** | **58%** | **56%** | ~0.94 s | PyTorch / Apache-2.0 |
+| VietOCR `vgg_transformer` | 60% | 61% | ~2.2 s | PyTorch / Apache-2.0 |
+
+- Tìm vùng chữ (det) ~0.37 s/màn hình sau khi chỉnh `use_cls=False`, `intra_op_num_threads=4` (mặc định -1 tranh luồng trên CPU P/E-core: 2.1 s → 0.9 s cho cả pipeline RapidOCR).
+- Tỉ lệ "đúng" là cận dưới: phần lớn lỗi còn lại của VietOCR là chữ bị app cắt "..." trên màn hình hoặc chữ nằm trong ảnh (banner) mà XML không có — tức OCR đọc đúng cái hiển thị.
+- **Vòng 3 — EasyOCR (`vi`+`en`, PyTorch, Apache-2.0)** và tách theo ngôn ngữ / app Grab (lần đo này máy tải khác nên thời gian lệch ±30% so với bảng trên):
+
+| | Đúng: tiếng Anh | Đúng: tiếng Việt có dấu | Đúng: Grab, tiếng Anh | Thời gian/màn hình |
+|---|---|---|---|---|
+| RapidOCR mặc định | 59% | 3% | 73% | det 0.33 s + đọc 0.24 s |
+| **RapidOCR + Latin v5 (ONNX)** | **63%** | 19% | **76%** | det 0.33 s + đọc 0.23 s |
+| VietOCR seq2seq | 59% | 56% | 73% | det 0.33 s + đọc 0.72 s |
+| EasyOCR (chỉ phần đọc) | 56% | 55% | 70% | det 0.33 s + đọc 0.44 s |
+| EasyOCR trọn bộ (CRAFT riêng) | 71% | 67% | 70% | **~9.5 s** (quá chậm trên CPU) |
+
+  Phần lớn chữ tiếng Anh bị chấm "sai" thực ra là chữ trong banner quảng cáo mà XML chỉ ghi nhãn kỹ thuật (`FEED_ADS_EXTERNAL`, `Ad`) → OCR đem lại thông tin mới; hoặc OCR gộp giá gạch + giá mới ("225.000250.000"). Lỗi đọc thật: dính chữ ("results inDelivery"), `₫` → `d`, icon → ký tự lạ.
+- `Vphuc/PP-OCRv5-mobile-rec-vi` (Apache-2.0, có lớp ký tự tiếng Việt) bị gated trên Hugging Face → chưa thử; model card tự báo WER 32% trên đề thi.
+
+Kết luận: chưa đưa OCR ONNX vào luồng chính. Cần (a) model nhận dạng có từ điển tiếng Việt đầy đủ (hỏi công ty có sẵn chưa), (b) chỉ chạy khi XML nghèo text, (c) cân nhắc `onnxruntime-gpu` vì ~2 s/ảnh trên CPU quá chậm cho mỗi lượt.
+
+### 1.7. Thu nhỏ ảnh gửi AI — đo offline trên 60 ảnh `traces/` (2026-11-20)
+Ảnh gốc trung bình 1280×2772 (JPEG q80 của helper). Token là **ước tính theo công thức công khai** (Claude ≈ w·h/750 sau khi tự resize về cạnh dài 1568; Gemini ≈ 258 token × số ô 768×768), chưa phải số đo — cần so `prompt_tokens` trên task thật.
+
+| Mức | Kích thước | KB/ảnh | base64 KB | Thời gian nén | Token ước tính (Claude) | Token ước tính (Gemini, chia ô) |
+|---|---|---|---|---|---|---|
+| Gốc | 1280×2772 | 203 | 270 | — | ~1440 | ~1650 |
+| 1600 q80 | 739×1600 | 106 | 142 | ~57 ms | ~1440 | ~705 |
+| **1280 q75 (chọn)** | **591×1280** | **76 (−63%)** | **101** | ~54 ms | **~1070 (−26%)** | **~516 (−69%)** |
+| 1066 q70 | 492×1066 | 54 | 72 | ~52 ms | ~740 | ~516 |
+
+So sánh bằng mắt trên màn hình Shopee nhiều chữ: ở 1280 q75 chữ cỡ thường kể cả dấu tiếng Việt ("Đã sử dụng", "Khoảng Giá") vẫn sắc; 1066 bắt đầu nhoè viền chữ. Gemini 3 có thể tính token ảnh theo `media_resolution` cố định thay vì theo kích thước → khi đó lợi ích chính là dung lượng truyền/ghi file (agy), không phải token.
+
+### 1.8. ADB qua Wi-Fi vs USB + chạy thật Flash trên Grab (máy `25069PTEBG`, Android 16, 1280×2772, 2026-11-20)
+Code đã có OCR `auto` + ảnh 1280 q75; model `agy:gemini-3.8-flash-low`; tắt quay video; trước mỗi lần chạy `force-stop` Grab + về Home.
+
+**Đường truyền (đo riêng, chỉ đọc, 10 lần):**
+
+| | Wi-Fi (`192.168.1.132:38825`) | USB (`L7HAK7UCXCXCT8WK`) |
+|---|---|---|
+| `adb shell echo` (trung vị / max) | 37 / 70 ms | 23 / 31 ms |
+| Helper `/snapshot` XML+JPEG (trung vị / p90 / max) | 514 / 548 / 658 ms | 438 / 450 / 464 ms |
+| `adb screencap` PNG | 463 ms | 407 ms |
+
+→ USB nhanh hơn ~15% và ổn định hơn rõ; phần lớn thời gian `/snapshot` là chụp + nén trên máy, không phải truyền.
+
+**Chạy thật (2 đề khác nhau → không so tốc độ trực tiếp):**
+
+| | Wi-Fi — xem 3 món đầu (`d57f7120`) | USB — tới màn thanh toán (`2d0c038b`) |
+|---|---|---|
+| Kết quả | ✅ đúng (Phở 24 - The Sun Avenue + 3 món) | ⚠️ dừng đúng ở màn thanh toán, không đặt; **nhưng dùng món có sẵn trong giỏ từ phiên cũ ("Phở Bò Tái vừa"), không thêm "món đầu tiên"** |
+| Thời gian / lượt AI / bước | 146.6 s / 10 / 18 | 153.1 s / 12 / 24 |
+| Model mỗi lượt | 3.7–8.4 s | 3.8–9.5 s |
+| Chụp màn hình mỗi lượt | 1.0–2.6 s | 0.9–1.9 s |
+| Lượt 1 | 44.3 s (`hopper` 7.2 s + `wait_for_screen_change` 28.8 s) | 20.8 s (`hopper` 8.8 s + wait 5.0 s) |
+| Input token lượt 1 → cuối (cache) | 24.7k → 53.4k (0 cached) | 25.1k → 59.6k (0 cached) |
+| OCR (`auto`) | 1 lần, 1.4 s (màn tải) | 0 lần |
+| Ảnh có gửi AI? | Có, mọi lượt (agy chế độ ACP gửi ảnh inline; nhãn log "screenshot skipped" là hằng số sai ở `agy_model.py`, không phản ánh thực tế) | Có, mọi lượt |
+
+Phát hiện: (1) **vi phạm quy tắc 2.8 (trạng thái có sẵn)** — AI thấy `Basket • 1 Item` nhưng không kiểm tra món có khớp đề; (2) AI tự đổi chỉ dẫn giao hàng ("Not applicable", "Meet at lobby") để qua form bắt buộc; (3) `hopper` tốn 7–9 s mỗi lần mở app chỉ để đổi tên app → package; (4) `wait_for_screen_change(after=my_action)` có lần mất 28.8 s mới "ổn định" (màn mở đầu có banner động); (5) token tăng ~3k/lượt và **không có cache**: agy giữ nguyên mọi tin nhắn và mọi ảnh đã nhận trong phiên, nên việc ARTEMIS tự xoá ảnh/list cũ không làm agy nhỏ lại; (6) `wait_for_screen_change` tổng ~44 s/153 s (USB): mỗi lần "nhìn" là một `/snapshot` đầy đủ ~0.44 s, judge 1–2 lần + settle tới 6 lần.
+
 ## 2. TRẠNG THÁI TRIỂN KHAI (đến bản 3)
 
 | Hạng mục | Trạng thái | Ghi chú |
@@ -211,6 +314,8 @@ Ghi chú: sản phẩm rẻ nhất có tag Mall chỉ có phân loại 30cm, c�
 | **B.** Bỏ lượt mở ảnh `read_file` | ⚠️ Đang xử lý | Thử nghiệm cho thấy agy stream-json chỉ hỗ trợ text; đã bổ sung thuộc tính UI & gợi ý |
 | **E2.** Chuỗi xuyên màn hình | ✅ Xong | Đã hoàn thành trong **Trụ cột G** |
 | **F2.** `find_and_reveal`, `scroll_and_collect` | ❌ Chưa | |
+| **O8. Thu nhỏ ảnh gửi AI ở Flash** (`agent.flash.model_image`, 1280 q75) | ✅ Code xong (2026-11-20) | −63% dung lượng ảnh; còn phải đo `prompt_tokens` và độ chính xác trên task thật (Mục 1.7) |
+| **OCR cục bộ ONNX cho Flash** (RapidOCR + PaddleOCR Latin v5, `agent.flash.ocr`) | ✅ Xong (2026-11-20) | `auto` chỉ chạy khi XML nghèo; ghép `xml_first` + node OCR ảo; 19 unit test mới; tiếng Việt cần model riêng (Mục 1.6) |
 | Gộp PR upstream đợt 1 (#216, #244, #181, #171) | ✅ Xong | Xem Mục 11; 2635 unit tests passed |
 | Gộp PR upstream đợt 2 (#189, #217, #219, #221) | ❌ Chưa | Xung đột với code đã sửa, phải gộp tay |
 | Test suite cho Trụ cột G & kiểm tra hồi quy | ✅ Xong | 757 unit tests passed (27/27 tests Trụ cột G & Turn Snapshot passed), khắc phục triệt để toàn bộ các lỗi phát hiện qua review (cho phép action không mục tiêu sau wait, lấy dữ liệu qua pipeline observe chuẩn cho target_text, flatten XML cây phân cấp lồng nhau, chuẩn hóa cờ timed_out có cấu trúc) |

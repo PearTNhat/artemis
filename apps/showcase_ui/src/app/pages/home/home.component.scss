@@ -4721,6 +4721,88 @@ $text-light: #94a3b8;
                 cursor: not-allowed;
               }
             }
+
+            .btn-record-toggle {
+              display: inline-flex;
+              align-items: center;
+              gap: 6px;
+              height: 38px;
+              padding: 0 12px;
+              border-radius: 19px;
+              border: 1px solid rgba(226, 232, 240, 0.95);
+              background: rgba(255, 255, 255, 0.85);
+              backdrop-filter: blur(12px);
+              -webkit-backdrop-filter: blur(12px);
+              cursor: pointer;
+              transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+              box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+              outline: none;
+              font-family: inherit;
+
+              .record-icon {
+                font-size: 16px;
+                color: #64748b;
+                transition: color 0.2s ease;
+              }
+
+              .record-text {
+                font-size: 12.5px;
+                font-weight: 500;
+                color: #475569;
+                line-height: 1;
+              }
+
+              .record-status-pill {
+                font-size: 10px;
+                font-weight: 700;
+                padding: 2px 6px;
+                border-radius: 10px;
+                background: #f1f5f9;
+                color: #94a3b8;
+                line-height: 1;
+                transition: all 0.2s ease;
+
+                &.on {
+                  background: #fee2e2;
+                  color: #dc2626;
+                  border: 1px solid #fca5a5;
+                }
+              }
+
+              &:hover:not(:disabled) {
+                background: #ffffff;
+                border-color: #cbd5e1;
+                box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+
+                .record-icon, .record-text {
+                  color: #0f172a;
+                }
+              }
+
+              &.active {
+                background: #fef2f2;
+                border-color: #fca5a5;
+                box-shadow: 0 2px 6px rgba(239, 68, 68, 0.15);
+
+                .record-icon {
+                  color: #dc2626;
+                }
+
+                .record-text {
+                  color: #b91c1c;
+                  font-weight: 600;
+                }
+              }
+
+              &:active:not(:disabled) {
+                transform: scale(0.97);
+              }
+
+              &:disabled {
+                opacity: 0.6;
+                cursor: not-allowed;
+              }
+            }
           }
 
           .bar-right {

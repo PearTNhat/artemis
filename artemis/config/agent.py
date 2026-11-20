@@ -756,8 +756,87 @@ class MemoryConfig(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class FlashOcrConfig(BaseModel):
+    """Local on-host OCR (ONNX Runtime) fused into every Flash observation.
+
+    Runs on the screenshot the device already sends, so it adds no transfer; it
+    costs CPU time (~0.5 s per screen on a laptop CPU), which is why ``auto``
+    only runs it when the accessibility tree is too poor to describe the screen.
+    """
+
+    mode: Literal["off", "auto", "always"] = Field(
+        default="off",
+        description=(
+            "'off': never run local OCR. 'auto': run only when the accessibility"
+            " tree is poor (fewer than min_xml_labels labeled app nodes, or no"
+            " hierarchy at all: games, canvas, some WebViews). 'always': run on"
+            " every observation (also reads text inside banners and images)."
+        ),
+    )
+    min_xml_labels: int = Field(
+        default=5,
+        ge=0,
+        description="'auto' mode threshold: OCR runs when fewer labeled app nodes are visible.",
+    )
+    threads: int = Field(
+        default=4,
+        ge=1,
+        description=(
+            "ONNX Runtime intra-op threads. The library default (all cores) is"
+            " measurably slower on hybrid P/E-core CPUs."
+        ),
+    )
+    rec_model_path: str | None = Field(
+        default=None,
+        description=(
+            "Recognition model (.onnx). Unset = official PaddleOCR latin_PP-OCRv5_mobile_rec,"
+            " downloaded once into the ARTEMIS app dir and verified by SHA-256."
+        ),
+    )
+    rec_keys_path: str | None = Field(
+        default=None,
+        description="Character dictionary for rec_model_path (one character per line).",
+    )
+    model_config = {"extra": "allow"}
+
+
+class FlashModelImageConfig(BaseModel):
+    """Size of the screenshot sent to the model (only the model's copy).
+
+    Coordinates are normalized 0-1000, so shrinking changes no coordinate; exact
+    text still reaches the model through the element list (XML + local OCR, both
+    read from the full-resolution capture). OCR, safety checks and traces keep
+    the original image.
+    """
+
+    max_side: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Longest side in pixels of the screenshot sent to the model; 0 keeps the"
+            " original. 1280 (about 590x1280 on a phone) keeps normal UI text sharp."
+        ),
+    )
+    jpeg_quality: int = Field(
+        default=75,
+        ge=30,
+        le=95,
+        description="JPEG quality of the shrunk screenshot.",
+    )
+    model_config = {"extra": "allow"}
+
+
 class FlashProfileConfig(BaseModel):
     """Configuration options specific to the ⚡ Flash execution profile (FlashRunner/ReactiveRunner)."""
+
+    model_image: FlashModelImageConfig = Field(
+        default_factory=FlashModelImageConfig,
+        description="Downscaling of the per-turn screenshot sent to the model.",
+    )
+    ocr: FlashOcrConfig = Field(
+        default_factory=FlashOcrConfig,
+        description="Local ONNX OCR fused into Flash observations.",
+    )
 
     max_turns: int = Field(
         default=0,
