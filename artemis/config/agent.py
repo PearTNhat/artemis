@@ -837,6 +837,14 @@ class FlashProfileConfig(BaseModel):
         default_factory=FlashOcrConfig,
         description="Local ONNX OCR fused into Flash observations.",
     )
+    element_list: Literal["full", "compact"] = Field(
+        default="full",
+        description=(
+            "Format of the UI element list sent to the model. 'compact' drops status-bar"
+            " nodes and default states, writes '[n] \"text\" l,t,r,b', and lists unlabeled"
+            " clickable controls as '[n] (icon) l,t,r,b' (about 60% fewer characters)."
+        ),
+    )
 
     max_turns: int = Field(
         default=0,

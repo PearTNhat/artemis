@@ -119,6 +119,13 @@ class ModelEndpoint(BaseModel):
         default=False,
         description="Whether to enable Google Search grounding for Gemini endpoints",
     )
+    media_resolution: str | None = Field(
+        default=None,
+        description=(
+            "Gemini only: token budget per input image ('low' ~260, 'medium' ~560,"
+            " 'high'; unset = model default ~1100). Other providers ignore it."
+        ),
+    )
 
     def cache_key(self) -> tuple:
         """Key the client cache by endpoint settings, hashing the API key."""
@@ -136,9 +143,22 @@ class ModelEndpoint(BaseModel):
             self.include_thoughts,
             self.reasoning_effort,
             self.enable_grounding,
+            self.media_resolution,
             self.api_base,
             api_key_digest,
         )
+
+
+def _gemini_media_resolution(value: str | None) -> Any:
+    """The SDK enum for a configured 'low' / 'medium' / 'high', else None."""
+    if not value:
+        return None
+    from langchain_google_genai import MediaResolution
+
+    try:
+        return MediaResolution[f"MEDIA_RESOLUTION_{value.strip().upper()}"]
+    except KeyError:
+        return None
 
 
 def _patch_langchain_google_genai():
@@ -257,6 +277,7 @@ class ModelFactory:
                 "thinking_budget": endpoint.thinking_budget,
                 "thinking_level": thinking_level,
                 "include_thoughts": endpoint.include_thoughts,
+                "media_resolution": _gemini_media_resolution(endpoint.media_resolution),
                 "safety_settings": {
                     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
                     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,

@@ -575,6 +575,7 @@ class McpActionExecutor:
                 "target_semantics": target_semantics,
                 "target_coordinates": target_coordinates,
                 "timed_out": getattr(res, "timed_out", False),
+                "no_effect": getattr(res, "no_effect", False),
                 # Wall time of the device action itself and of the post-action
                 # observation (settle + screenshot + UI hierarchy), in seconds.
                 "action_s": round(action_s, 3) if action_s is not None else None,

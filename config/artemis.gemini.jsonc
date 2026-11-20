@@ -61,6 +61,8 @@
     "operator": {
       "thinking_level": "medium",
       "include_thoughts": true
+      // "media_resolution": "low" // tokens per screenshot: low ~264 / medium ~560 / default ~1078. NOT recommended: on a real Grab task (2026-11-20) 'low' took 16 turns vs 11 (repeated swipes) and no faster per turn
+      // "max_tokens": 2048 // cap on the answer length
     },
 
     // 🎬 Video Analyzer: Multimodal screen recording verification and temporal analysis
@@ -140,6 +142,12 @@
     "flash": {
       "max_turns": 0, // Maximum reactive turns before stopping (0 = unlimited; history is bounded by transcript compression, not by a turn cap)
       "explorer_mode": "flash", // Explorer tier for the Flash runner: 'flash' | 'pro' | 'ultra' (see top-level "explorer")
+      // 🖼️ Screenshot sent to the AI each turn (only the AI's copy)
+      "model_image": {
+        "max_side": 1280, // Gemini bills a fixed ~1100 tokens/image at any size; use the operator node's media_resolution to cut tokens
+        "jpeg_quality": 75
+      },
+      "element_list": "compact", // UI list: 'compact' (lean, lists unlabeled icons) | 'full'
       // 🧠 Step Summarizer: Asynchronous visual context compressor
       // Summarizes intermediate steps in background without blocking the runner,
       // replacing images only after strictly objective, high-density summaries are ready.

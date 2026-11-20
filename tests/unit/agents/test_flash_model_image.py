@@ -91,3 +91,28 @@ def test_build_tail_sends_the_original_when_disabled():
     runner.model_image_cfg = FlashModelImageConfig()
     frame = _jpeg(1080, 2400)
     assert _tail_image(runner, frame) == frame
+
+
+def test_build_tail_sends_per_image_media_resolution_when_configured():
+    runner = FlashRunner.__new__(FlashRunner)
+    runner.model_image_cfg = FlashModelImageConfig()
+    runner.media_resolution = "low"
+    ledger = MagicMock()
+    ledger.elapsed_label.return_value = "T+00:01"
+    tail = runner._build_tail(ledger, 1, _jpeg(100, 200), "[1] \"OK\" 0,0,10,10")
+    block = next(b for b in tail.content if b.get("type") == "image")
+    assert block["media_resolution"] == "MEDIA_RESOLUTION_LOW" and block["mime_type"] == "image/jpeg"
+    assert base64.b64decode(block["base64"])[:2] == b"\xff\xd8"
+
+
+def test_gemini_image_resolution_only_for_google_operator():
+    from artemis.agents.flash.runner import _gemini_image_resolution
+
+    def ctx_with(provider, level):
+        ctx = MagicMock()
+        ctx.llm_config.get_agent.return_value = MagicMock(provider=provider, media_resolution=level)
+        return ctx
+
+    assert _gemini_image_resolution(ctx_with("google", "low")) == "low"
+    assert _gemini_image_resolution(ctx_with("openai", "low")) is None
+    assert _gemini_image_resolution(ctx_with("google", None)) is None

@@ -11,9 +11,11 @@ Can be enabled via:
 - Or programmatically: `set_ai_io_debug_enabled(True)`
 """
 
+import datetime
 import json
 import logging
 import os
+import re
 import sys
 from typing import Any
 
@@ -23,6 +25,26 @@ logger = logging.getLogger("artemis.ai_io")
 
 # Global override if set programmatically
 _OVERRIDE_ENABLED: bool | None = None
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+def get_ai_io_log_file_path() -> str:
+    """Returns the absolute path to the dedicated ai_io.log file."""
+    # Try Workspace relative path first, fallback to home
+    workspace_log = "/home/nhat/Workspace/control-android/artemis/logs/ai_io.log"
+    return workspace_log
+
+def _write_to_log_file(text: str) -> None:
+    """Appends clean text without ANSI colors to the persistent log file."""
+    try:
+        log_path = get_ai_io_log_file_path()
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        clean_text = _ANSI_ESCAPE_RE.sub("", text)
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n[{now_str}]\n{clean_text}\n")
+    except Exception as exc:
+        logger.debug(f"Could not append to {log_path}: {exc}")
 
 
 def is_ai_io_debug_enabled() -> bool:
@@ -70,6 +92,9 @@ def _truncate_base64_in_content(content: Any) -> Any:
                             item_copy["image_url"] = {
                                 "url": f"<JPEG image base64 ({len(raw_url):,} chars, ~{len(raw_url)*3//4//1024} KB)>"
                             }
+                elif item_copy.get("type") == "image" and isinstance(item_copy.get("base64"), str):
+                    raw = item_copy["base64"]
+                    item_copy["base64"] = f"<JPEG image base64 ({len(raw):,} chars, ~{len(raw)*3//4//1024} KB)>"
                 elif "text" in item_copy and isinstance(item_copy["text"], str):
                     item_copy["text"] = _truncate_base64_in_content(item_copy["text"])
                 sanitized.append(item_copy)
@@ -118,6 +143,7 @@ def log_android_output(
 
     output = f"\n{header}\n{meta_info}\n{ui_header}\n{ui_body}\n{Fore.CYAN}{sep}{Style.RESET_ALL}\n"
     print(output, flush=True)
+    _write_to_log_file(output)
 
 
 def log_ai_input(
@@ -173,6 +199,10 @@ def log_ai_input(
                     elif b_type == "image_url":
                         url_str = b.get("image_url", {}).get("url", "")
                         formatted_blocks.append(f"[Screenshot: {url_str}]")
+                    elif b_type == "image":
+                        formatted_blocks.append(
+                            f"[Screenshot: {b.get('base64', '')} media_resolution={b.get('media_resolution', '-')}]"
+                        )
                     else:
                         formatted_blocks.append(json.dumps(b, ensure_ascii=False))
                 else:
@@ -188,7 +218,9 @@ def log_ai_input(
         lines.append(f"{Fore.YELLOW}{'-'*40}{Style.RESET_ALL}")
 
     lines.append(f"{Fore.YELLOW}{sep}{Style.RESET_ALL}\n")
-    print("\n".join(lines), flush=True)
+    final_text = "\n".join(lines)
+    print(final_text, flush=True)
+    _write_to_log_file(final_text)
 
 
 def log_ai_output(
@@ -254,5 +286,7 @@ def log_ai_output(
         lines.append(f"{Fore.GREEN}• Token Usage:{Style.RESET_ALL} {usage}")
 
     lines.append(f"{Fore.GREEN}{sep}{Style.RESET_ALL}\n")
-    print("\n".join(lines), flush=True)
+    final_text = "\n".join(lines)
+    print(final_text, flush=True)
+    _write_to_log_file(final_text)
 

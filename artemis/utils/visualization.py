@@ -365,12 +365,52 @@ def format_minimal_list_with_points(
     return "\n".join(lines), points, labels
 
 
+#: Status-bar band, as a fraction of the screen height: system UI nodes lying
+#: entirely inside it (clock, signal, battery, notification icons) are dropped
+#: from the compact list. A heads-up notification or the shade is taller and stays.
+_STATUS_BAR_FRACTION = 0.06
+#: An unlabeled clickable larger than this share of the screen is a container
+#: (card, list row, backdrop), not an icon control.
+_ICON_MAX_AREA_FRACTION = 0.15
+_ICON_MIN_SIDE_PX = 12
+_MAX_ICON_LINES = 40
+
+
+def _is_status_bar_node(node: dict[str, Any], height: int, bounds: tuple[int, int, int, int] | None) -> bool:
+    """A system UI node drawn inside the top status-bar band."""
+    if not bounds or str(node.get("package") or "") != "com.android.systemui":
+        return False
+    return bounds[3] <= height * _STATUS_BAR_FRACTION
+
+
+def _icon_kind(node: dict[str, Any]) -> str:
+    """Short role word for an unlabeled control, from its Android class."""
+    cls = str(node.get("class") or "")
+    if "EditText" in cls:
+        return "input"
+    if any(k in cls for k in ("Switch", "CheckBox", "RadioButton", "ToggleButton")):
+        return "toggle"
+    if "Image" in cls:
+        return "icon"
+    return "button"
+
+
 def format_minimal_list_with_elements(
-    fused_xml: list[dict[str, Any]], width: int = 1080, height: int = 2400
+    fused_xml: list[dict[str, Any]],
+    width: int = 1080,
+    height: int = 2400,
+    compact: bool = False,
 ) -> tuple[str, list[dict[str, Any]], list[str]]:
     """Formats fused XML hierarchy into a minimal list with sequence numbers,
 
     and returns structured element metadata & labels for drawing/validation.
+
+    ``compact`` (the Flash runner's token-lean form) keeps the same elements and
+    indices semantics but: drops system status-bar nodes, writes
+    ``[n] "text" l,t,r,b`` instead of ``[n] Text: 'text' | Bounds: [l,t][r,b]``,
+    prints ``checked``/``enabled`` only when they carry information (a checkable
+    control, a disabled one), shortens the overlap warning, and appends unlabeled
+    clickable controls (``[n] (icon) l,t,r,b``) so they can be addressed by index.
     """
     lines = []
     elements = []
@@ -388,7 +428,18 @@ def format_minimal_list_with_elements(
         n_top = int(max(0, min(1000, top * 1000 / height)))
         n_right = int(max(0, min(1000, right * 1000 / width)))
         n_bottom = int(max(0, min(1000, bottom * 1000 / height)))
+        if compact:
+            return f"{n_left},{n_top},{n_right},{n_bottom}"
         return f"[{n_left},{n_top}][{n_right},{n_bottom}]"
+
+    def quote(value: str) -> str:
+        return '"' + value.replace('"', "'").replace("\n", " ") + '"'
+
+    if compact:
+        fused_xml = [
+            n for n in fused_xml
+            if not _is_status_bar_node(n, height, parse_bounds(n.get("bounds")))
+        ]
 
     def is_duplicate(text_val: str, cx: int, cy: int) -> bool:
         text_clean = text_val.strip()
@@ -419,7 +470,10 @@ def format_minimal_list_with_elements(
                         continue
 
                     norm_bounds = normalize_bounds(left, top, right, bottom)
-                    lines.append(f"[{idx}] OCR Text: '{ocr['text']}' | Bounds: {norm_bounds}")
+                    if compact:
+                        lines.append(f"[{idx}] ocr {quote(ocr['text'])} {norm_bounds}")
+                    else:
+                        lines.append(f"[{idx}] OCR Text: '{ocr['text']}' | Bounds: {norm_bounds}")
                     items_bounds.append((idx, (left, top, right, bottom)))
 
                     elements.append(
@@ -467,18 +521,32 @@ def format_minimal_list_with_elements(
 
             norm_bounds = normalize_bounds(left, top, right, bottom)
             kind = "Text" if text.strip() else "Hint"
-            line = f"[{idx}] {kind}: '{shown}' | Bounds: {norm_bounds}"
+            checkable = str(node.get("checkable") or "").strip().lower() == "true"
+            if compact:
+                prefix = "" if text.strip() else "hint "
+                line = f"[{idx}] {prefix}{quote(shown)} {norm_bounds}"
+                # Only informative state: ON/OFF of a checkable control (#187),
+                # and a disabled control. Defaults (enabled, unchecked) are noise.
+                if checkable or str(node.get("checked") or "").strip().lower() == "true":
+                    line += f" checked:{state_token(node.get('checked'))}"
+                if str(node.get("enabled") or "").strip().lower() == "false":
+                    line += " enabled:false"
+                if error:
+                    line += f" error:{quote(error)}"
+            else:
+                line = f"[{idx}] {kind}: '{shown}' | Bounds: {norm_bounds}"
             # Explicit XML state for stateful controls: an ON and an OFF
             # labeled Switch are otherwise identical text (#187). Absent or
             # invalid attributes render as '?' — unknown, not implicitly OFF.
-            checkable = str(node.get("checkable") or "").strip().lower() == "true"
-            if checkable or node.get("checked") is not None:
+            if compact:
+                pass
+            elif checkable or node.get("checked") is not None:
                 line += " | " + " ".join(
                     f"{a}:{state_token(node.get(a))}" for a in ("checked", "enabled")
                 )
             elif str(node.get("enabled") or "").strip().lower() == "false":
                 line += " | enabled:false"
-            if error:
+            if error and not compact:
                 line += f" | Error: '{error}'"
             lines.append(line)
             items_bounds.append((idx, (left, top, right, bottom)))
@@ -507,7 +575,95 @@ def format_minimal_list_with_elements(
             idx += 1
 
     lines = _inject_mutual_occlusion_warnings(lines, items_bounds, elements=elements)
+    if compact:
+        lines = [
+            re.sub(r" \(WARNING: may overlap with (.+), possible occlusion\)$", r" (overlaps \1, may be occluded)", ln)
+            for ln in lines
+        ]
+        # Unlabeled controls last, after the occlusion pass: an icon drawn over
+        # a card is expected layout, and the guard must not start blocking
+        # labeled targets because of them.
+        icon_lines, icon_elements = _unlabeled_controls(
+            fused_xml, width, height, elements, start_idx=idx, normalize_bounds=normalize_bounds
+        )
+        lines.extend(icon_lines)
+        elements.extend(icon_elements)
+        labels.extend(str(el["index"]) for el in icon_elements)
     return "\n".join(lines), elements, labels
+
+
+def _unlabeled_controls(
+    fused_xml: list[dict[str, Any]],
+    width: int,
+    height: int,
+    listed: list[dict[str, Any]],
+    *,
+    start_idx: int,
+    normalize_bounds: Any,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Clickable controls with no text, hint or description (back arrows, "+",
+    search fields, toggles), as compact lines plus element records.
+
+    Skipped: containers (too large, or holding an already listed element's
+    center), slivers, and a wrapper that repeats the center of a control
+    already taken.
+    """
+    lines: list[str] = []
+    found: list[dict[str, Any]] = []
+    screen_area = max(1, width * height)
+    listed_centers = [el["center"] for el in listed if el.get("center")]
+    idx = start_idx
+    for node in fused_xml:
+        if len(found) >= _MAX_ICON_LINES:
+            break
+        if (node.get("text") or node.get("content-desc") or node.get("hint") or "").strip():
+            continue
+        if node.get("ocr_elements") or node.get("ocr_virtual"):
+            continue
+        cls = str(node.get("class") or "")
+        if not (_is_truthy(node.get("clickable")) or _is_truthy(node.get("long-clickable")) or "EditText" in cls):
+            continue
+        bounds = parse_bounds(node.get("bounds"))
+        if not bounds:
+            continue
+        left, top, right, bottom = bounds
+        left, top = max(0, left), max(0, top)
+        right, bottom = min(width, right), min(height, bottom)
+        w, h = right - left, bottom - top
+        if w < _ICON_MIN_SIDE_PX or h < _ICON_MIN_SIDE_PX:
+            continue
+        if w * h > screen_area * _ICON_MAX_AREA_FRACTION:
+            continue
+        if _is_status_bar_node(node, height, (left, top, right, bottom)):
+            continue
+        if any(left <= cx <= right and top <= cy <= bottom for cx, cy in listed_centers):
+            continue
+        cx, cy = get_center_coordinates(left, top, right, bottom)
+        if any(abs(cx - f["center"][0]) < 8 and abs(cy - f["center"][1]) < 8 for f in found):
+            continue
+        kind = _icon_kind(node)
+        line = f"[{idx}] ({kind}) {normalize_bounds(left, top, right, bottom)}"
+        if kind == "toggle":
+            line += f" checked:{str(node.get('checked') or '?').strip().lower()}"
+        if str(node.get("enabled") or "").strip().lower() == "false":
+            line += " enabled:false"
+        lines.append(line)
+        element = {
+            "index": idx,
+            "center": [cx, cy],
+            "text": "",
+            "bounds": [left, top, right, bottom],
+            "class": node.get("class"),
+            "resource_id": node.get("resource-id"),
+            "is_ocr": False,
+            "is_icon": True,
+        }
+        for state_attr in ("checked", "enabled", "selected", "package"):
+            if node.get(state_attr) is not None:
+                element[state_attr] = node.get(state_attr)
+        found.append(element)
+        idx += 1
+    return lines, found
 
 
 def crop_and_annotate_target(

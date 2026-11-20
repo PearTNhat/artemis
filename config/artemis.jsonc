@@ -169,7 +169,7 @@
       },
       // 🔤 Local OCR (ONNX Runtime on this PC: RapidOCR detector + PaddleOCR Latin v5 recognizer)
       // Reads the screenshot the phone already sends (no extra transfer), ~0.5 s/screen on CPU.
-      // OCR lines appear in the UI list as "[n] OCR Text: '...'" so the AI can target them by index.
+      // OCR lines appear in the UI list as "[n] ocr \"...\"" (compact) so the AI can target them by index.
       // English + basic accents; Vietnamese hook/dot-below tones need a Vietnamese rec model (rec_model_path).
       "ocr": {
         "mode": "auto", // 'off' | 'auto' (only when the accessibility tree is poor: games, canvas, WebView) | 'always' (also banners/images; +~0.5 s per observation)
@@ -177,6 +177,10 @@
         "threads": 4 // ONNX Runtime CPU threads (more is slower on hybrid P/E-core CPUs)
         // "rec_model_path": "/path/to/model.onnx", "rec_keys_path": "/path/to/dict.txt" // optional custom recognizer
       },
+      // 📋 UI element list sent to the AI: 'compact' = no status bar, no default states,
+      // '[n] "text" l,t,r,b', plus unlabeled buttons/icons as '[n] (icon) l,t,r,b' (index-tappable).
+      // Measured on 3 trace screens: ~63% fewer characters than 'full' (the historical format).
+      "element_list": "compact",
       // 🧠 Step Summarizer: Asynchronous visual context compressor
       // Summarizes intermediate steps in background without blocking the runner,
       // replacing images only after strictly objective, high-density summaries are ready.

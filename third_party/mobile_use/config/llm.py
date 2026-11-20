@@ -63,6 +63,10 @@ class LLM(BaseModel):
     reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
     include_thoughts: bool | None = None
     enable_grounding: bool | None = None
+    max_tokens: int | None = None
+    """Cap on completion tokens (a runaway answer cannot stall a turn)."""
+    media_resolution: Literal["low", "medium", "high"] | None = None
+    """Gemini: tokens per input image (low ~260, medium ~560); others ignore it."""
 
     def validate_provider(self, name: str) -> None:
         """Ensure the required API key or credentials exist in settings for this provider."""

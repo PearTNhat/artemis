@@ -132,6 +132,21 @@ Quy tắc lọc (quan trọng khi tối ưu):
 - `_inject_mutual_occlusion_warnings` chèn cảnh báo khi các phần tử đè lên nhau (và đặt `occluded=True` trên element). **Bỏ qua cặp có node OCR ảo** (`ocr_virtual`): chữ đọc từ pixel luôn nằm trên phần tử vẽ ra nó, đó không phải bị che.
 - `elements[i]["center"]` (pixel thật) được lưu vào `state.indexed_elements` để dịch `target=index` sau này.
 
+**Dạng gọn (`compact=True`) — Flash khi `agent.flash.element_list = "compact"` (mặc định trong config dự án, 2026-11-20).** `FlashRunner.__init__` đặt `ctx.flash_compact_list = True`; `observe()` truyền `compact` vào formatter (Pro không đặt cờ → giữ dạng cũ). Cùng phần tử/chỉ số, khác:
+
+```
+[1] "Search" 100,100,600,130
+[2] hint "Type a message" 100,900,700,940
+[3] "Wi-Fi" 40,350,300,380 checked:true
+[4] ocr "Play" 400,400,600,425
+[5] "Ad" 372,395,406,410 (overlaps [4], may be occluded)
+[6] (icon) 10,95,90,135          ← control không nhãn, chọn bằng index
+```
+- Bỏ node `com.android.systemui` nằm trọn trong dải status bar (đáy ≤ 6% chiều cao).
+- Chỉ ghi `checked:` cho control checkable (hoặc đang checked) và `enabled:false`; bỏ `checked:false enabled:true` mặc định.
+- **Control không nhãn** (`clickable`/`long-clickable`/`EditText`, không text/desc/hint) thêm cuối list dạng `(icon|button|input|toggle)`; bỏ container (> 15% màn hình, hoặc chứa tâm phần tử đã liệt kê), mẩu < 12px, wrapper trùng tâm; tối đa 40. Thêm **sau** bước cảnh báo che khuất → không tạo cờ `occluded` mới cho Occlusion Guard. Element có `is_icon=True`, `text=""`.
+- Đo trên 3 màn `traces/`: 3201→1174, 5490→2033, 3481→1267 ký tự (~−63%, đã gồm dòng icon). Prompt `flash_runner.md` mô tả dạng tương ứng (biến `compact_list`).
+
 ---
 
 ## 3. Tầng 3 — Đóng gói thông điệp gửi AI (Prompt)
@@ -320,7 +335,7 @@ Sau Validator → **Summarizer** (tóm tắt ảnh step chạy nền) → **Conv
 |---|---|---|---|
 | O1 | **Settle cộng dồn:** perception/observe sleep 0.4s rồi `AdbDriver.get_screen_data()` sleep thêm 0.3s (controller không truyền `skip_settling`). Ngay cả nhánh "skip settling" vẫn mất 0.3s. | `unified_controller.py:165`, `adb_driver.py:129` | Truyền `skip_settling=True` từ controller vì tầng trên đã tự settle → tiết kiệm 0.3s/lần chụp. |
 | O2 | **Gọi đồng bộ trong async:** `self._ui_adb_client.get_screen_data()` (HTTP timeout 8s) chạy trực tiếp trong coroutine → chặn event loop (ảnh hưởng video recording, background task, MCP owner loop). | `adb_driver.py:141` | Bọc `asyncio.to_thread(...)`. |
-| O3 | **Icon không nhãn bị loại khỏi list** → AI phải dùng toạ độ → Pro luôn đi Pixel Safety Net (thêm 1 LLM call). | `visualization.py:363` | Đưa thêm phần tử `clickable=true` không text với nhãn tổng quát (`[n] Icon: <class/resource-id> | Bounds`) để AI chọn bằng index. |
+| ~~O3~~ | ✅ **Flash xong 2026-11-20** (dạng gọn, mục 2.3: `[n] (icon) l,t,r,b`). Pro không làm. Cũ: **Icon không nhãn bị loại khỏi list** → AI phải dùng toạ độ → Pro luôn đi Pixel Safety Net (thêm 1 LLM call). | `visualization.py:363` | Đưa thêm phần tử `clickable=true` không text với nhãn tổng quát (`[n] Icon: <class/resource-id> | Bounds`) để AI chọn bằng index. |
 | O4 | **Safety Net XML dump hierarchy lần nữa** ngay sau perception (thường chỉ cách vài giây). | `precondition_xml.py:114` | Có thể dùng hash nhanh/hoặc bỏ qua khi thời gian từ perception < ngưỡng và action không có hiệu ứng ngoài. Cần đo trước. |
 | O5 | **Tap qua `adb shell input`** (spawn process mỗi lần) trong khi helper đã có RPC `tap`/`swipe`. | `adb_driver.py:239`, `accessibility_client.py:413` | Ưu tiên RPC helper (đã có kết nối HTTP), fallback adb shell. |
 | O6 | **Flash lưu ảnh đồng bộ** (`get_or_create_image`: sha256 + ghi đĩa) trong `observe()`, Pro thì chạy nền. | `observation.py:135` | Offload `asyncio.to_thread` như Pro. |
@@ -339,7 +354,8 @@ Sau Validator → **Summarizer** (tóm tắt ảnh step chạy nền) → **Conv
 | Capture | `artemis/clients/accessibility_client.py`, `artemis/clients/screen_client_factory.py`, `artemis/drivers/android/adb_driver.py`, `third_party/mobile_use/controllers/unified_controller.py`, `artemis/runtime/helper_manager.py` |
 | Perception | `artemis/graph/perception.py`, `artemis/mcp/observation.py`, `artemis/utils/ocr_xml_fusion.py`, `artemis/utils/local_ocr.py`, `artemis/utils/visualization.py` (`format_minimal_list_with_elements`) |
 | Prompt | `artemis/agents/operator/prompts.py`, `artemis/agents/operator/operator.json`, `artemis/memory/transcript.py`, `artemis/memory/chunking.py`, `artemis/agents/flash/runner.py` (`_build_tail`), `artemis/agents/flash/flash_runner.md` |
-| LLM | `artemis/services/llm.py`, `artemis/config/model_routing.py` |
+| LLM | `artemis/services/llm.py`, `artemis/config/model_routing.py`, `artemis/llm/router.py` (`media_resolution`, `max_tokens`) |
+| Đo đạc | `artemis/utils/turn_log.py` (`turns.jsonl`, tự động bật theo `ARTEMIS_DEBUG_AI_IO`), `artemis/utils/ai_io_logger.py` |
 | Dịch lệnh | `artemis/agents/operator/operator.py`, `artemis/mcp/action_names.py`, `artemis/mcp/action_specs.py`, `artemis/mcp/action_manifest.py`, `artemis/mcp/action_executor.py` |
 | Thực thi | `artemis/mcp/action_session.py`, `artemis/mcp/action_server.py`, `artemis/mcp/actuators/adb.py`, `artemis/mcp/screen_effect.py` |
 | An toàn | `artemis/agents/validator/*`, guards trong `artemis/mcp/action_executor.py` |
@@ -357,3 +373,5 @@ Sau Validator → **Summarizer** (tóm tắt ảnh step chạy nền) → **Conv
 | 2026-11-20 | Thu nhỏ ảnh gửi AI ở Flash (O8): `agent.flash.model_image` (`max_side` 1280, q75 trong config dự án) | `model_image.py` (mới), `flash/runner.py`, `config/agent.py`, `config/artemis.jsonc` | Tầng 3 (Flash): ảnh trong tail ~76 KB thay ~203 KB (−63%); OCR/guard/trace vẫn dùng ảnh gốc; toạ độ không đổi. |
 | 2026-11-20 | OCR cục bộ ONNX cho Flash (RapidOCR + PaddleOCR Latin v5), `agent.flash.ocr.mode` = off/auto/always; ghép `xml_first`; node OCR ảo; bỏ cảnh báo che khuất cho OCR ảo. Sửa thiếu `import time` trong `operator.py` (Pro crash từ commit `0f7693b`). | `local_ocr.py` (mới), `observation.py`, `ocr_xml_fusion.py`, `visualization.py`, `config/agent.py`, `config/artemis.jsonc`, `pyproject.toml`, `operator.py` | Tầng 2 (Flash): màn hình XML nghèo nay có `[n] OCR Text` kèm toạ độ → AI chọn bằng index thay vì đoán toạ độ; `target_text` tìm được chữ OCR. Pro không đổi hành vi (vẫn Google Vision khi có key). |
 | 2026-11-20 | Thêm cơ chế toggle quay video màn hình (`ARTEMIS_VIDEO_RECORDING_ENABLED`) trên UI | `system.py`, `system.service.ts`, `home.component.html`, `.env` | Thêm nút Record ON/OFF trên UI cho phép bật/tắt quay video qua scrcpy, giúp giảm tải CPU/mạng và tăng tốc phản hồi khi không cần video. |
+| 2026-11-20 | List phần tử dạng gọn cho Flash (`agent.flash.element_list="compact"`) + liệt kê control không nhãn (O3); prompt Flash: ghi chú 1–2 câu (~40 từ), milestone 1 dòng; `media_resolution`/`max_tokens` cấu hình được theo node (Gemini); preset Qwen ảnh 768 | `visualization.py`, `observation.py`, `flash/runner.py`, `flash_runner.md`, `config/agent.py`, `llm/router.py`, `services/llm.py`, `third_party/mobile_use/config/llm.py`, `config/artemis*.jsonc` | Tầng 2–3 (Flash): token list −36% (Gemini 1597→1024), nút "+"/back/icon có index thay vì đoán toạ độ; Qwen: prompt 2253→1297 token, prefill 14→7 s, vẫn 13/13. Pro không đổi (không đặt cờ). |
+| 2026-11-20 | `media_resolution` của Gemini gửi **theo từng ảnh** (block `{"type":"image","base64",…,"media_resolution"}`) vì langchain-google-genai 4.3.4 bỏ qua tham số cấp model với Gemini 3; Flash đọc từ node `operator` (chỉ provider `google`). Thêm `turns.jsonl` (1 dòng JSON/turn: `llm_s`, token vào/cache/ra, cỡ list, từng tool call với điểm bấm 0–1000, `no_effect`, `action_s`, `observe_s`), tự động bật khi bật `ARTEMIS_DEBUG_AI_IO`; executor thêm `no_effect` vào metadata | `flash/runner.py` (`_image_block`, `_start_turn_record`, `_write_turn_record`), `utils/turn_log.py` (mới), `utils/ai_io_logger.py`, `mcp/action_executor.py` | Tầng 3 (Flash, Gemini): token ảnh 1081→267 khi `low`; provider khác giữ `image_url`. Đo đạc: phân tích điểm nghẽn từ `traces/<session>/turns.jsonl` thay vì lọc log. |

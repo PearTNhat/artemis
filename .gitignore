@@ -89,6 +89,7 @@ traces/
 scratch/
 .artemis_paused
 .artemis_server.json
+logs/
 *.log
 data_engine.db
 data_engine.db-journal

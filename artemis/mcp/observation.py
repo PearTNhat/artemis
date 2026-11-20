@@ -145,7 +145,9 @@ async def observe(
             else xml_hierarchy
         )
         fused_xml = fuse_ocr_with_xml(source, ocr_results, xml_first=xml_first)
-        minimal_list_str, elements, _ = format_minimal_list_with_elements(fused_xml, width, height)
+        minimal_list_str, elements, _ = format_minimal_list_with_elements(
+            fused_xml, width, height, compact=getattr(ctx, "flash_compact_list", False) is True
+        )
     except Exception as e:
         logger.error(f"Failed to fetch or fuse UI hierarchy: {e}")
         minimal_list_str = "Not available due to hierarchy error."

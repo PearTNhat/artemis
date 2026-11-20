@@ -97,6 +97,8 @@ async def test_fallback_observation_renders_the_indexed_ui_list(mock_context, tm
     (never the raw element dict repr) and refresh the state like it."""
     with patch("artemis.controllers.unified_controller.get_driver"):
         runner = FlashRunner(mock_context, goal="g")
+    # Pin the historical list format; the compact form has its own tests.
+    mock_context.flash_compact_list = False
     runner.controller = Mock()
     runner.controller.get_screen_data = AsyncMock(
         return_value=_screen(

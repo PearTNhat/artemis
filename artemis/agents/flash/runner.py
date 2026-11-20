@@ -76,6 +76,8 @@ from artemis.config import (
     load_agent_config,
 )
 from artemis.config.agent import FlashModelImageConfig
+from artemis.config.llm import get_default_llm_config
+from artemis.utils import turn_log
 from artemis.context import ArtemisContext
 from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.data_engine.trace import trace
@@ -205,6 +207,20 @@ class _TurnRecord:
         return None
 
 
+def _gemini_image_resolution(ctx: ArtemisContext) -> str | None:
+    """'low' / 'medium' / 'high' when the operator node (the Flash model) is a
+    Gemini model with ``media_resolution`` set; None otherwise."""
+    try:
+        llm_cfg = getattr(ctx, "llm_config", None) or get_default_llm_config()
+        node = llm_cfg.get_agent("operator")
+        level = getattr(node, "media_resolution", None)
+        if level in ("low", "medium", "high") and str(getattr(node, "provider", "")) == "google":
+            return level
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
+    return None
+
+
 class FlashRunner:
     """Reactive, ultra-fast agent execution loop supporting all VLM providers."""
 
@@ -218,6 +234,8 @@ class FlashRunner:
             self.fast_burst = getattr(cfg.flash, "fast_burst", False)
             self.step_summarizer_cfg = cfg.flash.step_summarizer
             self.model_image_cfg = getattr(cfg.flash, "model_image", FlashModelImageConfig())
+            self.compact_list = getattr(cfg.flash, "element_list", "full") == "compact"
+            self.media_resolution = _gemini_image_resolution(ctx)
             self.memory_runtime_cfg = cfg.memory.runtime
             self.transcript_cfg = cfg.memory.transcript
             self.chunking_cfg = cfg.memory.chunking
@@ -227,10 +245,18 @@ class FlashRunner:
             self.fast_burst = False
             self.step_summarizer_cfg = StepSummarizerConfig()
             self.model_image_cfg = FlashModelImageConfig()
+            self.compact_list = False
+            self.media_resolution = None
             self.memory_runtime_cfg = MemoryRuntimeConfig()
             self.transcript_cfg = MemoryTranscriptConfig()
             self.chunking_cfg = None
 
+        # Observations made during this run (the runner's own and the executor's)
+        # format the element list in the compact form; Pro never sets the flag.
+        try:
+            ctx.flash_compact_list = self.compact_list
+        except (AttributeError, TypeError, ValueError):
+            pass
         self.controller = UnifiedMobileController(ctx)
         # ``agent_name="flash"`` makes ask_explorer follow ``explorer.flash_mode``
         # (the Flash profile knob) instead of the Pro profile's tier.
@@ -374,7 +400,11 @@ class FlashRunner:
         prompt_path = Path(__file__).parent / "flash_runner.md"
         prompt_template = prompt_path.read_text(encoding="utf-8")
         available_tools = frozenset(t.name for t in tools_declaration)
-        return Template(prompt_template).render(goal=self.goal, available_tools=available_tools)
+        return Template(prompt_template).render(
+            goal=self.goal,
+            available_tools=available_tools,
+            compact_list=getattr(self, "compact_list", False),
+        )
 
     # ------------------------------------------------------------------
     # Per-turn helpers (observe / think)
@@ -462,9 +492,7 @@ class FlashRunner:
                 img_bytes = shrink_for_model(img_bytes, image_cfg.max_side, image_cfg.jpeg_quality)
             img_b64 = base64.b64encode(img_bytes).decode("utf-8")
             blocks.append({"type": "text", "text": "--- Current Screenshot ---"})
-            blocks.append(
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
-            )
+            blocks.append(self._image_block(img_b64))
         if xml_list:
             blocks.append({"type": "text", "text": f"{PRO_UI_LIST_MARKER}\n{xml_list}"})
         ephemeral: list[int] = []
@@ -555,6 +583,25 @@ class FlashRunner:
                     }
         return step_token_usage
 
+    def _image_block(self, img_b64: str) -> dict:
+        """The screenshot content block for the model.
+
+        With a Gemini ``media_resolution`` configured on the operator node, the
+        image goes out as a standard ``image`` block carrying a per-part
+        resolution (langchain-google-genai ignores the model-level setting on
+        Gemini 3; per part, 'low' cuts ~1080 image tokens to ~270). Otherwise the
+        historical ``image_url`` data URL, which every provider understands.
+        """
+        level = getattr(self, "media_resolution", None)
+        if level:
+            return {
+                "type": "image",
+                "base64": img_b64,
+                "mime_type": "image/jpeg",
+                "media_resolution": f"MEDIA_RESOLUTION_{level.upper()}",
+            }
+        return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
+
     def _estimate_token_usage(self, messages: list[BaseMessage], raw_text: str) -> dict:
         """Approximates token usage from message sizes when metadata is absent."""
         calc_prompt_chars = 0
@@ -566,7 +613,7 @@ class FlashRunner:
             elif isinstance(c, list):
                 for block in c:
                     if isinstance(block, dict):
-                        if block.get("type") == "image_url" or "image_url" in block:
+                        if block.get("type") in ("image_url", "image") or "image_url" in block:
                             calc_images += 1
                         else:
                             calc_prompt_chars += len(str(block.get("text", "")))
@@ -932,6 +979,10 @@ class FlashRunner:
                     action_dict=action_dict,
                 )
 
+            rec = getattr(self, "_turn_rec", None)
+            if rec is not None:
+                rec["actions"].append(turn_log.action_entry(name, args, exec_result))
+
             if name in action_names:
                 turn.step_keys.append(str(recorded_step_id) if recorded_step_id else str(tc_id))
                 turn.actions.append((name, exec_result.status, exec_result.text_summary))
@@ -982,6 +1033,11 @@ class FlashRunner:
 
         except Exception as e:
             logger.error(f"Error executing tool {name}: {e}")
+            rec = getattr(self, "_turn_rec", None)
+            if rec is not None:
+                rec["actions"].append(
+                    {"tool": name, "args": turn_log.compact_args(args), "status": "error", "msg": str(e)[:160]}
+                )
             if name in action_names:
                 turn.step_keys.append(str(tc_id))
                 turn.actions.append((name, "error", f"Error executing tool {name}: {e}"))
@@ -1444,12 +1500,61 @@ class FlashRunner:
         )
         return timing
 
+    def _start_turn_record(self, turn: int, response, xml_list: str | None) -> None:
+        """Opens this turn's ``turns.jsonl`` record (no-op unless enabled)."""
+        self._turn_rec = None
+        if not turn_log.turn_log_enabled():
+            return
+        t = getattr(self, "_turn_timing", {}) or {}
+        model = getattr(self._llm, "model", None) or getattr(self._llm, "model_name", None)
+        if not isinstance(model, str):
+            try:
+                model = (getattr(self.ctx, "llm_config", None) or get_default_llm_config()).get_agent("operator").model
+            except Exception:  # pylint: disable=broad-exception-caught
+                model = None
+        self._turn_rec = {
+            "turn": turn,
+            "model": model,
+            "llm_s": t.get("llm_s"),
+            "prep_s": t.get("prep_s"),
+            **turn_log.usage_fields(response),
+            "list_chars": len(xml_list or ""),
+            "list_format": "compact" if getattr(self, "compact_list", False) else "full",
+            "image_max_side": getattr(getattr(self, "model_image_cfg", None), "max_side", None),
+            "media_resolution": getattr(self, "media_resolution", None),
+            "actions": [],
+        }
+
+    def _write_turn_record(self, timing: dict, total_s: float, action_s: float, observe_s: float) -> None:
+        """Closes and appends this turn's record."""
+        rec = getattr(self, "_turn_rec", None)
+        self._turn_rec = None
+        if rec is None:
+            return
+        rec.update(
+            total_s=round(total_s, 3),
+            action_s=round(action_s, 3),
+            observe_s=round(observe_s, 3),
+            other_s=round(max(0.0, total_s - (timing.get("llm_s") or 0) - action_s - observe_s
+                              - (timing.get("prep_s") or 0)), 3),
+        )
+        engine = getattr(self.ctx, "data_engine", None)
+        directory = getattr(engine, "base_dir", None) if engine is not None else None
+        if directory is None:
+            from artemis.config.paths import get_traces_dir
+
+            directory = get_traces_dir() / "flash_turns"
+        path = turn_log.append_turn(directory, rec)
+        if path and rec.get("turn") == 1:
+            logger.info(f"Turn log: {path}")
+
     def _log_turn_timing(self, turn: int, total_s: float) -> None:
         """One log line per turn: where the time went."""
         t = getattr(self, "_turn_timing", {}) or {}
         action_s = getattr(self, "_turn_action_s", 0.0)
         observe_s = getattr(self, "_turn_observe_s", 0.0)
         self._turn_action_s = self._turn_observe_s = 0.0
+        self._write_turn_record(t, total_s, action_s, observe_s)
         agy = t.get("agy") or {}
         agy_note = (
             f" (agy: {agy.get('model_calls')} model calls,"
@@ -1652,6 +1757,7 @@ class FlashRunner:
             )
 
             self._record_llm_trace(step_token_usage, raw_text)
+            self._start_turn_record(turns, response, current_xml_list)
 
             tool_calls = self._resolve_tool_calls(response, raw_text)
 

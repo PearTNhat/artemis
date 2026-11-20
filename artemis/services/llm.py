@@ -983,6 +983,8 @@ def _resolve_endpoint(
         reasoning_effort=_get_val(cfg, "reasoning_effort", str),
         include_thoughts=_get_val(cfg, "include_thoughts", bool),
         enable_grounding=_get_val(cfg, "enable_grounding", bool) or False,
+        max_tokens=_get_val(cfg, "max_tokens", int),
+        media_resolution=_get_val(cfg, "media_resolution", str),
     )
 
 

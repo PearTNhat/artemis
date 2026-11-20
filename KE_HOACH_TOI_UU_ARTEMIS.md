@@ -28,6 +28,15 @@
   - **Khóa cứng chuẩn mực trong `AGENTS.md`:** Thêm các mục 2.7, 2.8, 2.9 cấm hardcode tên nút/từ khóa, bắt buộc tư duy theo UI Pattern và thuộc tính Accessibility chuẩn.
 - **Kiểm thử hồi quy:** Vượt qua 100% các bộ unit test (toàn bộ 263 tests trong `mcp` và `agents/flash`). Test mới: bỏ chờ ngay khi màn hình đã đổi cho `my_action`, giữ chờ cho `external`, chặn lặp qua thao tác xen giữa, lọc text cắt mép màn hình/ẩn.
 
+### 📌 Bản 3.7 (Gói gửi AI gọn cho Flash — list gọn, O3, output ngắn, 2026-11-20)
+- **List phần tử dạng gọn** (`agent.flash.element_list="compact"`): bỏ status bar + trạng thái mặc định, `[n] "text" l,t,r,b`, cảnh báo che khuất ngắn; chỉ Flash (cờ `ctx.flash_compact_list`), Pro giữ dạng cũ.
+- **O3 — control không nhãn có index** (`[n] (icon|button|input|toggle) l,t,r,b`): thêm sau bước cảnh báo che khuất, bỏ container/wrapper trùng.
+- **Prompt Flash**: ghi chú 1–2 câu (~40 từ), milestone 1 dòng; mô tả list theo dạng đang dùng.
+- **LLM theo node**: `media_resolution` (Gemini: low/medium/high) và `max_tokens` đọc từ config node; preset `artemis.qwen.jsonc` ảnh 768, `artemis.gemini.jsonc` có gợi ý `media_resolution`.
+- Số liệu Mục 1.11; 10 unit test mới (`tests/unit/mcp/test_compact_element_list.py`); hồi quy 852 pass.
+- **`media_resolution` theo từng ảnh** (langchain bỏ qua tham số cấp model với Gemini 3) — đo thật: `low` thêm lượt, không khuyến nghị.
+- **`turns.jsonl`** (tự động bật khi bật `ARTEMIS_DEBUG_AI_IO`): 1 dòng/turn với thời gian model/action/chụp, token, cỡ list, từng tool call (điểm bấm, `no_effect`). 7 test mới; hồi quy 863 pass.
+
 ### 📌 Bản 3.6 (Thu nhỏ ảnh gửi AI ở Flash — O8, 2026-11-20)
 - **`artemis/utils/model_image.py` (mới) — `shrink_for_model`:** cạnh dài ≤ `max_side`, resize Lanczos (không làm mờ), JPEG `jpeg_quality`; ảnh đã nhỏ giữ nguyên; lỗi giải mã → gửi ảnh gốc; nhớ kết quả frame gần nhất.
 - **Chỉ ảnh trong tail gửi AI** (`FlashRunner._build_tail`) bị thu nhỏ; OCR, guard, so sánh màn hình, trace vẫn dùng ảnh gốc. Toạ độ 0–1000 nên không ảnh hưởng dịch lệnh.
@@ -289,6 +298,63 @@ Code đã có OCR `auto` + ảnh 1280 q75; model `agy:gemini-3.8-flash-low`; t�
 
 Phát hiện: (1) **vi phạm quy tắc 2.8 (trạng thái có sẵn)** — AI thấy `Basket • 1 Item` nhưng không kiểm tra món có khớp đề; (2) AI tự đổi chỉ dẫn giao hàng ("Not applicable", "Meet at lobby") để qua form bắt buộc; (3) `hopper` tốn 7–9 s mỗi lần mở app chỉ để đổi tên app → package; (4) `wait_for_screen_change(after=my_action)` có lần mất 28.8 s mới "ổn định" (màn mở đầu có banner động); (5) token tăng ~3k/lượt và **không có cache**: agy giữ nguyên mọi tin nhắn và mọi ảnh đã nhận trong phiên, nên việc ARTEMIS tự xoá ảnh/list cũ không làm agy nhỏ lại; (6) `wait_for_screen_change` tổng ~44 s/153 s (USB): mỗi lần "nhìn" là một `/snapshot` đầy đủ ~0.44 s, judge 1–2 lần + settle tới 6 lần.
 
+### 1.9. Cùng một màn hình, gửi kiểu nào nhanh + đúng? — Gemini API `gemini-3.5-flash-lite`, free tier (2026-11-20)
+
+Màn Grab kết quả "phở bò" (`traces/images/7db633f8c6b3…`, 1280×2772), câu hỏi đọc 6 món + giá, 2 quán (sao, số đánh giá, phí ship cũ/mới, phút), "Min. spend" chữ nhỏ → 13 tiêu chí. Mỗi kiểu 2 lần. Script: scratchpad `bench_payload.py`.
+
+| Kiểu gửi | Ảnh (KB) | Token ảnh | Token chữ | Thời gian | Đúng |
+|---|---|---|---|---|---|
+| Ảnh gốc + list XML | 363 | 1078 | 1597 | 2.3–3.3 s | 13/13 |
+| Ảnh 1280 q75 + list XML (**hiện tại**) | 112 | 1078 | 1597 | 2.1–3.0 s | 13/13 |
+| Ảnh 960 q60 + list XML | 59 | 1078 | 1597 | 2.0–2.5 s | 13/13 |
+| Ảnh 768 q50 + list XML | 38 | 1078 | 1597 | 1.7–4.6 s | 13/13 |
+| Ảnh 1280 q75 + `mediaResolution=LOW` | 112 | **264** | 1597 | 2.5 s | 13/13 |
+| Ảnh 1280 q75 + list XML+OCR | 112 | 1078 | 2958 | 2.0–2.5 s | 13/13 |
+| Không ảnh, list XML+OCR | 0 | 0 | 2958 | 2.1–2.2 s | 12/13, 13/13 |
+| Chỉ ảnh, không list | 112 | 1078 | 85 | 2.0–2.1 s | 13/13 |
+
+Kết luận: (1) **token ảnh cố định ~1078 bất kể kích thước/độ nét** — nén ảnh chỉ giảm byte upload, không giảm token; chỉ `mediaResolution` giảm token ảnh (LOW −75%, vẫn đọc đủ trên màn này); (2) **list phần tử tốn token hơn ảnh** (XML 1597, thêm OCR +1361) → rút gọn list là chỗ giảm token lớn nhất; (3) thời gian ~2 s/lần chủ yếu theo số token output, chênh lệch input ở mức này nằm trong nhiễu; (4) gọi API trực tiếp ~2 s/lần so với ~5.7 s/lượt qua agy. Giới hạn: bài đọc, chưa đo bài chọn đúng phần tử để bấm (grounding).
+
+### 1.10. Cùng bài trên với Qwen công ty — `Qwen3.8-27B-UD-Q4_K_M.gguf:no_think` (llama.cpp, LAN, `cache_prompt=false`, 2026-11-20)
+
+| Kiểu gửi | Token vào | Prefill | Sinh (≈400 token) | Tổng chờ | Đúng |
+|---|---|---|---|---|---|
+| Ảnh 1280 q75 + XML (**hiện tại**) | 2253 | 10.7–11.0 s | 11.4 s | 28–65 s | 13/13 |
+| Ảnh 960 + XML | 1953 | 7.7 s | 11.1 s | 42–60 s | 12/13 |
+| **Ảnh 768 + XML** | 1797 | **6.4 s** | 11.3 s | 36–40 s | **13/13** |
+| Ảnh 640 + XML | 1713 | 5.8 s | 11.4 s | 49–53 s | 12/13 |
+| Không ảnh, chỉ XML | 1531 | 4.3 s | 11.9 s | 61 s | **6/13** |
+| Không ảnh, XML+OCR | 2904 | 7.3 s | 13.6 s | 68–70 s | 13/13 |
+| Ảnh 960 + XML+OCR | 3326 | 11.1 s | 10.7 s | 71–75 s | 13/13 |
+| Chỉ ảnh 960 | 514 | 4.6 s | 12.1 s | 48–68 s | 11/13 |
+
+Kết luận: (1) khác Gemini, **token ảnh Qwen tỉ lệ với số pixel** (1280→~720 token, 768→~270, 640→~180) và ảnh to tốn thêm thời gian bộ mã hoá ảnh → giảm pixel có tác dụng thật; 768 là điểm cân bằng trên màn này (lỗi 12/13 ở 960/640 là chữ nhỏ gạch ngang màu cam, có nhiễu); (2) **sinh output ~35 token/s → 400 token = 11 s**, chiếm phần lớn thời gian tính toán → output ngắn là đòn bẩy số 1 với Qwen; (3) prefill ~350 token/s → mỗi 1000 token chữ ≈ 3 s, nên list gọn + cache tiền tố (`cache_prompt`, system prompt cố định) rất quan trọng: system prompt Flash ~5k token ≈ 14 s nếu không cache; (4) bỏ ảnh là sai nhiều (XML thiếu giá/sao) → luôn gửi ảnh; (5) **tổng chờ 28–75 s ≫ prefill+sinh 16–22 s** → server dùng chung đang xếp hàng, cần hỏi đội vận hành số slot song song.
+
+### 1.11. Sau khi làm list gọn + control không nhãn (cùng màn, cùng câu hỏi, 3 lần/kiểu, 2026-11-20)
+
+| Model | Kiểu gửi | Token vào | Thời gian tính | Đúng |
+|---|---|---|---|---|
+| Gemini 3.5 Flash-Lite | Cũ: ảnh 1280 + list đầy đủ | 2675 (ảnh 1078 + chữ 1597) | 2.1 s | 13/13 ×3 |
+| Gemini 3.5 Flash-Lite | Mới: ảnh 1280 + list gọn | 2102 (chữ **1024**, −36%) | 1.7–2.4 s | 13/13 ×3 |
+| Gemini 3.5 Flash-Lite | Mới + `media_resolution=low` | **1288 (−52%)** | 1.4–3.3 s | 13/13 ×3 |
+| Qwen3.8-27B (server đang đông) | Cũ: ảnh 1280 + list đầy đủ | 2253 | prefill 13.6–14.9 s + sinh 14.7 s; 1 lần 503 "no capacity" | 13/13 ×2 |
+| Qwen3.8-27B | Mới: ảnh 768 + list gọn | **1297 (−42%)** | prefill **6.9–7.1 s** + sinh 14.3 s | 13/13 ×3 |
+
+**Task thật (2026-11-20, máy `25069PTEBG` qua ADB Wi-Fi, Gemini API `gemini-3.5-flash-lite` free tier, task chỉ đọc "mở Grab → Food → tìm pho → quán đầu → báo 3 món đầu", không bấm đặt hàng):**
+
+| Lần | Cấu hình | Thời gian task | Lượt | Model (tổng) | Token vào/lượt | Cache | Ghi chú |
+|---|---|---|---|---|---|---|---|
+| agy (1.8) | list đầy đủ, ảnh 1280 | 146.6 s | 10 | — | 24.7k → 53.4k | 0% | trước khi chuyển API |
+| Vòng 1 | Cũ: list đầy đủ | 73.4 s | 9 | — | 9.9k → 17.1k | 43% | `hopper` 1.5 s (agy 7–9 s) |
+| Vòng 1 | Mới: list gọn | 79.7 s | 12 | — | 10.1k → 18.1k | 45% | cuộn thêm 2 lần |
+| Vòng 2 (`turns.jsonl`) | Cũ: list đầy đủ | 96.1 s | 11 | 56.6 s (5.1 s/lượt) | 10.7k → 18.1k | 43% | — |
+| Vòng 2 | **Mới: list gọn** | **77.2 s** | 11 | **40.3 s (3.7 s/lượt)** | 10.1k → 18.4k | 44% | đúng quán, 3 món |
+| Vòng 2 | Mới + `media_resolution=low` (đã gửi thật theo từng ảnh) | 134.8 s | **16** | 90.5 s (5.7 s/lượt) | 9.3k → 14.4k | 58% | cuộn vùng nhỏ 8 lần, nhìn ảnh kém → **không dùng LOW** |
+
+Kết luận: (1) API key nhanh ~2× agy; (2) token vào mỗi lượt ~10k là **system prompt + khai báo 16 tool**, list chỉ chiếm vài trăm–1k token → giảm list không đổi nhiều token nhưng vòng 2 model nhanh hơn 1.4 s/lượt (cần thêm lần chạy để loại nhiễu mạng); (3) `low` giảm token nhưng làm model nhìn kém, thêm lượt → chậm hơn; (4) điểm nghẽn còn lại theo `turns.jsonl`: model ~52–59%, chụp màn hình sau action ~20–26%, action ~13–19%.
+
+List gọn có thêm 7 dòng control không nhãn (6 nút "+" thêm món + nút lọc) mà dạng cũ không có. Thời gian Gemini ở mức ~2 s do output (~400 token) quyết định; Qwen giảm nửa thời gian prefill. Chưa đo trên task thật (cần cắm máy).
+
 ## 2. TRẠNG THÁI TRIỂN KHAI (đến bản 3)
 
 | Hạng mục | Trạng thái | Ghi chú |
@@ -315,6 +381,7 @@ Phát hiện: (1) **vi phạm quy tắc 2.8 (trạng thái có sẵn)** — AI t
 | **E2.** Chuỗi xuyên màn hình | ✅ Xong | Đã hoàn thành trong **Trụ cột G** |
 | **F2.** `find_and_reveal`, `scroll_and_collect` | ❌ Chưa | |
 | **O8. Thu nhỏ ảnh gửi AI ở Flash** (`agent.flash.model_image`, 1280 q75) | ✅ Code xong (2026-11-20) | −63% dung lượng ảnh; còn phải đo `prompt_tokens` và độ chính xác trên task thật (Mục 1.7) |
+| **List gọn + O3 control không nhãn + output ngắn (Flash)** (`agent.flash.element_list`) | ✅ Code xong (2026-11-20) | Token list −36% (Gemini), Qwen prefill 14→7 s, 13/13 giữ nguyên (Mục 1.11); còn đo trên task thật |
 | **OCR cục bộ ONNX cho Flash** (RapidOCR + PaddleOCR Latin v5, `agent.flash.ocr`) | ✅ Xong (2026-11-20) | `auto` chỉ chạy khi XML nghèo; ghép `xml_first` + node OCR ảo; 19 unit test mới; tiếng Việt cần model riêng (Mục 1.6) |
 | Gộp PR upstream đợt 1 (#216, #244, #181, #171) | ✅ Xong | Xem Mục 11; 2635 unit tests passed |
 | Gộp PR upstream đợt 2 (#189, #217, #219, #221) | ❌ Chưa | Xung đột với code đã sửa, phải gộp tay |

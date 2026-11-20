@@ -435,6 +435,29 @@ async def set_debug_ai_io(payload: DebugAiIoRequest):
     return {"status": "success", "enabled": enabled}
 
 
+@router.get("/ai-io-log")
+async def get_ai_io_log(lines: int = 150):
+    """Retrieve the latest lines of the dedicated AI I/O debug log."""
+    from artemis.utils.ai_io_logger import get_ai_io_log_file_path
+
+    log_path = get_ai_io_log_file_path()
+    if not os.path.exists(log_path):
+        return {"exists": False, "path": log_path, "content": "Log file does not exist yet. Run an action with Debug AI I/O enabled."}
+
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+            tail_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+            return {
+                "exists": True,
+                "path": log_path,
+                "total_lines": len(all_lines),
+                "content": "".join(tail_lines),
+            }
+    except Exception as exc:
+        return {"exists": True, "path": log_path, "error": str(exc), "content": ""}
+
+
 class RecordingToggleRequest(BaseModel):
     enabled: bool
 
@@ -506,6 +529,7 @@ async def set_recording_status(payload: RecordingToggleRequest):
         app_logger.warning(f"Could not persist ARTEMIS_VIDEO_RECORDING_ENABLED to .env: {e}")
 
     return {"status": "success", "enabled": enabled}
+
 
 
 @router.get("/model-config-env")
