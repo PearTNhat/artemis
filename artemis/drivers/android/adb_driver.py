@@ -236,6 +236,29 @@ class AndroidAdbDriver(BaseDeviceDriver):
             platform="android",
         )
 
+    async def get_ui_elements(self) -> list[dict[str, Any]]:
+        """UI elements from the hierarchy alone: no screenshot, no settle delay.
+
+        For checks that only read element state (is a field focused?); about
+        0.2 s instead of a full screen capture.
+        """
+        client = self._ui_adb_client
+        if client is not None and hasattr(client, "get_hierarchy"):
+            try:
+                xml = await asyncio.to_thread(client.get_hierarchy)
+                if isinstance(xml, str) and xml:
+                    from artemis.utils.screen_diff import flatten_hierarchy
+
+                    return filter_ui_hierarchy(
+                        flatten_hierarchy(parse_hierarchy_xml_to_elements(xml)),
+                        screen_width=self._width,
+                        screen_height=self._height,
+                    )
+            except Exception as e:
+                logger.debug(f"Hierarchy-only read failed, using a full capture: {e}")
+        data = await self.get_screen_data(skip_settling=True)
+        return data.ui_elements or []
+
     async def tap(
         self,
         x: int,
@@ -386,11 +409,15 @@ class AndroidAdbDriver(BaseDeviceDriver):
         except Exception as e:
             logger.debug(f"KEYCODE_PASTE failed: {e}")
             return False
-        # Give the IME a beat to drain the paste before we inspect the field.
-        await asyncio.sleep(0.35)
+        # The paste usually lands at once; check right away and give the IME
+        # up to the old 0.35 s to drain it before judging.
+        await asyncio.sleep(0.05)
+        if await self._verify_focused_text(text, strict=True):
+            return True
+        await asyncio.sleep(0.3)
         return await self._verify_focused_text(text)
 
-    async def _verify_focused_text(self, expected: str) -> bool:
+    async def _verify_focused_text(self, expected: str, strict: bool = False) -> bool:
         """Best-effort check that ``expected`` is present in the focused field.
 
         Returns True when the text is confirmed, and also when the field cannot
@@ -398,16 +425,18 @@ class AndroidAdbDriver(BaseDeviceDriver):
         in the dump) - we only fail when we can positively see that nothing
         landed. That keeps masked fields working while still stopping the
         silent-failure loop that made the agent retry the same entry forever.
+        ``strict`` answers True only when the text is actually seen (the
+        early check; an undecidable field then gets the later lenient check).
         """
         try:
             client = await self._get_input_client()
             if client is None or not hasattr(client, "get_hierarchy"):
-                return True
+                return not strict
             xml = client.get_hierarchy()
             if asyncio.iscoroutine(xml):
                 xml = await xml
             if not isinstance(xml, str) or not xml:
-                return True
+                return not strict
 
             # Collect every focused editable node; React Native and Compose
             # routinely emit several, and only one of them is the real field.
@@ -428,7 +457,7 @@ class AndroidAdbDriver(BaseDeviceDriver):
 
             if not editable:
                 # No focused editable node found -> cannot judge; assume success.
-                return True
+                return not strict
 
             probe = expected.replace("\n", "").strip()
             if not probe:
@@ -448,7 +477,7 @@ class AndroidAdbDriver(BaseDeviceDriver):
             return False
         except Exception as e:
             logger.debug(f"Focused-text verification skipped: {e}")
-            return True
+            return not strict
 
     async def input_text(self, text: str, clear_existing: bool = True) -> bool:
         try:

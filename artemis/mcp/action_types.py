@@ -89,3 +89,6 @@ class ObserveResult(BaseModel):
     must then keep their previous element index rather than clobbering it."""
     scrollable: bool | None = None
     """Whether the screen holds a large scrollable container (None: unknown)."""
+    timings: dict[str, float] | None = None
+    """Wall time per phase in seconds (settle, capture, ocr, list, persist), for
+    the debug turn log; never shown to the model."""

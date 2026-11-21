@@ -30,6 +30,9 @@ def _node(text="", bounds="[0,0][10,10]", **kw):
 
 
 SCREEN = [
+    # containers come first: a flattened tree lists a parent before its children
+    _node("", "[0,0][1000,2000]", cls="android.widget.FrameLayout", clickable="true"),  # backdrop
+    _node("", "[0,480][1000,600]", cls="android.view.ViewGroup", clickable="true"),  # row holding 59.000
     _node("10:38", "[60,20][150,90]", package="com.android.systemui"),
     _node("Battery 48 percent.", "[800,20][900,90]", package="com.android.systemui"),
     _node("Search", "[100,200][600,260]"),
@@ -40,8 +43,6 @@ SCREEN = [
     # unlabeled controls
     _node("", "[10,190][90,270]", cls="android.widget.ImageButton", clickable="true"),  # back arrow
     _node("", "[230,450][300,520]", cls="android.view.View", clickable="true"),  # "+" over a card
-    _node("", "[0,480][1000,600]", cls="android.view.ViewGroup", clickable="true"),  # row holding 59.000
-    _node("", "[0,0][1000,2000]", cls="android.widget.FrameLayout", clickable="true"),  # backdrop
     _node("", "[231,451][299,519]", cls="android.widget.ImageView", clickable="true"),  # same "+" wrapper
     _node("", "[500,20][540,60]", cls="android.widget.ImageView", clickable="true",
           package="com.android.systemui"),  # status-bar icon
@@ -80,6 +81,40 @@ def test_compact_lists_unlabeled_controls_but_not_containers():
 def test_compact_icons_do_not_create_occlusion_flags():
     _, elements, _ = format_minimal_list_with_elements([dict(n) for n in SCREEN], W, H, compact=True)
     assert not any(el.get("occluded") for el in elements)
+
+
+def test_compact_icon_under_a_later_dialog_is_marked_occluded():
+    nodes = [
+        _node("Menu", "[100,100][400,160]"),
+        _node("", "[880,100][960,180]", cls="android.widget.ImageButton", clickable="true"),  # icon below
+        _node("", "[0,0][1000,2000]", cls="android.widget.FrameLayout", clickable="true"),  # dialog scrim on top
+        _node("Allow", "[300,1000][700,1080]", clickable="true"),
+    ]
+    text, elements, _ = format_minimal_list_with_elements([dict(n) for n in nodes], W, H, compact=True)
+    icon = next(el for el in elements if el.get("is_icon"))
+    assert icon["occluded"] is True
+    assert text.splitlines()[-1].endswith("(may be occluded)")
+    assert not any(el.get("occluded") for el in elements if not el.get("is_icon"))
+
+
+def test_compact_keeps_the_inner_control_not_its_wrapper():
+    nodes = [
+        _node("", "[100,300][500,400]", cls="android.widget.LinearLayout", clickable="true"),  # wrapper
+        _node("", "[420,320][480,380]", cls="android.widget.ImageView", clickable="true"),  # "+" inside, off-center
+    ]
+    _, elements, _ = format_minimal_list_with_elements([dict(n) for n in nodes], W, H, compact=True)
+    assert [tuple(el["bounds"]) for el in elements if el.get("is_icon")] == [(420, 320, 480, 380)]
+
+
+def test_compact_skips_large_unlabeled_banner_but_keeps_wide_input():
+    nodes = [
+        _node("", "[0,300][1000,700]", cls="android.widget.ImageView", clickable="true"),  # 20% banner
+        _node("", "[50,800][950,900]", cls="android.widget.EditText", clickable="true"),  # 4.5% search field
+        _node("", "[0,1000][1000,1150]", cls="android.view.View", clickable="true"),  # 7.5% plain row
+    ]
+    text, elements, _ = format_minimal_list_with_elements([dict(n) for n in nodes], W, H, compact=True)
+    assert [tuple(el["bounds"]) for el in elements if el.get("is_icon")] == [(50, 800, 950, 900)]
+    assert "(input)" in text
 
 
 def test_compact_shortens_overlap_warning():

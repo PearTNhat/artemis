@@ -42,7 +42,12 @@ from artemis.tools.tool_wrapper import (
     invoke_tool_with_injection,
     tool_result_messages,
 )
-from artemis.utils.ai_io_logger import log_ai_input, log_ai_output
+from artemis.utils.ai_io_logger import (
+    log_ai_input,
+    log_ai_output,
+    log_android_output,
+    log_session_start,
+)
 from artemis.utils.coordinates import (
     COORDINATE_SPACE_KEY,
     COORDINATE_SPACE_PIXEL,
@@ -506,11 +511,16 @@ class OperatorNode:
 
             bound_llm = base_llm.bind_tools(tools=traced_tools)
 
+            session_id = getattr(getattr(self.ctx, "data_engine", None), "current_session_id", None)
+            session_dir = getattr(getattr(self.ctx, "data_engine", None), "base_dir", None)
+
             # Log AI Input if ARTEMIS_DEBUG_AI_IO is enabled
             log_ai_input(
                 messages=current_messages,
                 tools=traced_tools,
                 turn=getattr(state, "step_count", None) or iteration,
+                session_id=str(session_id) if session_id else None,
+                session_dir=session_dir,
             )
 
             llm_start_time = time.monotonic()
@@ -522,6 +532,8 @@ class OperatorNode:
                 response=response,
                 latency_s=llm_duration,
                 turn=getattr(state, "step_count", None) or iteration,
+                session_id=str(session_id) if session_id else None,
+                session_dir=session_dir,
             )
 
             usage = usage_from_message(response)
@@ -961,6 +973,25 @@ class OperatorNode:
             task_plan,
             active_background_tasks=active_background_tasks,
             newly_finished_tasks=newly_finished_tasks,
+        )
+
+        session_id = getattr(getattr(self.ctx, "data_engine", None), "current_session_id", None)
+        session_dir = getattr(getattr(self.ctx, "data_engine", None), "base_dir", None)
+        if current_step_num == 1:
+            goal = getattr(state, "initial_goal", None) or getattr(state, "goal", None) or ""
+            log_session_start(
+                session_id=str(session_id) if session_id else None,
+                goal=goal,
+                session_dir=session_dir,
+            )
+
+        log_android_output(
+            width=width,
+            height=height,
+            xml_list=minimal_list,
+            turn=current_step_num,
+            session_id=str(session_id) if session_id else None,
+            session_dir=session_dir,
         )
 
         # 8. Invoke LLM Loop

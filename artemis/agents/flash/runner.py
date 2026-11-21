@@ -135,6 +135,7 @@ from artemis.utils.ai_io_logger import (
     log_ai_input,
     log_ai_output,
     log_android_output,
+    log_session_start,
 )
 from artemis.utils.coordinates import (
     COORDINATE_SPACE_KEY,
@@ -235,6 +236,7 @@ class FlashRunner:
             self.step_summarizer_cfg = cfg.flash.step_summarizer
             self.model_image_cfg = getattr(cfg.flash, "model_image", FlashModelImageConfig())
             self.compact_list = getattr(cfg.flash, "element_list", "full") == "compact"
+            self.final_summary_wait_s = float(getattr(cfg.flash, "final_summary_wait_s", 3.0))
             self.media_resolution = _gemini_image_resolution(ctx)
             self.memory_runtime_cfg = cfg.memory.runtime
             self.transcript_cfg = cfg.memory.transcript
@@ -246,6 +248,7 @@ class FlashRunner:
             self.step_summarizer_cfg = StepSummarizerConfig()
             self.model_image_cfg = FlashModelImageConfig()
             self.compact_list = False
+            self.final_summary_wait_s = 3.0
             self.media_resolution = None
             self.memory_runtime_cfg = MemoryRuntimeConfig()
             self.transcript_cfg = MemoryTranscriptConfig()
@@ -267,7 +270,10 @@ class FlashRunner:
                 model_name=self.step_summarizer_cfg.model,
                 retry_limit=self.memory_runtime_cfg.retry_limit,
                 max_concurrency=self.memory_runtime_cfg.max_concurrency,
-                flush_timeout_s=self.memory_runtime_cfg.flush_timeout_s,
+                # flush() only runs once the task has ended (final report, or the
+                # context shutting down): summaries then feed no later turn, so
+                # the user is not kept waiting on them for long.
+                flush_timeout_s=min(self.memory_runtime_cfg.flush_timeout_s, self.final_summary_wait_s),
             )
             if self.step_summarizer_cfg.enabled
             else None
@@ -717,9 +723,26 @@ class FlashRunner:
                 status="success",
             )
         )
+        await self._flush_history_jobs()
+        return final_report
+
+    async def _flush_history_jobs(self) -> None:
+        """Ends the run's background summaries within ``final_summary_wait_s``.
+
+        Step summaries and chunk capsules only compress history for later
+        turns; once the task is over they feed nothing, so the user is not
+        kept waiting on them (the context's own shutdown flush then finds
+        nothing left to drain).
+        """
         if self.summarizer:
             await self.summarizer.flush()
-        return final_report
+        ledger = getattr(self.ctx, "transcript_ledger", None)
+        chunker = getattr(ledger, "chunker", None)
+        if chunker is not None and callable(getattr(chunker, "flush", None)):
+            try:
+                await chunker.flush(timeout_seconds=getattr(self, "final_summary_wait_s", 3.0))
+            except Exception as e:
+                logger.debug(f"History chunk flush failed; skipped: {e}")
 
     def _rebase_screen_baseline(self, obs, screenshot_bytes) -> None:
         """Tells the executor about a screen captured outside it, so its
@@ -1609,6 +1632,14 @@ class FlashRunner:
             f" (turn limit: {limit if limit else 'unlimited'})"
         )
 
+        session_id = getattr(getattr(self.ctx, "data_engine", None), "current_session_id", None)
+        session_dir = getattr(getattr(self.ctx, "data_engine", None), "base_dir", None)
+        log_session_start(
+            session_id=str(session_id) if session_id else None,
+            goal=self.goal,
+            session_dir=session_dir,
+        )
+
         # 1. Initialize Universal LLM via Service Layer
         llm = self._init_llm()
         self._llm = llm
@@ -1683,6 +1714,8 @@ class FlashRunner:
                 turn_base = len(messages) - 1
 
                 # Log Android Output & AI Input if ARTEMIS_DEBUG_AI_IO is enabled
+                session_id = getattr(getattr(self.ctx, "data_engine", None), "current_session_id", None)
+                session_dir = getattr(getattr(self.ctx, "data_engine", None), "base_dir", None)
                 log_android_output(
                     width=getattr(getattr(self.ctx, "device", None), "device_width", None),
                     height=getattr(getattr(self.ctx, "device", None), "device_height", None),
@@ -1690,11 +1723,15 @@ class FlashRunner:
                     xml_list=current_xml_list,
                     scrollable=getattr(state, "screen_scrollable", None),
                     turn=turns,
+                    session_id=str(session_id) if session_id else None,
+                    session_dir=session_dir,
                 )
                 log_ai_input(
                     messages=messages,
                     tools=current_tools,
                     turn=turns,
+                    session_id=str(session_id) if session_id else None,
+                    session_dir=session_dir,
                 )
 
                 llm_started = time.monotonic()
@@ -1733,10 +1770,14 @@ class FlashRunner:
             messages.append(response)
 
             # Log AI Output if ARTEMIS_DEBUG_AI_IO is enabled
+            session_id = getattr(getattr(self.ctx, "data_engine", None), "current_session_id", None)
+            session_dir = getattr(getattr(self.ctx, "data_engine", None), "base_dir", None)
             log_ai_output(
                 response=response,
                 latency_s=self._turn_timing.get("llm_s"),
                 turn=turns,
+                session_id=str(session_id) if session_id else None,
+                session_dir=session_dir,
             )
 
             # Extract thought and tool calls
@@ -1820,8 +1861,7 @@ class FlashRunner:
             if final_report_from_calls is not None:
                 return final_report_from_calls
 
-        if self.summarizer:
-            await self.summarizer.flush()
+        await self._flush_history_jobs()
 
         if final_report is None:
             explanation = (

@@ -84,6 +84,12 @@ AGENT_TOOL_NAMES: frozenset[str] = (
 _POINT_TARGET_ACTIONS: frozenset[str] = frozenset({"click", "long_press", "input_text"})
 
 
+
+def _timings(obs: Any) -> dict[str, float]:
+    """Phase timings of an observation, empty when absent (debug turn log only)."""
+    value = getattr(obs, "timings", None)
+    return value if isinstance(value, dict) else {}
+
 class _ArgError(ValueError):
     """Argument-translation failure whose message is already fully formatted."""
 
@@ -290,6 +296,7 @@ class McpActionExecutor:
         target_coordinates: list[int] | None = None
         action_s: float | None = None
         observe_s: float | None = None
+        observe_detail: list[dict[str, Any]] = []
         with span:
             try:
                 session = await self._session_or_start()
@@ -419,7 +426,7 @@ class McpActionExecutor:
                     observe_started = time.monotonic()
                     settle_ms = self._determine_settle_ms(raw_name, args, target_semantics)
                     obs = await session.observe(settle_ms=settle_ms)
-                    observe_s = time.monotonic() - observe_started
+                    observe_detail.append({"why": "post", **_timings(obs)})
                     if obs.ok:
                         # Auto-detect skeleton / loading (<=1 text element in content area below top bar)
                         if obs.hierarchy_ok and len(obs.elements) > 3 and (raw_name in ("manage_app", "press_key") or settle_ms >= 1000):
@@ -434,6 +441,7 @@ class McpActionExecutor:
                                     f"Screen appears to be skeleton/loading (content area below top bar has {len(content_text_elements)} text element); waiting additional 1.0s..."
                                 )
                                 obs = await session.observe(settle_ms=1000)
+                                observe_detail.append({"why": "skeleton", **_timings(obs)})
 
                         shot_path = obs.screenshot_path
                         xml_list = obs.elements_text
@@ -465,6 +473,7 @@ class McpActionExecutor:
                                 "Screen unchanged immediately after tap; waiting 800ms for potential page transition..."
                             )
                             retry_obs = await session.observe(settle_ms=800)
+                            observe_detail.append({"why": "unchanged_retry", **_timings(retry_obs)})
                             if retry_obs.ok:
                                 retry_shot = retry_obs.screenshot_path
                                 retry_bytes = None
@@ -524,6 +533,7 @@ class McpActionExecutor:
                         else:
                             # Any non-point action (swipe, wait, press_key, etc.) resets point action guard
                             self._last_point_action = None
+                    observe_s = time.monotonic() - observe_started
                 elif res.ok and skip_observe:
                     # Intermediate burst action: short delay between consecutive physical inputs
                     await asyncio.sleep(0.1)
@@ -580,6 +590,8 @@ class McpActionExecutor:
                 # observation (settle + screenshot + UI hierarchy), in seconds.
                 "action_s": round(action_s, 3) if action_s is not None else None,
                 "observe_s": round(observe_s, 3) if observe_s is not None else None,
+                # Per-capture phase timings (debug turn log only).
+                "observe_detail": observe_detail or None,
             },
         )
 

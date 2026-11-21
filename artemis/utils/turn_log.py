@@ -93,6 +93,9 @@ def action_entry(name: str, args: dict[str, Any] | None, exec_result: Any) -> di
         value = meta.get(src)
         if value not in (None, False):
             entry[dst] = value
+    detail = meta.get("observe_detail")
+    if detail:
+        entry["obs"] = detail
     message = getattr(exec_result, "text_summary", None)
     if message:
         entry["msg"] = _short(message)

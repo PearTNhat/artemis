@@ -46,8 +46,8 @@
     },
     "local-ollama": {
       "provider": "openai",
-      "model": "llama3.2-vision",
-      "fallback": { "provider": "openai", "model": "llama3.2-vision" }
+      "model": "qwen2.5vl:3b",
+      "fallback": { "provider": "openai", "model": "qwen2.5vl:3b" }
     }
   },
 
@@ -181,6 +181,9 @@
       // '[n] "text" l,t,r,b', plus unlabeled buttons/icons as '[n] (icon) l,t,r,b' (index-tappable).
       // Measured on 3 trace screens: ~63% fewer characters than 'full' (the historical format).
       "element_list": "compact",
+      // ⏹️ After the task is reported done: max seconds to wait for step summaries still being written
+      // (they only compress history for later turns). Was the 30 s shutdown flush; measured 18-30 s per run.
+      "final_summary_wait_s": 3,
       // 🧠 Step Summarizer: Asynchronous visual context compressor
       // Summarizes intermediate steps in background without blocking the runner,
       // replacing images only after strictly objective, high-density summaries are ready.

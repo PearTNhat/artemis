@@ -157,12 +157,20 @@ class UnifiedMobileControllerBase:
         return True
 
     async def get_ui_elements(self) -> list[dict]:
+        """Current UI elements; hierarchy only (no screenshot) when the driver can."""
+        hierarchy_only = getattr(self._driver, "get_ui_elements", None)
+        if hierarchy_only is not None:
+            return await hierarchy_only() or []
         screen_data = await self._driver.get_screen_data()
         return screen_data.ui_elements or []
 
-    async def get_screen_data(self) -> "ScreenDataResponse":
-        """Get screen data including screenshot, UI hierarchy, dimensions, and platform."""
-        data = await self._driver.get_screen_data()
+    async def get_screen_data(self, skip_settling: bool = False) -> "ScreenDataResponse":
+        """Get screen data including screenshot, UI hierarchy, dimensions, and platform.
+
+        ``skip_settling`` skips the driver's own settle delay, for callers that
+        already waited (the post-action observation sleeps its ``settle_ms``).
+        """
+        data = await self._driver.get_screen_data(skip_settling=skip_settling)
         return ScreenDataResponse(
             base64=data.screenshot_base64,
             elements=data.ui_elements or [],

@@ -61,7 +61,6 @@
     "operator": {
       "thinking_level": "medium",
       "include_thoughts": true
-      // "media_resolution": "low" // tokens per screenshot: low ~264 / medium ~560 / default ~1078. NOT recommended: on a real Grab task (2026-11-20) 'low' took 16 turns vs 11 (repeated swipes) and no faster per turn
       // "max_tokens": 2048 // cap on the answer length
     },
 
@@ -144,7 +143,7 @@
       "explorer_mode": "flash", // Explorer tier for the Flash runner: 'flash' | 'pro' | 'ultra' (see top-level "explorer")
       // 🖼️ Screenshot sent to the AI each turn (only the AI's copy)
       "model_image": {
-        "max_side": 1280, // Gemini bills a fixed ~1100 tokens/image at any size; use the operator node's media_resolution to cut tokens
+        "max_side": 1280, // Gemini bills a fixed ~1078 tokens/image at any size; a smaller image only shrinks the upload (1280 q75 ≈ 112 KB)
         "jpeg_quality": 75
       },
       "element_list": "compact", // UI list: 'compact' (lean, lists unlabeled icons) | 'full'

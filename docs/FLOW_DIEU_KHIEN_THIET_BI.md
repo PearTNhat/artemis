@@ -61,9 +61,9 @@ Có **2 chế độ chạy** dùng chung tầng thiết bị (Mục 1, 2, 6) nh�
 ### 1.1. Chuỗi gọi
 
 ```
-UnifiedMobileController.get_screen_data()           third_party/mobile_use/controllers/unified_controller.py:163
-  └─ AdbDriver.get_screen_data(skip_settling=False) artemis/drivers/android/adb_driver.py:127
-       ├─ sleep 0.3s  (settle mặc định của driver)
+UnifiedMobileController.get_screen_data(skip_settling)   third_party/mobile_use/controllers/unified_controller.py:163
+  └─ AdbDriver.get_screen_data(skip_settling)        artemis/drivers/android/adb_driver.py:127
+       ├─ sleep 0.3s chỉ khi skip_settling=False (observe() của MCP đã tự settle → truyền True, observation.py `_capture`)
        └─ _ui_adb_client.get_screen_data()          = FallbackScreenClient
             └─ _call("get_screen_data")             artemis/clients/screen_client_factory.py:242
                  ├─ helper khả dụng? → AccessibilityClient.get_screen_data()   accessibility_client.py:346
@@ -144,7 +144,7 @@ Quy tắc lọc (quan trọng khi tối ưu):
 ```
 - Bỏ node `com.android.systemui` nằm trọn trong dải status bar (đáy ≤ 6% chiều cao).
 - Chỉ ghi `checked:` cho control checkable (hoặc đang checked) và `enabled:false`; bỏ `checked:false enabled:true` mặc định.
-- **Control không nhãn** (`clickable`/`long-clickable`/`EditText`, không text/desc/hint) thêm cuối list dạng `(icon|button|input|toggle)`; bỏ container (> 15% màn hình, hoặc chứa tâm phần tử đã liệt kê), mẩu < 12px, wrapper trùng tâm; tối đa 40. Thêm **sau** bước cảnh báo che khuất → không tạo cờ `occluded` mới cho Occlusion Guard. Element có `is_icon=True`, `text=""`.
+- **Control không nhãn** (`clickable`/`long-clickable`/`EditText`, không text/desc/hint) thêm cuối list dạng `(icon|button|input|toggle)`; bỏ container (> 5% màn hình — `EditText` > 15% —, hoặc chứa tâm phần tử đã liệt kê), mẩu < 12px, wrapper trùng tâm; control bọc control không nhãn khác → chỉ giữ control con; tối đa 40. Thêm **sau** bước cảnh báo che khuất của phần tử có nhãn (không tạo cờ mới cho chúng); riêng icon bị node vẽ sau trong cây (clickable hoặc có chữ, không phải con của nó) che ≥ 50% → ` (may be occluded)` + `occluded=True` (`_covered_by_later_layer`). Element có `is_icon=True`, `text=""`.
 - Đo trên 3 màn `traces/`: 3201→1174, 5490→2033, 3481→1267 ký tự (~−63%, đã gồm dòng icon). Prompt `flash_runner.md` mô tả dạng tương ứng (biến `compact_list`).
 
 ---
@@ -264,7 +264,8 @@ ActionSession.call(name, args)              artemis/mcp/action_session.py:168
                  ├─ _to_px: 0–1000 → pixel theo ctx.device
                  └─ controller.tap_at → AdbDriver.tap → `adb shell input tap x y`   adb_driver.py:239
                     swipe → `input swipe x1 y1 x2 y2 dur`; long press = swipe tại chỗ ≥500ms
-                    nhập text → xoá bằng helper `clear_text` + dán qua clipboard helper (adb_driver.py:453)
+                    nhập text → focus: đọc cây UI (không chụp ảnh) rồi chờ ô nhập được focus (poll 0.15s, tối đa 1.0s, adb.py `_wait_for_focused_input`);
+                    driver xoá bằng helper `clear_text` (key event chỉ khi helper hỏng) + dán qua clipboard, kiểm tra ngay rồi tối đa 0.35s (adb_driver.py `input_text`)
                     back/home/recents → RPC helper `global`
                     phím khác → `adb shell input keyevent KEYCODE_*`
 ```
@@ -313,7 +314,7 @@ Sau Validator → **Summarizer** (tóm tắt ảnh step chạy nền) → **Conv
 | Bước | Chi phí ước lượng | Nguồn |
 |---|---|---|
 | Perception settle | 0.4s (cố định) | `perception.py` |
-| Driver settle | **+0.3s** (cộng dồn) | `adb_driver.py:129` |
+| Driver settle | 0.3s — **đã bỏ ở đường observe của MCP (Flash)** (O1); Pro `perception.py` vẫn cộng dồn | `adb_driver.py:129` |
 | `/snapshot` helper | ~100–500ms; fallback UIAutomator2 chậm hơn nhiều | `accessibility_client.py:302` |
 | OCR (nếu bật) | 1 HTTP call ngoài | `perception.py` |
 | **LLM Operator** | phần lớn thời gian (vài s – chục s); có thể lặp nhiều lần nếu gọi tool phụ | `operator.py:474` |
@@ -333,7 +334,7 @@ Sau Validator → **Summarizer** (tóm tắt ảnh step chạy nền) → **Conv
 
 | # | Vấn đề | Vị trí | Hướng tối ưu |
 |---|---|---|---|
-| O1 | **Settle cộng dồn:** perception/observe sleep 0.4s rồi `AdbDriver.get_screen_data()` sleep thêm 0.3s (controller không truyền `skip_settling`). Ngay cả nhánh "skip settling" vẫn mất 0.3s. | `unified_controller.py:165`, `adb_driver.py:129` | Truyền `skip_settling=True` từ controller vì tầng trên đã tự settle → tiết kiệm 0.3s/lần chụp. |
+| O1 | ✅ Xong (đường observe MCP/Flash, 2026-11-20; Pro `perception.py` chưa đổi). **Settle cộng dồn:** perception/observe sleep 0.4s rồi `AdbDriver.get_screen_data()` sleep thêm 0.3s (controller không truyền `skip_settling`). Ngay cả nhánh "skip settling" vẫn mất 0.3s. | `unified_controller.py:165`, `adb_driver.py:129` | Truyền `skip_settling=True` từ controller vì tầng trên đã tự settle → tiết kiệm 0.3s/lần chụp. |
 | O2 | **Gọi đồng bộ trong async:** `self._ui_adb_client.get_screen_data()` (HTTP timeout 8s) chạy trực tiếp trong coroutine → chặn event loop (ảnh hưởng video recording, background task, MCP owner loop). | `adb_driver.py:141` | Bọc `asyncio.to_thread(...)`. |
 | ~~O3~~ | ✅ **Flash xong 2026-11-20** (dạng gọn, mục 2.3: `[n] (icon) l,t,r,b`). Pro không làm. Cũ: **Icon không nhãn bị loại khỏi list** → AI phải dùng toạ độ → Pro luôn đi Pixel Safety Net (thêm 1 LLM call). | `visualization.py:363` | Đưa thêm phần tử `clickable=true` không text với nhãn tổng quát (`[n] Icon: <class/resource-id> | Bounds`) để AI chọn bằng index. |
 | O4 | **Safety Net XML dump hierarchy lần nữa** ngay sau perception (thường chỉ cách vài giây). | `precondition_xml.py:114` | Có thể dùng hash nhanh/hoặc bỏ qua khi thời gian từ perception < ngưỡng và action không có hiệu ứng ngoài. Cần đo trước. |
@@ -375,3 +376,6 @@ Sau Validator → **Summarizer** (tóm tắt ảnh step chạy nền) → **Conv
 | 2026-11-20 | Thêm cơ chế toggle quay video màn hình (`ARTEMIS_VIDEO_RECORDING_ENABLED`) trên UI | `system.py`, `system.service.ts`, `home.component.html`, `.env` | Thêm nút Record ON/OFF trên UI cho phép bật/tắt quay video qua scrcpy, giúp giảm tải CPU/mạng và tăng tốc phản hồi khi không cần video. |
 | 2026-11-20 | List phần tử dạng gọn cho Flash (`agent.flash.element_list="compact"`) + liệt kê control không nhãn (O3); prompt Flash: ghi chú 1–2 câu (~40 từ), milestone 1 dòng; `media_resolution`/`max_tokens` cấu hình được theo node (Gemini); preset Qwen ảnh 768 | `visualization.py`, `observation.py`, `flash/runner.py`, `flash_runner.md`, `config/agent.py`, `llm/router.py`, `services/llm.py`, `third_party/mobile_use/config/llm.py`, `config/artemis*.jsonc` | Tầng 2–3 (Flash): token list −36% (Gemini 1597→1024), nút "+"/back/icon có index thay vì đoán toạ độ; Qwen: prompt 2253→1297 token, prefill 14→7 s, vẫn 13/13. Pro không đổi (không đặt cờ). |
 | 2026-11-20 | `media_resolution` của Gemini gửi **theo từng ảnh** (block `{"type":"image","base64",…,"media_resolution"}`) vì langchain-google-genai 4.3.4 bỏ qua tham số cấp model với Gemini 3; Flash đọc từ node `operator` (chỉ provider `google`). Thêm `turns.jsonl` (1 dòng JSON/turn: `llm_s`, token vào/cache/ra, cỡ list, từng tool call với điểm bấm 0–1000, `no_effect`, `action_s`, `observe_s`), tự động bật khi bật `ARTEMIS_DEBUG_AI_IO`; executor thêm `no_effect` vào metadata | `flash/runner.py` (`_image_block`, `_start_turn_record`, `_write_turn_record`), `utils/turn_log.py` (mới), `utils/ai_io_logger.py`, `mcp/action_executor.py` | Tầng 3 (Flash, Gemini): token ảnh 1081→267 khi `low`; provider khác giữ `image_url`. Đo đạc: phân tích điểm nghẽn từ `traces/<session>/turns.jsonl` thay vì lọc log. |
+| 2026-11-20 | Sửa O3: ngưỡng icon 15%→5% (`EditText` 15%), wrapper → giữ control con, icon bị lớp vẽ sau che → `(may be occluded)`; bỏ gợi ý `media_resolution: low` khỏi preset Gemini | `utils/visualization.py` (`_unlabeled_controls`, `_covered_by_later_layer`), `config/artemis.gemini.jsonc` | Tầng 2 (Flash compact): banner/thẻ lớn không còn hiện là `(icon)`; không còn 2 index cho cùng một nút; AI thấy icon nằm dưới dialog. 36 màn hình thật: 0 cờ sai. |
+| 2026-11-20 | Cắt chờ thừa phía thiết bị: (1) observe MCP không còn settle 0.3s lần hai trong driver (O1); (2) `input_text` kiểm focus bằng cây UI (không chụp ảnh), chờ focus bằng poll thay sleep 1.0s, để driver xoá bằng helper `clear_text` (1 RPC) thay chuỗi 4 lệnh `input keyevent`, kiểm chữ đã dán ngay thay sleep 0.35s; (3) Flash xả tóm tắt bước + capsule chunk tối đa `agent.flash.final_summary_wait_s` (3s) khi task xong thay 30s + 30s; (4) `ObserveResult.timings` + `observe_detail` → `turns.jsonl` (`obs`: settle/capture/ocr/list/persist) | `mcp/observation.py`, `mcp/action_executor.py`, `mcp/action_types.py`, `mcp/actuators/adb.py`, `drivers/android/adb_driver.py`, `third_party/.../unified_controller.py`, `agents/flash/runner.py`, `config/agent.py`, fixture `action_server_manifest.json` | Tầng 4–6: chụp sau thao tác trung vị 0.72→0.41–0.61s; `input_text` 2.6–3.2→1.8–2.5s; lượt cuối 18.7–30.3s→3.4–4.1s, không còn chờ 30s sau "Session ended". Không đổi prompt/AI. |
+| 2026-11-20 | Phân chia log AI I/O theo từng session/đoạn chat: ghi riêng vào `traces/<session_id>/ai_io.log`, thêm banner phân cách phiên vào file tổng `logs/ai_io.log`, hỗ trợ API `/ai-io-log?session_id=...` | `ai_io_logger.py`, `runner.py`, `operator.py`, `system.py`, `test_ai_io_logger.py` | Dễ dàng debug riêng từng lượt chat/task độc lập; không bị lẫn lộn giữa các phiên. |

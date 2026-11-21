@@ -15,6 +15,7 @@ import datetime
 import json
 import logging
 import os
+from pathlib import Path
 import re
 import sys
 from typing import Any
@@ -25,26 +26,102 @@ logger = logging.getLogger("artemis.ai_io")
 
 # Global override if set programmatically
 _OVERRIDE_ENABLED: bool | None = None
+_LAST_LOGGED_SESSION_ID: str | None = None
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
-def get_ai_io_log_file_path() -> str:
-    """Returns the absolute path to the dedicated ai_io.log file."""
-    # Try Workspace relative path first, fallback to home
-    workspace_log = "/home/nhat/Workspace/control-android/artemis/logs/ai_io.log"
-    return workspace_log
 
-def _write_to_log_file(text: str) -> None:
-    """Appends clean text without ANSI colors to the persistent log file."""
+def get_ai_io_log_file_path(session_dir: Path | str | None = None) -> Path:
+    """Returns the absolute path to the dedicated ai_io.log file.
+
+    If ``session_dir`` is provided, returns ``<session_dir>/ai_io.log``.
+    Otherwise, returns ``<ROOT_DIR>/logs/ai_io.log``.
+    """
+    if session_dir is not None:
+        return Path(session_dir) / "ai_io.log"
+    from artemis.config.paths import ROOT_DIR
+
+    return ROOT_DIR / "logs" / "ai_io.log"
+
+
+def resolve_current_session_info() -> tuple[str | None, Path | None]:
+    """Tries to resolve the active session_id and its base trace directory."""
+    sid: str | None = None
+    sdir: Path | None = None
+
     try:
-        log_path = get_ai_io_log_file_path()
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        clean_text = _ANSI_ESCAPE_RE.sub("", text)
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"\n[{now_str}]\n{clean_text}\n")
+        from artemis.data_engine.engine import _CURRENT_DATA_ENGINE
+
+        if _CURRENT_DATA_ENGINE:
+            if getattr(_CURRENT_DATA_ENGINE, "current_session_id", None):
+                sid = str(_CURRENT_DATA_ENGINE.current_session_id)
+            if getattr(_CURRENT_DATA_ENGINE, "base_dir", None):
+                sdir = Path(_CURRENT_DATA_ENGINE.base_dir)
+    except Exception:
+        pass
+
+    if not sid:
+        sid = os.getenv("ARTEMIS_SESSION_ID") or os.getenv("ARTEMIS_CLOUD_SESSION_ID")
+
+    if sid and not sdir:
+        try:
+            from artemis.config.paths import get_traces_dir
+
+            sdir = get_traces_dir() / str(sid)
+        except Exception:
+            pass
+
+    return sid, sdir
+
+
+def _write_to_log_file(
+    text: str,
+    session_dir: Path | str | None = None,
+    session_id: str | None = None,
+) -> None:
+    """Appends clean text without ANSI colors to persistent log files.
+
+    1. Writes to ``<session_dir>/ai_io.log`` if session directory is known.
+    2. Also appends to global ``<ROOT_DIR>/logs/ai_io.log``, adding a session banner
+       whenever switching to a new session.
+    """
+    global _LAST_LOGGED_SESSION_ID
+    clean_text = _ANSI_ESCAPE_RE.sub("", text)
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"\n[{now_str}]\n{clean_text}\n"
+
+    auto_sid, auto_sdir = resolve_current_session_info()
+    effective_sid = session_id or auto_sid
+    effective_sdir = session_dir or auto_sdir
+
+    # 1. Write to session-specific log file
+    if effective_sdir:
+        try:
+            s_log_path = Path(effective_sdir) / "ai_io.log"
+            s_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(s_log_path, "a", encoding="utf-8") as f:
+                f.write(entry)
+        except Exception as exc:
+            logger.debug(f"Could not append to session log {effective_sdir}: {exc}")
+
+    # 2. Write to global log file
+    try:
+        global_log_path = get_ai_io_log_file_path()
+        global_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(global_log_path, "a", encoding="utf-8") as f:
+            if effective_sid and effective_sid != _LAST_LOGGED_SESSION_ID:
+                sep = "=" * 80
+                banner = (
+                    f"\n{sep}\n"
+                    f"🚀 BẮT ĐẦU PHIÊN CHAT / TASK: [{effective_sid}]\n"
+                    f"📁 Thư mục Trace: {effective_sdir or 'N/A'}\n"
+                    f"{sep}\n"
+                )
+                f.write(banner)
+                _LAST_LOGGED_SESSION_ID = effective_sid
+            f.write(entry)
     except Exception as exc:
-        logger.debug(f"Could not append to {log_path}: {exc}")
+        logger.debug(f"Could not append to global log {global_log_path}: {exc}")
 
 
 def is_ai_io_debug_enabled() -> bool:
@@ -105,6 +182,33 @@ def _truncate_base64_in_content(content: Any) -> Any:
     return content
 
 
+def log_session_start(
+    session_id: str | None = None,
+    goal: str | None = None,
+    session_dir: Path | str | None = None,
+) -> None:
+    """Logs the beginning of a chat session / task."""
+    if not is_ai_io_debug_enabled():
+        return
+
+    auto_sid, auto_sdir = resolve_current_session_info()
+    effective_sid = session_id or auto_sid
+    effective_sdir = session_dir or auto_sdir
+
+    sep = "=" * 80
+    header = (
+        f"{Fore.MAGENTA}{Style.BRIGHT}{sep}\n"
+        f"🚀 BẮT ĐẦU PHIÊN CHAT / TASK\n"
+        f"{'-'*80}{Style.RESET_ALL}\n"
+        f"{Fore.MAGENTA}• Session ID:{Style.RESET_ALL} {effective_sid or 'N/A'}\n"
+        f"{Fore.MAGENTA}• Yêu cầu (Goal):{Style.RESET_ALL} {goal or 'N/A'}\n"
+        f"{Fore.MAGENTA}• Trace Dir:{Style.RESET_ALL} {effective_sdir or 'N/A'}\n"
+        f"{Fore.MAGENTA}{sep}{Style.RESET_ALL}\n"
+    )
+    print(header, flush=True)
+    _write_to_log_file(header, session_dir=effective_sdir, session_id=effective_sid)
+
+
 def log_android_output(
     width: int | None = None,
     height: int | None = None,
@@ -113,14 +217,21 @@ def log_android_output(
     scrollable: bool | None = None,
     elements_count: int | None = None,
     turn: int | None = None,
+    session_id: str | None = None,
+    session_dir: Path | str | None = None,
 ) -> None:
     """Logs the observation data returned from the Android device."""
     if not is_ai_io_debug_enabled():
         return
 
+    auto_sid, auto_sdir = resolve_current_session_info()
+    effective_sid = session_id or auto_sid
+    effective_sdir = session_dir or auto_sdir
+
     turn_str = f" | Turn {turn}" if turn is not None else ""
+    sess_str = f" | Session {effective_sid[:8]}…" if effective_sid else ""
     sep = "=" * 80
-    header = f"{Fore.CYAN}{Style.BRIGHT}{sep}\n📱 [1] OUTPUT TỪ ANDROID (Screen & Observation){turn_str}\n{'-'*80}{Style.RESET_ALL}"
+    header = f"{Fore.CYAN}{Style.BRIGHT}{sep}\n📱 [1] OUTPUT TỪ ANDROID (Screen & Observation){turn_str}{sess_str}\n{'-'*80}{Style.RESET_ALL}"
 
     shot_size_kb = (len(screenshot_bytes) / 1024.0) if screenshot_bytes else 0.0
     dim_str = f"{width}x{height}" if width and height else "Unknown"
@@ -143,21 +254,28 @@ def log_android_output(
 
     output = f"\n{header}\n{meta_info}\n{ui_header}\n{ui_body}\n{Fore.CYAN}{sep}{Style.RESET_ALL}\n"
     print(output, flush=True)
-    _write_to_log_file(output)
+    _write_to_log_file(output, session_dir=effective_sdir, session_id=effective_sid)
 
 
 def log_ai_input(
     messages: list[Any],
     tools: list[Any] | None = None,
     turn: int | None = None,
+    session_id: str | None = None,
+    session_dir: Path | str | None = None,
 ) -> None:
     """Logs the exact prompt payload and tools sent into the AI."""
     if not is_ai_io_debug_enabled():
         return
 
+    auto_sid, auto_sdir = resolve_current_session_info()
+    effective_sid = session_id or auto_sid
+    effective_sdir = session_dir or auto_sdir
+
     turn_str = f" | Turn {turn}" if turn is not None else ""
+    sess_str = f" | Session {effective_sid[:8]}…" if effective_sid else ""
     sep = "=" * 80
-    header = f"{Fore.YELLOW}{Style.BRIGHT}{sep}\n🧠 [2] INPUT ĐƯA VÀO AI (Prompt & Messages gửi đến LLM){turn_str}\n{'-'*80}{Style.RESET_ALL}"
+    header = f"{Fore.YELLOW}{Style.BRIGHT}{sep}\n🧠 [2] INPUT ĐƯA VÀO AI (Prompt & Messages gửi đến LLM){turn_str}{sess_str}\n{'-'*80}{Style.RESET_ALL}"
 
     tool_names = []
     if tools:
@@ -220,22 +338,29 @@ def log_ai_input(
     lines.append(f"{Fore.YELLOW}{sep}{Style.RESET_ALL}\n")
     final_text = "\n".join(lines)
     print(final_text, flush=True)
-    _write_to_log_file(final_text)
+    _write_to_log_file(final_text, session_dir=effective_sdir, session_id=effective_sid)
 
 
 def log_ai_output(
     response: Any,
     latency_s: float | None = None,
     turn: int | None = None,
+    session_id: str | None = None,
+    session_dir: Path | str | None = None,
 ) -> None:
     """Logs the raw response, reasoning thoughts, and tool decisions returned by the AI."""
     if not is_ai_io_debug_enabled():
         return
 
+    auto_sid, auto_sdir = resolve_current_session_info()
+    effective_sid = session_id or auto_sid
+    effective_sdir = session_dir or auto_sdir
+
     turn_str = f" | Turn {turn}" if turn is not None else ""
+    sess_str = f" | Session {effective_sid[:8]}…" if effective_sid else ""
     lat_str = f" (thời gian: {latency_s:.2f}s)" if latency_s is not None else ""
     sep = "=" * 80
-    header = f"{Fore.GREEN}{Style.BRIGHT}{sep}\n🤖 [3] OUTPUT AI TRẢ VỀ (Phản hồi & Tool Calls từ LLM){turn_str}{lat_str}\n{'-'*80}{Style.RESET_ALL}"
+    header = f"{Fore.GREEN}{Style.BRIGHT}{sep}\n🤖 [3] OUTPUT AI TRẢ VỀ (Phản hồi & Tool Calls từ LLM){turn_str}{sess_str}{lat_str}\n{'-'*80}{Style.RESET_ALL}"
 
     content = getattr(response, "content", "")
     thinking = ""
@@ -288,5 +413,5 @@ def log_ai_output(
     lines.append(f"{Fore.GREEN}{sep}{Style.RESET_ALL}\n")
     final_text = "\n".join(lines)
     print(final_text, flush=True)
-    _write_to_log_file(final_text)
+    _write_to_log_file(final_text, session_dir=effective_sdir, session_id=effective_sid)
 

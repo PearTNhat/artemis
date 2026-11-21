@@ -104,9 +104,34 @@ async def ensure_focus_at_coords(controller, x: int, y: int) -> str | None:
     if hasattr(result, "error") and result.error:
         return result.error
 
-    # Wait for the UI to settle and keyboard to pop up after tapping
-    await asyncio.sleep(1.0)
+    # Wait until an editable field holds focus (the tap may also open a new
+    # screen with its own search field), at most the old fixed 1.0 s.
+    await _wait_for_focused_input(controller, timeout_s=1.0)
     return None
+
+
+async def _wait_for_focused_input(controller, timeout_s: float = 1.0, poll_s: float = 0.15) -> bool:
+    """True once a focused editable node appears; False after ``timeout_s``."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    await asyncio.sleep(poll_s)
+    while True:
+        try:
+            elements = await controller.get_ui_elements()
+            if any(
+                str(e.get("focused")).lower() == "true"
+                and ("EditText" in str(e.get("class", "")) or str(e.get("editable")).lower() == "true")
+                for e in elements or []
+            ):
+                return True
+        except Exception as e:
+            logger.debug(f"Focus poll failed: {e}")
+            await asyncio.sleep(max(0.0, deadline - loop.time()))
+            return False
+        if loop.time() + poll_s > deadline:
+            await asyncio.sleep(max(0.0, deadline - loop.time()))
+            return False
+        await asyncio.sleep(poll_s)
 
 
 class AdbActuator:
@@ -226,19 +251,20 @@ class AdbActuator:
                     detail=str(err),
                     normalized_coordinates=coords,
                 )
-        if clear_exist:
-            if hasattr(self.controller, "erase_text") and not await self.controller.erase_text():
-                return ActionResult.failure(
-                    "input_text",
-                    "Failed to clear existing text",
-                    normalized_coordinates=coords,
-                )
-        elif hasattr(self.controller, "press_key"):
-            # KEYCODE_MOVE_END: move cursor to the end for reliable append.
-            await self.controller.press_key("123")
-        if hasattr(self.controller, "type_text") and not await self.controller.type_text(
-            text, clear_existing=False
-        ):
+        if not hasattr(self.controller, "type_text"):
+            if clear_exist:
+                if hasattr(self.controller, "erase_text") and not await self.controller.erase_text():
+                    return ActionResult.failure(
+                        "input_text",
+                        "Failed to clear existing text",
+                        normalized_coordinates=coords,
+                    )
+            elif hasattr(self.controller, "press_key"):
+                # KEYCODE_MOVE_END: move cursor to the end for reliable append.
+                await self.controller.press_key("123")
+        # The driver clears (one helper RPC, key events only as a fallback) and,
+        # in append mode, moves the caret to the end itself.
+        elif not await self.controller.type_text(text, clear_existing=clear_exist):
             return ActionResult.failure(
                 "input_text",
                 f"Failed typing '{text}'.",

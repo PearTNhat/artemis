@@ -98,3 +98,23 @@ def test_append_never_raises(tmp_path):
     blocker.write_text("x")
     assert turn_log.append_turn(blocker / "sub", {"turn": 1}) is None
     assert turn_log.append_turn(None, {"turn": 1}) is None
+
+
+def test_final_summary_wait_caps_the_shutdown_flush(monkeypatch):
+    """The step-summary flush only runs once the task is over: bounded by the Flash knob."""
+    from artemis.config.agent import FlashProfileConfig, MemoryRuntimeConfig
+
+    assert FlashProfileConfig().final_summary_wait_s == 3.0
+    assert MemoryRuntimeConfig().flush_timeout_s == 30.0
+    captured = {}
+
+    class _Summarizer:
+        def __init__(self, ctx, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("artemis.agents.flash.runner.VisualStepSummarizer", _Summarizer)
+    ctx = MagicMock()
+    ctx.step_memory = None
+    runner = FlashRunner(ctx, "goal")
+    assert captured["flush_timeout_s"] == min(runner.memory_runtime_cfg.flush_timeout_s, runner.final_summary_wait_s)
+    assert captured["flush_timeout_s"] <= 3.0

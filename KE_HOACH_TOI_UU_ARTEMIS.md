@@ -36,6 +36,10 @@
 - Số liệu Mục 1.11; 10 unit test mới (`tests/unit/mcp/test_compact_element_list.py`); hồi quy 852 pass.
 - **`media_resolution` theo từng ảnh** (langchain bỏ qua tham số cấp model với Gemini 3) — đo thật: `low` thêm lượt, không khuyến nghị.
 - **`turns.jsonl`** (tự động bật khi bật `ARTEMIS_DEBUG_AI_IO`): 1 dòng/turn với thời gian model/action/chụp, token, cỡ list, từng tool call (điểm bấm, `no_effect`). 7 test mới; hồi quy 863 pass.
+- **Sửa O3 sau review** (2026-11-20): ngưỡng icon 15% → **5%** màn hình (ô nhập `EditText` giữ 15% vì rộng cả màn); wrapper bọc control khác → **chỉ giữ control con**; icon bị node vẽ **sau** trong cây (dialog, bottom sheet, scrim) che ≥ 50% → `(may be occluded)` + cờ `occluded` (chỉ trên icon, không lan sang phần tử có nhãn). Bỏ gợi ý `media_resolution: "low"` khỏi preset Gemini (ảnh Gemini luôn ~1078 token, nén ảnh chỉ giảm dung lượng upload). Kiểm trên 36 màn hình thật: 178 icon, 0 cờ sai. 3 test mới; hồi quy 862 pass (5 skip: cần thiết bị/jetski).
+- **Cắt chờ thừa phía thiết bị** (2026-11-20, Mục 1.13): observe MCP bỏ settle 0.3 s lần hai (O1); `input_text` nhanh hơn ~0.7 s; Flash xả tóm tắt/capsule tối đa `agent.flash.final_summary_wait_s` (3 s) khi xong thay 30 s + 30 s; `turns.jsonl` có thời gian từng pha chụp. 9 test mới/sửa (`test_capture_speed.py`, `test_actuators.py`, `test_flash_turn_log.py`), fixture `observe_screen` tạo lại; hồi quy 871 pass.
+- **Phân chia log AI I/O theo session** (2026-11-20): ghi riêng vào `traces/<session_id>/ai_io.log` bên cạnh `turns.jsonl`, thêm banner phân cách phiên vào file tổng `logs/ai_io.log`, API `/ai-io-log?session_id=...`. 3 unit test mới (`tests/unit/utils/test_ai_io_logger.py`).
+- **Khắc phục & Xác thực Model Local Qwen2.5-VL 3B** (Ollama, 2026-11-20): Nâng `num_ctx: 16384` chống cắt cụt system prompt + danh sách UI; bổ sung Modelfile template Tool Calling chuẩn; đạt 13/13 tiêu chí đọc thông tin màn hình Grab và 5/5 pass trên benchmark thao tác đa màn hình thật (~1.86 s/lượt, 100% GPU RTX 3050 6GB).
 
 ### 📌 Bản 3.6 (Thu nhỏ ảnh gửi AI ở Flash — O8, 2026-11-20)
 - **`artemis/utils/model_image.py` (mới) — `shrink_for_model`:** cạnh dài ≤ `max_side`, resize Lanczos (không làm mờ), JPEG `jpeg_quality`; ảnh đã nhỏ giữ nguyên; lỗi giải mã → gửi ảnh gốc; nhớ kết quả frame gần nhất.
@@ -355,6 +359,33 @@ Kết luận: (1) API key nhanh ~2× agy; (2) token vào mỗi lượt ~10k là 
 
 List gọn có thêm 7 dòng control không nhãn (6 nút "+" thêm món + nút lọc) mà dạng cũ không có. Thời gian Gemini ở mức ~2 s do output (~400 token) quyết định; Qwen giảm nửa thời gian prefill. Chưa đo trên task thật (cần cắm máy).
 
+### 1.12. Rút gọn system prompt / mô tả tool có làm AI nhanh hơn không? — Gemini API `gemini-3.5-flash-lite`, free tier (2026-11-20)
+Phần cố định mỗi lượt: system prompt Flash ~18 100 ký tự + 16 tool ~16 400 ký tự ≈ 10k token (ảnh chỉ ~1078). Gọi REST thẳng với prompt + tool thật, ảnh 1280 q75 + list gọn, đo giây của một lần gọi.
+
+| Kiểu | Token vào | 8 màn khác nhau: TB / trung vị | Quyết định |
+|---|---|---|---|
+| FULL (đang dùng) | ~10.2k | 5.66 / 7.27 s | chuẩn (dùng index) |
+| Mô tả tool chỉ giữ câu đầu | ~9.4k | 6.15 / 6.58 s | 2/8 màn đổi sang toạ độ / thiếu target |
+| + bỏ nửa sau system prompt (mục 4–6) | ~6.4k | 5.98 / 6.41 s | 5/8 màn bấm bằng toạ độ thay vì index |
+
+- **Không nhanh hơn**: −4k token không đổi thời gian; độ trễ **2 cụm** ~1.5–2.5 s và ~5–9 s, không phụ thuộc độ dài.
+- **Cùng một payload thì luôn cùng cụm**, thêm **1 dấu cách** cuối system prompt → FULL từ ~6 s xuống ~1.5 s (3/3 lần), dấu cách trong mô tả `click` → vẫn ~6 s. ⇒ phía Google định tuyến theo nội dung request, một số máy chủ chậm (free tier). Ngoài đời mỗi lượt ảnh khác nên rơi ngẫu nhiên.
+- **Kết luận**: không rút gọn prompt/tool (không lợi tốc độ, AI chọn kém hơn). Đòn bẩy thật: gửi request dự phòng (hedge) khi quá ~2.5 s, hoặc tier trả phí.
+
+### 1.13. Cắt chờ thừa phía thiết bị — Flash, Gemini API flash-lite, máy `25069PTEBG` qua Wi-Fi ADB (2026-11-20)
+Đo bằng `turns.jsonl` (mới có `obs`: settle/capture/ocr/list/persist cho từng lần chụp). Thời gian AI không so được (free tier 503/504: 9–54 lỗi/lần chạy), chỉ so phần thiết bị:
+
+| | Trước (`base`) | Sau (`fix1`–`fix4`) |
+|---|---|---|
+| Chụp sau thao tác (capture, trung vị) | 0.72 s | 0.41–0.61 s (bỏ settle 0.3 s lần hai trong driver) |
+| `input_text` | 2.6–3.2 s | 1.8–2.5 s (focus đọc cây UI thay chụp ảnh; poll focus thay sleep 1.0 s; xoá 1 RPC helper thay 4 lệnh `input`; kiểm dán ngay thay sleep 0.35 s) |
+| Lượt cuối sau `report_task_status` | 18.7–30.3 s (+30 s nữa sau "Session ended") | 3.4–4.1 s, không còn chờ sau "Session ended" |
+| Task Grab (đọc quán phở nhiều đánh giá nhất) | 501.9 s / 24 lượt (API quá tải) | 84.9 s / 11 lượt (`fix4`) |
+
+- Chụp đôi khi 2.9–3.6 s ngay sau khi bấm chuyển trang: helper chờ luồng UI của app rảnh (app đang tải) → thời gian chờ thật, giữ nguyên.
+- Tóm tắt bước chạy nền cũng gọi Gemini → cạnh tranh quota free với AI chính (khi API quá tải có lúc trễ 5–8 bước).
+- Model local `qwen2.5vl:3b` (Ollama, RTX 3050 6GB): Ban đầu 0/3 màn chọn đúng do Ollama thiếu template tool calling và `context_length` mặc định 4k/8k < prompt 10k cắt mất danh sách UI. Sau khi cấu hình Modelfile với `num_ctx: 16384` + template Tool Calling (`<tools>`/`<tool_call>`) và luật index số nguyên (2026-11-20): đạt **5/5 màn chọn đúng (100% PASS)** trên trace Grab thật (`manage_app`, `click(target=3)`, `input_text(target=1, text="phở bò")`, `click(target=2)`, `click(target=7)`), thời gian trung bình **1.86 s/lượt** (100% GPU, ~4.5 GB VRAM, 49°C), hoàn toàn đủ điều kiện làm AI chính chạy offline.
+
 ## 2. TRẠNG THÁI TRIỂN KHAI (đến bản 3)
 
 | Hạng mục | Trạng thái | Ghi chú |
@@ -382,6 +413,7 @@ List gọn có thêm 7 dòng control không nhãn (6 nút "+" thêm món + nút 
 | **F2.** `find_and_reveal`, `scroll_and_collect` | ❌ Chưa | |
 | **O8. Thu nhỏ ảnh gửi AI ở Flash** (`agent.flash.model_image`, 1280 q75) | ✅ Code xong (2026-11-20) | −63% dung lượng ảnh; còn phải đo `prompt_tokens` và độ chính xác trên task thật (Mục 1.7) |
 | **List gọn + O3 control không nhãn + output ngắn (Flash)** (`agent.flash.element_list`) | ✅ Code xong (2026-11-20) | Token list −36% (Gemini), Qwen prefill 14→7 s, 13/13 giữ nguyên (Mục 1.11); còn đo trên task thật |
+| **Cắt chờ thừa phía thiết bị (Flash)** — settle đôi (O1), `input_text`, chờ tóm tắt khi xong (`agent.flash.final_summary_wait_s`) | ✅ Xong (2026-11-20) | Mục 1.13: chụp 0.72→0.41–0.61 s, `input_text` −0.7 s, lượt cuối 18–30 s→3–4 s; 871 test pass |
 | **OCR cục bộ ONNX cho Flash** (RapidOCR + PaddleOCR Latin v5, `agent.flash.ocr`) | ✅ Xong (2026-11-20) | `auto` chỉ chạy khi XML nghèo; ghép `xml_first` + node OCR ảo; 19 unit test mới; tiếng Việt cần model riêng (Mục 1.6) |
 | Gộp PR upstream đợt 1 (#216, #244, #181, #171) | ✅ Xong | Xem Mục 11; 2635 unit tests passed |
 | Gộp PR upstream đợt 2 (#189, #217, #219, #221) | ❌ Chưa | Xung đột với code đã sửa, phải gộp tay |

@@ -436,13 +436,26 @@ async def set_debug_ai_io(payload: DebugAiIoRequest):
 
 
 @router.get("/ai-io-log")
-async def get_ai_io_log(lines: int = 150):
-    """Retrieve the latest lines of the dedicated AI I/O debug log."""
-    from artemis.utils.ai_io_logger import get_ai_io_log_file_path
+async def get_ai_io_log(lines: int = 150, session_id: str | None = None):
+    """Retrieve the latest lines of the dedicated AI I/O debug log.
 
-    log_path = get_ai_io_log_file_path()
+    If ``session_id`` is provided, retrieves the log specific to that session.
+    Otherwise, retrieves the global latest AI I/O log.
+    """
+    from artemis.utils.ai_io_logger import get_ai_io_log_file_path
+    from artemis.config.paths import get_traces_dir
+
+    if session_id:
+        log_path = get_traces_dir() / session_id / "ai_io.log"
+    else:
+        log_path = get_ai_io_log_file_path()
+
     if not os.path.exists(log_path):
-        return {"exists": False, "path": log_path, "content": "Log file does not exist yet. Run an action with Debug AI I/O enabled."}
+        return {
+            "exists": False,
+            "path": str(log_path),
+            "content": "Log file does not exist yet. Run an action with Debug AI I/O enabled.",
+        }
 
     try:
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
@@ -450,12 +463,12 @@ async def get_ai_io_log(lines: int = 150):
             tail_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
             return {
                 "exists": True,
-                "path": log_path,
+                "path": str(log_path),
                 "total_lines": len(all_lines),
                 "content": "".join(tail_lines),
             }
     except Exception as exc:
-        return {"exists": True, "path": log_path, "error": str(exc), "content": ""}
+        return {"exists": True, "path": str(log_path), "error": str(exc), "content": ""}
 
 
 class RecordingToggleRequest(BaseModel):

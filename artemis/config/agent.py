@@ -846,6 +846,17 @@ class FlashProfileConfig(BaseModel):
         ),
     )
 
+    final_summary_wait_s: float = Field(
+        default=3.0,
+        ge=0,
+        description=(
+            "Once the task is reported done, how long to wait for step summaries still"
+            " being written before returning (they only compress history for later"
+            " turns; unfinished ones are dropped from the trace). Capped by"
+            " memory.runtime.flush_timeout_s."
+        ),
+    )
+
     max_turns: int = Field(
         default=0,
         ge=0,

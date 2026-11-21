@@ -1785,6 +1785,21 @@
           ],
           "default": null,
           "title": "Scrollable"
+        },
+        "timings": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "number"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timings"
         }
       },
       "required": [

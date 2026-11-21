@@ -98,24 +98,22 @@ async def test_input_text_append_moves_cursor_and_preserves_text(actuator, monke
     assert res.ok
     assert res.message == "Typed 'hello' at [500, 300] (normalized)."
     actions = [h["action"] for h in actuator.action_history]
-    # Append semantics: focus tap, cursor-to-end (KEYCODE_MOVE_END), then type without
-    # clearing — matching the historical adb_server focus_and_input_text contract.
-    assert actions == ["tap", "press_key", "input_text"]
-    typed = actuator.action_history[-1]
-    assert typed["clear_existing"] is False
-    cursor = actuator.action_history[-2]
-    assert cursor["key"] == "123"
+    # Append semantics: focus tap, then the driver types without clearing (the
+    # real ADB driver moves the caret to the end itself, KEYCODE_MOVE_END).
+    assert actions == ["tap", "input_text"]
+    assert actuator.action_history[-1]["clear_existing"] is False
 
 
 @pytest.mark.asyncio
-async def test_input_text_clear_erases_then_types_without_reclearing(actuator, monkeypatch):
+async def test_input_text_clear_is_left_to_the_driver(actuator, monkeypatch):
     monkeypatch.setattr("asyncio.sleep", _instant_sleep)
     res = await actuator.input_text("hello", (500, 300), clear_exist=True)
     assert res.ok
     actions = [h["action"] for h in actuator.action_history]
-    # The controller's full clear runs as a shell keyevent batch on this driver.
-    assert actions == ["tap", "execute_shell", "input_text"]
-    assert actuator.action_history[-1]["clear_existing"] is False
+    # One clear, done by the driver (a helper RPC on device, key events only as
+    # its fallback); no second key-event batch from the actuator.
+    assert actions == ["tap", "input_text"]
+    assert actuator.action_history[-1]["clear_existing"] is True
 
 
 async def _instant_sleep(_delay, *args, **kwargs):

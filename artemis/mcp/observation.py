@@ -22,7 +22,9 @@ Validator -- which runs its own UI-change polling -- simply never calls it.
 
 import asyncio
 import base64
+import inspect
 import time
+from typing import Any
 
 from artemis.config import get_temp_dir
 from artemis.context import ArtemisContext
@@ -81,6 +83,17 @@ async def _local_ocr(ctx: ArtemisContext, screenshot_bytes: bytes, xml_hierarchy
         return []
 
 
+async def _capture(controller: Any) -> Any:
+    """Screen data without the driver's built-in settle delay when supported."""
+    try:
+        accepts = "skip_settling" in inspect.signature(controller.get_screen_data).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    if accepts:
+        return await controller.get_screen_data(skip_settling=True)
+    return await controller.get_screen_data()
+
+
 async def observe(
     ctx: ArtemisContext,
     controller: UnifiedMobileController,
@@ -99,13 +112,19 @@ async def observe(
     failed capture yields ``ok=False``; a failed hierarchy parse still returns the
     screenshot with ``hierarchy_ok=False``.
     """
+    timings: dict[str, float] = {}
+    phase_start = time.monotonic()
     try:
         if settle_ms > 0:
             logger.info(f"Delaying {settle_ms / 1000:.1f}s before capturing screen state...")
             await asyncio.sleep(settle_ms / 1000.0)
         else:
             logger.info("Retrieving screen data directly (skip settling)...")
-        device_data = await controller.get_screen_data()
+        timings["settle"] = round(time.monotonic() - phase_start, 3)
+        phase_start = time.monotonic()
+        # settle_ms above is the only settle: the driver's own delay is skipped.
+        device_data = await _capture(controller)
+        timings["capture"] = round(time.monotonic() - phase_start, 3)
         screenshot_bytes = base64.b64decode(device_data.base64)
     except Exception as e:
         logger.error(f"Failed to capture screen state: {e}")
@@ -136,8 +155,11 @@ async def observe(
         scrollable = has_large_scrollable(xml_hierarchy, width, height)
         xml_first = False
         if not ocr_results:
+            phase_start = time.monotonic()
             ocr_results = await _local_ocr(ctx, screenshot_bytes, xml_hierarchy)
+            timings["ocr"] = round(time.monotonic() - phase_start, 3)
             xml_first = bool(ocr_results)
+        phase_start = time.monotonic()
         # Fuse into copies: the raw hierarchy is what gets persisted and diffed.
         source = (
             [dict(n) if isinstance(n, dict) else n for n in (xml_hierarchy or [])]
@@ -148,12 +170,14 @@ async def observe(
         minimal_list_str, elements, _ = format_minimal_list_with_elements(
             fused_xml, width, height, compact=getattr(ctx, "flash_compact_list", False) is True
         )
+        timings["list"] = round(time.monotonic() - phase_start, 3)
     except Exception as e:
         logger.error(f"Failed to fetch or fuse UI hierarchy: {e}")
         minimal_list_str = "Not available due to hierarchy error."
         hierarchy_ok = False
 
     screenshot_path = None
+    phase_start = time.monotonic()
     # persist=False: a transient internal look (e.g. resolving target_text) that
     # nobody will show or replay; skip the data engine and the temp-file fallback.
     if persist and ctx.data_engine:
@@ -178,6 +202,7 @@ async def observe(
 
     from pathlib import Path
 
+    timings["persist"] = round(time.monotonic() - phase_start, 3)
     return (
         ObserveResult(
             ok=True,
@@ -190,6 +215,7 @@ async def observe(
             elements=elements,
             hierarchy_ok=hierarchy_ok,
             scrollable=scrollable,
+            timings=timings,
         ),
         screenshot_bytes,
     )

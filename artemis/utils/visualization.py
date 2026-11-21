@@ -370,8 +370,11 @@ def format_minimal_list_with_points(
 #: from the compact list. A heads-up notification or the shade is taller and stays.
 _STATUS_BAR_FRACTION = 0.06
 #: An unlabeled clickable larger than this share of the screen is a container
-#: (card, list row, backdrop), not an icon control.
-_ICON_MAX_AREA_FRACTION = 0.15
+#: (card, banner, list row, backdrop), not an icon control. A 48dp icon button
+#: is under 1% of a phone screen; 5% leaves room for wide pill buttons.
+_ICON_MAX_AREA_FRACTION = 0.05
+#: Inputs (search fields) span the screen width, so they get a larger cap.
+_INPUT_MAX_AREA_FRACTION = 0.15
 _ICON_MIN_SIDE_PX = 12
 _MAX_ICON_LINES = 40
 
@@ -612,9 +615,9 @@ def _unlabeled_controls(
     found: list[dict[str, Any]] = []
     screen_area = max(1, width * height)
     listed_centers = [el["center"] for el in listed if el.get("center")]
-    idx = start_idx
-    for node in fused_xml:
-        if len(found) >= _MAX_ICON_LINES:
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for pos, node in enumerate(fused_xml):
+        if len(candidates) >= _MAX_ICON_LINES:
             break
         if (node.get("text") or node.get("content-desc") or node.get("hint") or "").strip():
             continue
@@ -632,24 +635,17 @@ def _unlabeled_controls(
         w, h = right - left, bottom - top
         if w < _ICON_MIN_SIDE_PX or h < _ICON_MIN_SIDE_PX:
             continue
-        if w * h > screen_area * _ICON_MAX_AREA_FRACTION:
+        cap = _INPUT_MAX_AREA_FRACTION if "EditText" in cls else _ICON_MAX_AREA_FRACTION
+        if w * h > screen_area * cap:
             continue
         if _is_status_bar_node(node, height, (left, top, right, bottom)):
             continue
         if any(left <= cx <= right and top <= cy <= bottom for cx, cy in listed_centers):
             continue
         cx, cy = get_center_coordinates(left, top, right, bottom)
-        if any(abs(cx - f["center"][0]) < 8 and abs(cy - f["center"][1]) < 8 for f in found):
+        if any(abs(cx - c["center"][0]) < 8 and abs(cy - c["center"][1]) < 8 for _, c in candidates):
             continue
-        kind = _icon_kind(node)
-        line = f"[{idx}] ({kind}) {normalize_bounds(left, top, right, bottom)}"
-        if kind == "toggle":
-            line += f" checked:{str(node.get('checked') or '?').strip().lower()}"
-        if str(node.get("enabled") or "").strip().lower() == "false":
-            line += " enabled:false"
-        lines.append(line)
         element = {
-            "index": idx,
             "center": [cx, cy],
             "text": "",
             "bounds": [left, top, right, bottom],
@@ -661,9 +657,64 @@ def _unlabeled_controls(
         for state_attr in ("checked", "enabled", "selected", "package"):
             if node.get(state_attr) is not None:
                 element[state_attr] = node.get(state_attr)
+        candidates.append((pos, element))
+
+    # A clickable wrapper around another unlabeled control: keep only the
+    # inner (leaf) control, the wrapper adds a second target for one spot.
+    def _contains(outer: dict[str, Any], inner: dict[str, Any]) -> bool:
+        ol, ot, orr, ob = outer["bounds"]
+        il, it, ir, ib = inner["bounds"]
+        return outer is not inner and ol <= il and ot <= it and orr >= ir and ob >= ib and (
+            (orr - ol) * (ob - ot) > (ir - il) * (ib - it))
+
+    kept = [(pos, el) for pos, el in candidates
+            if not any(_contains(el, other) for _, other in candidates)]
+
+    idx = start_idx
+    for pos, element in kept:
+        left, top, right, bottom = element["bounds"]
+        kind = _icon_kind(element)
+        line = f"[{idx}] ({kind}) {normalize_bounds(left, top, right, bottom)}"
+        if kind == "toggle":
+            line += f" checked:{str(element.get('checked') or '?').strip().lower()}"
+        if str(element.get("enabled") or "").strip().lower() == "false":
+            line += " enabled:false"
+        if _covered_by_later_layer(fused_xml, pos, element["bounds"]):
+            element["occluded"] = True
+            line += " (may be occluded)"
+        element["index"] = idx
+        lines.append(line)
         found.append(element)
         idx += 1
     return lines, found
+
+
+def _covered_by_later_layer(
+    fused_xml: list[dict[str, Any]], pos: int, icon_bounds: list[int]
+) -> bool:
+    """True when a node drawn after the icon (later in the flattened tree, so
+    not one of its ancestors) covers at least half of it: a dialog, bottom
+    sheet, scrim or floating bar on top. Only touchable or text nodes count;
+    a plain layout pass-through does not block a tap.
+    """
+    l, t, r, b = icon_bounds
+    area = max(1, (r - l) * (b - t))
+    for node in fused_xml[pos + 1:]:
+        if node.get("ocr_virtual"):
+            continue
+        if not (_is_truthy(node.get("clickable")) or _is_truthy(node.get("long-clickable"))
+                or (node.get("text") or node.get("content-desc") or "").strip()):
+            continue
+        nb = parse_bounds(node.get("bounds"))
+        if not nb:
+            continue
+        nl, nt, nr, nbot = nb
+        if nl >= l and nt >= t and nr <= r and nbot <= b:
+            continue  # a child of the icon
+        iw, ih = min(r, nr) - max(l, nl), min(b, nbot) - max(t, nt)
+        if iw > 0 and ih > 0 and iw * ih >= area * 0.5:
+            return True
+    return False
 
 
 def crop_and_annotate_target(
