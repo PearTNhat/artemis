@@ -7,18 +7,18 @@
 :root {
   --bg: #f5f6f8; --surface: #ffffff; --ink: #15191f; --muted: #5a6371; --line: #dde1e7;
   --accent: #1f56c9; --accent-soft: #e6edfb; --ok: #18794e; --ok-soft: #dcf2e6; --bad: #b8322a; --bad-soft: #fbe3e1;
-  --mark: #e5484d;
+  --mark: #e5484d; --pick: #1f56c9;
   --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --bg: #111418; --surface: #191d23; --ink: #e7eaee; --muted: #9aa4b2; --line: #2b313a;
   --accent: #7ea6ff; --accent-soft: #1d2a45; --ok: #4cc38a; --ok-soft: #14301f; --bad: #ff7b72; --bad-soft: #3a1b19;
-  --mark: #ff6b6b; color-scheme: dark } }
+  --mark: #ff6b6b; --pick: #7ea6ff; color-scheme: dark } }
 :root[data-theme="dark"] {
   --bg: #111418; --surface: #191d23; --ink: #e7eaee; --muted: #9aa4b2; --line: #2b313a;
   --accent: #7ea6ff; --accent-soft: #1d2a45; --ok: #4cc38a; --ok-soft: #14301f; --bad: #ff7b72; --bad-soft: #3a1b19;
-  --mark: #ff6b6b; color-scheme: dark }
+  --mark: #ff6b6b; --pick: #7ea6ff; color-scheme: dark }
 body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.5; }
 .wrap { max-width: 1240px; margin: 0 auto; padding-block: 28px 64px;
   padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
@@ -59,7 +59,7 @@ tr.current td:first-child::after { content: "Flash hiện tại"; margin-left: 8
   background: var(--surface); color: var(--ink); cursor: pointer; }
 .screens button[aria-pressed="true"], .chip-btn[aria-pressed="true"] { background: var(--accent); color: var(--surface); border-color: var(--accent); }
 button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.views { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; padding: 14px; }
+.views { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 14px; }
 .view { display: grid; gap: 6px; align-content: start; min-width: 0; }
 .view img { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
 .view b { font-size: .85rem; }
@@ -79,6 +79,12 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
 .shot { position: relative; align-self: start; }
 .shot img { width: 120px; display: block; border-radius: 4px; border: 1px solid var(--line); }
 .shot .box { position: absolute; border: 2px solid var(--mark); border-radius: 2px; box-shadow: 0 0 0 1px rgba(255,255,255,.6); }
+.shot .pick { position: absolute; border: 2px dashed var(--pick); border-radius: 2px; box-shadow: 0 0 0 1px rgba(255,255,255,.6); }
+.picked { font-size: .8rem; }
+.picked.okk { color: var(--ok); } .picked.badd { color: var(--bad); }
+.keyline { display: inline-flex; gap: 12px; font-size: .78rem; color: var(--muted); align-items: center; }
+.keyline i { display: inline-block; width: 14px; height: 10px; border: 2px solid var(--mark); vertical-align: middle; margin-right: 4px; }
+.keyline i.p { border: 2px dashed var(--pick); }
 .body { display: grid; gap: 7px; align-content: start; min-width: 0; }
 .head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
 .head code { font-family: var(--font-mono); font-size: .8rem; font-weight: 500; }
@@ -113,10 +119,11 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
     <div class="panel findings">
       <ul>
         <li><b>Ảnh thật là bắt buộc.</b> Bỏ ảnh chỉ đúng khi đích có chữ; với icon, công tắc, nút "+" (không nhãn) thì gần như đoán mò.</li>
-        <li><b>Tốt nhất: list gọn + ảnh thật chỉ đánh số các phần tử không nhãn</b> (49/52, bài khó 33/34). Vẽ số lên mọi phần tử thì che chữ nên tụt ở bài có chữ; chỉ đánh số chỗ không có chữ thì giữ được cả hai.</li>
-        <li><b>Ảnh thật + list gọn</b> (cách Flash đang làm) 48/52. <b>Nhãn + tâm có giữ loại/trạng thái + ảnh</b> 47/52 nhưng ít token hơn ~200 và nhanh hơn ~0.45 s.</li>
-        <li><b>Wireframe có chữ</b> (chữ trong khung, ảnh ghi [image]) 44/52: hơn wireframe rỗng nhưng vẫn kém ảnh thật, tốn token như ảnh thật. Nhiều app (vd. Grab) không khai ảnh món ăn trong cây UI nên không biết chỗ nào là ảnh để ghi chú.</li>
-        <li><b>Wireframe rỗng không giúp (40/52, đã loại):</b> vốn đã trắng đen nhưng vẫn tốn token như ảnh thật (Ollama tính theo kích thước cố định), lại không có hình icon, chỉ lặp lại toạ độ đã có trong list. Vẽ khung &amp; số lên ảnh thật chỉ tốn thêm ~10 ms.</li>
+        <li><b>Tốt nhất: list gọn + ảnh thật chỉ đánh số các phần tử không nhãn</b> (51/52, bài khó 33/34). Vẽ số lên mọi phần tử thì che chữ nên tụt ở bài có chữ; chỉ đánh số chỗ không có chữ thì giữ được cả hai.</li>
+        <li><b>Ảnh thật + list gọn</b> (cách Flash đang làm) 49/52. <b>Nhãn + tâm có giữ loại/trạng thái + ảnh</b> 48/52 nhưng ít token hơn ~200 và nhanh hơn ~0.45 s.</li>
+        <li><b>Wireframe có chữ</b> 44/52; thêm gợi ý “gần chữ nào” cho phần tử không nhãn (vd. công tắc gần “Sun, Sat”, nút + gần “PHỞ TÁI NẠM”) lên <b>46/52</b> — dùng khi không được gửi ảnh thật. Nhưng tốn token như ảnh thật, và nhiều app (vd. Grab) không khai ảnh trong cây UI nên không biết chỗ nào là ảnh.</li>
+        <li><b>OCR</b>: 35% dòng là chữ trong ảnh/banner/status bar. Lọc bằng độ tin cậy lại tệ hơn (17/52 so với 24/52) vì bỏ mất chữ tiếng Việt; vấn đề chính của OCR là thiếu icon và thiếu loại phần tử, không phải nhiễu.</li>
+        <li><b>Wireframe rỗng (40/52) đã xoá:</b> vốn đã trắng đen nhưng vẫn tốn token như ảnh thật (Ollama tính theo kích thước cố định), lại không có hình icon, chỉ lặp lại toạ độ đã có trong list. Vẽ khung &amp; số lên ảnh thật chỉ tốn thêm ~10 ms.</li>
         <li><b>Không có cây UI</b> (kiểu desktop): OCR + dò icon OpenCV còn kém xa; desktop nên đọc cây accessibility của hệ điều hành (Windows UIA, macOS AX).</li>
       </ul>
     </div>
@@ -142,10 +149,12 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
     <h2>Toàn bộ bài test</h2>
     <div class="filters">
       <div class="screens" id="tagfilter" role="group" aria-label="Lọc theo loại bài"></div>
-      <label for="failmode">Sai ở cách gửi <select id="failmode"><option value="">(tất cả)</option></select></label>
+      <label for="showmode">Xem câu trả lời của <select id="showmode"></select></label>
+      <label for="failmode">Chỉ bài sai ở <select id="failmode"><option value="">(tất cả)</option></select></label>
       <label for="q">Tìm <input type="search" id="q" placeholder="câu lệnh, mã bài…"></label>
       <span class="count" id="count"></span>
     </div>
+    <div class="keyline"><span><i></i>đáp án</span><span><i class="p"></i>AI đã chọn (theo cách gửi đang xem)</span></div>
     <div class="legend" id="legend"></div>
     <div class="grid" id="grid"></div>
   </section>
@@ -195,12 +204,11 @@ function showScreen(s) {
   $("#views").innerHTML =
     v("real", "Ảnh thật", "Gửi kèm ở các cách “Ảnh”, “NT+Ảnh”, “OCR+Ảnh”.") +
     v("wiretext", "Wireframe có chữ", "Trắng đen, mỗi khung ghi chữ hoặc loại/trạng thái; ảnh ghi [image] nếu cây UI có khai. 44/52.") +
-    v("wireframe", "Wireframe rỗng (đã loại)", "Chỉ khung + số, không chữ, không hình icon. 40/52 — không hơn gửi chữ.") +
     v("somU", "Ảnh thật, chỉ đánh số phần tử không nhãn", "Không che chữ. Cách “Gọn+SốKN” — đúng nhiều nhất.") +
     v("ocr_icons", "Không cây UI: OCR + dò icon", "Chỉ những gì OCR/OpenCV tìm được. Cách “OCR+Icon+Số”.");
   $("#lists").innerHTML =
     `<div><b>List gọn (Flash hiện tại) — ${sc.n_elements} phần tử, ${sc.n_unlabeled} không nhãn</b><pre>${esc(sc.list_compact)}</pre></div>` +
-    `<div><b>Nhãn + tâm (giữ loại/trạng thái)</b><pre>${esc(sc.list_center)}</pre></div>`;
+    `<div><b>Nhãn + tâm (giữ loại) + gợi ý “gần chữ nào”</b><pre>${esc(sc.list_center)}</pre></div>`;
 }
 
 function renderFilters() {
@@ -209,25 +217,30 @@ function renderFilters() {
   $("#tagfilter").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; curTag = b.dataset.t;
     document.querySelectorAll("#tagfilter button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.t === curTag))); renderCases(); });
   $("#failmode").innerHTML += D.modes.map((m) => `<option value="${m.mode}">${esc(m.label)}</option>`).join("");
+  $("#showmode").innerHTML = D.modes.map((m) => `<option value="${m.mode}">${esc(m.label)}</option>`).join("");
+  $("#showmode").addEventListener("change", renderCases);
   $("#failmode").addEventListener("change", renderCases);
   $("#q").addEventListener("input", renderCases);
   $("#legend").innerHTML = D.modes.map((m) => `<span><code>${esc(m.short)}</code> = ${esc(m.label)}</span>`).join("");
 }
 
 function renderCases() {
-  const fm = $("#failmode").value, q = $("#q").value.trim().toLowerCase();
+  const fm = $("#failmode").value, q = $("#q").value.trim().toLowerCase(), sm = $("#showmode").value;
   const list = D.cases.filter((c) => (!curTag || c.tags.includes(curTag)) && (!fm || (c.results[fm] && !c.results[fm].ok))
     && (!q || (c.id + " " + c.instruction).toLowerCase().includes(q)));
   $("#count").textContent = `${list.length} bài`;
   $("#grid").innerHTML = list.map((c) => {
     const boxes = c.boxes.map((b) => `<span class="box" style="left:${(b[0] * 100).toFixed(2)}%;top:${(b[1] * 100).toFixed(2)}%;width:${((b[2] - b[0]) * 100).toFixed(2)}%;height:${((b[3] - b[1]) * 100).toFixed(2)}%"></span>`).join("");
+    const sr = c.results[sm];
+    const pbox = sr && sr.pb ? `<span class="pick" style="left:${(sr.pb[0] * 100).toFixed(2)}%;top:${(sr.pb[1] * 100).toFixed(2)}%;width:${((sr.pb[2] - sr.pb[0]) * 100).toFixed(2)}%;height:${((sr.pb[3] - sr.pb[1]) * 100).toFixed(2)}%"></span>` : "";
+    const pline = sr ? `<div class="picked ${sr.ok ? "okk" : "badd"}">${sr.ok ? "✓" : "✗"} AI chọn [${sr.idx ?? "?"}] ${esc(sr.picked ? '"' + sr.picked + '"' : "(phần tử không nhãn)")}</div>` : "";
     const chips = D.modes.map((m) => { const r = c.results[m.mode]; if (!r) return `<span class="chip na">${esc(m.short)}</span>`;
       const tip = `${m.label}: ${r.ok ? "đúng" : "sai"} — chọn [${r.idx ?? "?"}] "${r.picked || "(không nhãn)"}"`;
       return `<span class="chip ${r.ok ? "ok" : "bad"}" title="${esc(tip)}">${r.ok ? "✓" : "✗"} ${esc(m.short)}</span>`; }).join("");
-    return `<article class="panel card"><div class="shot"><img src="img/${c.screen}_real.jpg" alt="Màn hình ${c.screen}" loading="lazy">${boxes}</div>
+    return `<article class="panel card"><div class="shot"><img src="img/${c.screen}_real.jpg" alt="Màn hình ${c.screen}" loading="lazy">${boxes}${pbox}</div>
       <div class="body"><div class="head"><code>${c.id}</code>${c.tags.map((t) => `<span class="tag">${esc(D.tags[t] || t)}</span>`).join("")}</div>
       <div class="instr">${esc(c.instruction)}</div><div class="ans">Đáp án: ${esc(c.answer)} · màn hình <code>${c.screen}</code></div>
-      <div class="chips">${chips}</div>
+      ${pline}<div class="chips">${chips}</div>
       <button type="button" class="linkish" data-s="${c.screen}">Xem ảnh &amp; list model nhận được →</button></div></article>`;
   }).join("");
 }

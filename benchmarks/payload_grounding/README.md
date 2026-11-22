@@ -42,8 +42,8 @@ Chấm điểm: model trả `{"index": N}` → lấy nhãn phần tử N → đ�
 
 ## Các cách gửi (`--modes`)
 
-**Mặc định chỉ chạy 6 cách đáng so sánh** (`CORE_MODES` trong `bench.py`): `shot768`, `compact_somU`,
-`center2_shot`, `center2`, `ocr_only`, `ocr_icons_som`. Các cách còn lại đã loại vì không có lợi
+**Mặc định chỉ chạy 7 cách đáng so sánh** (`CORE_MODES` trong `bench.py`): `shot768`, `compact_somU`,
+`center2_shot`, `wire_near`, `center2_near`, `ocr_only`, `ocr_icons_som`. Các cách còn lại đã loại vì không có lợi
 (wireframe, 2 tầng, list không ảnh, gộp OCR, "nhãn + tâm" bản cũ mất loại phần tử…) nhưng vẫn chạy
 được bằng `--modes <tên>` hoặc `--modes all`; `--summary --all` / `gallery.py --all-modes` để xem lại.
 
@@ -68,6 +68,10 @@ Chấm điểm: model trả `{"index": N}` → lấy nhãn phần tử N → đ�
 | `compact_somU` | list gọn + ảnh thật **chỉ vẽ khung & số lên phần tử không nhãn** (không che chữ) |
 | `center2_somU` | `center2` + ảnh chỉ đánh số phần tử không nhãn |
 | `wire_text` | wireframe trắng đen **có chữ**: mỗi khung ghi nhãn, hoặc loại/trạng thái nếu không nhãn; ImageView vẽ `[image]`; + list gọn |
+| `center2_near` / `somU_near` / `wire_near` | như `center2` / `compact_somU` / `wire_text` nhưng list có thêm `near "<chữ>"` sau mỗi phần tử không nhãn: chữ cùng hàng, nếu không có thì 1–2 dòng chữ ngay bên dưới cùng cột (luật bố cục chung) |
+| `ocr_clean` | `ocr_only` sau khi lọc nhiễu chung (dải status bar, độ tin cậy < 0.8, dòng 1 ký tự) |
+
+Wireframe rỗng (`sketch`, `center_sketch`) đã xoá khỏi code (40/52, không hơn gửi chữ).
 
 `list_center` / `center_*` (bản cũ) chỉ lấy chữ nên phần tử không nhãn thành `""` và mất loại
 (`(toggle)`, `checked:false`) mà list gọn của Flash có — `center2*` sửa điều đó.

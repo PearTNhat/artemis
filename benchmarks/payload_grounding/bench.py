@@ -8,7 +8,6 @@ change "instruction", add alternative labels to "accept", or delete lines.
 
 Modes (all answer {"index": N} over the Flash element list):
   shot768       screenshot (768px JPEG q75) + Flash compact list
-  sketch        512px grayscale wireframe with index numbers + compact list
   2stage        model describes screenshot (<=60 words), then text-only decide with compact list
   list_full     Flash list compact=False, no image
   list_compact  Flash compact list (current format), no image
@@ -18,7 +17,6 @@ Modes (all answer {"index": N} over the Flash element list):
   ocr_shot      OCR text boxes + screenshot 768 (no accessibility tree)
   xml_ocr       Flash compact list after fusing OCR into the tree (Flash ocr.mode="always"), no image
   center_ocr    label + center list built from the tree fused with OCR, no image
-  center_sketch label + center list + the wireframe sketch
   center_som    label + center list + real screenshot with every element's box and index drawn on it
   center_shot   label + center list + plain real screenshot (768px)
   center2       Flash compact list with each box replaced by its center: keeps role/state hints
@@ -26,6 +24,10 @@ Modes (all answer {"index": N} over the Flash element list):
   center2_shot  center2 + plain real screenshot
   compact_somU  Flash compact list + screenshot with box+index drawn ONLY on unlabeled elements
   center2_somU  center2 + the same unlabeled-only marked screenshot
+  center2_near  center2 + 'near "<closest label>"' after every unlabeled element, no image
+  somU_near     compact list with the same near-label hints + unlabeled-only marked screenshot
+  wire_near     text wireframe + compact list with near-label hints
+  ocr_clean     ocr_only after a generic noise filter (status bar band, score < 0.8, 1-char lines)
   wire_text     black/white wireframe WITH text: each box shows its label, or its role/state for
                 unlabeled elements ("(toggle) checked:false"), images drawn as "[image]"; + compact list
   ocr_icons     no tree: OCR text boxes + OpenCV-detected icon boxes ("(icon)"), no image
@@ -54,19 +56,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, REPO)
 
-ALL_MODES = ["shot768", "sketch", "2stage", "list_full", "list_compact", "list_center", "list_label",
-             "center_sketch", "center_som", "center_shot", "center2", "center2_shot", "compact_somU",
-             "center2_somU", "wire_text", "ocr_only", "ocr_shot", "xml_ocr", "center_ocr",
+ALL_MODES = ["shot768", "2stage", "list_full", "list_compact", "list_center", "list_label",
+             "center_som", "center_shot", "center2", "center2_shot", "compact_somU",
+             "center2_somU", "wire_text", "center2_near", "somU_near", "wire_near",
+             "ocr_only", "ocr_clean", "ocr_shot", "xml_ocr", "center_ocr",
              "ocr_icons", "ocr_icons_som"]
 # Default set: the ones worth running. The others stay runnable with --modes (and their old
 # results stay in results/*.jsonl) but proved useless: wireframe, 2-stage, no-image lists,
 # OCR fusion, and the old label+center that dropped role/state hints.
-CORE_MODES = ["shot768", "compact_somU", "center2_shot", "center2", "ocr_only", "ocr_icons_som"]
-OCR_MODES = ("ocr_only", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
-NO_TREE_MODES = ("ocr_only", "ocr_shot", "ocr_icons", "ocr_icons_som")  # graded against the tree
-IMAGE_MODES = {"shot768": "shot", "ocr_shot": "shot", "sketch": "sketch", "center_sketch": "sketch",
+CORE_MODES = ["shot768", "compact_somU", "center2_shot", "wire_near", "center2_near", "ocr_only", "ocr_icons_som"]
+OCR_MODES = ("ocr_only", "ocr_clean", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
+NO_TREE_MODES = ("ocr_only", "ocr_clean", "ocr_shot", "ocr_icons", "ocr_icons_som")  # graded against the tree
+IMAGE_MODES = {"shot768": "shot", "ocr_shot": "shot",
                "center_som": "som", "ocr_icons_som": "som", "center_shot": "shot", "center2_shot": "shot",
-               "compact_somU": "somU", "center2_somU": "somU", "wire_text": "wiretext"}
+               "compact_somU": "somU", "center2_somU": "somU", "wire_text": "wiretext", "somU_near": "somU",
+               "wire_near": "wiretext"}
 DESCRIBE = ("Describe this Android screen in at most 60 words: app/screen name, main sections, "
             "and any icon-only buttons with their position and look.")
 norm = lambda t: " ".join((t or "").lower().split())
@@ -98,26 +102,6 @@ def b64_jpeg(im, max_side, q=75):
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def sketch(els, w, h, max_side=512):
-    from PIL import Image, ImageDraw, ImageFont
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 13)
-    except OSError:
-        font = ImageFont.load_default()
-    s = max_side / max(w, h)
-    im = Image.new("L", (int(w * s), int(h * s)), 255)
-    d = ImageDraw.Draw(im)
-    for e in els:
-        x1, y1, x2, y2 = (int(v * s) for v in e["bounds"])
-        d.rectangle([x1, y1, max(x1 + 1, x2 - 1), max(y1 + 1, y2 - 1)], outline=0, width=1)
-    for e in els:
-        x1, y1 = (int(v * s) for v in e["bounds"][:2])
-        lab = str(e["index"])
-        d.rectangle([x1, y1, x1 + d.textlength(lab, font=font) + 3, y1 + 14], fill=0)
-        d.text((x1 + 2, y1), lab, fill=255, font=font)
-    return b64_jpeg(im, max_side, 85)
-
-
 def ocr_lines(case, with_xml):
     """Flash's local OCR on the case screenshot; cached per case (the time is measured once).
 
@@ -139,9 +123,9 @@ def ocr_lines(case, with_xml):
     return out
 
 
-def ocr_elements(case):
+def ocr_elements(case, clean=False):
     els = []
-    for i, ln in enumerate(ocr_lines(case, False)["lines"], 1):
+    for i, ln in enumerate(ocr_clean_lines(case) if clean else ocr_lines(case, False)["lines"], 1):
         xs = [p["x"] for p in ln["position"]]
         ys = [p["y"] for p in ln["position"]]
         b = [min(xs), min(ys), max(xs), max(ys)]
@@ -274,6 +258,55 @@ def wire_text_image(case, max_side=768):
     return b64_jpeg(im.convert("RGB"), max_side, 85)
 
 
+def add_near_hints(text, els, screen_h):
+    """Append 'near "<label>"' to each unlabeled element line. Generic layout rule, no app
+    knowledge: (1) a label on the same row (label left / control right), else (2) the first one or
+    two labels directly below in the same column (picture or card with its caption below),
+    else (3) the closest label."""
+    labeled = [e for e in els if e.get("text")]
+    hints = {}
+    for e in els:
+        if e.get("text") or not labeled:
+            continue
+        x1, y1, x2, y2 = e["bounds"]
+        cx, cy = e["center"]
+        h = y2 - y1
+        row = [t for t in labeled
+               if min(y2, t["bounds"][3]) - max(y1, t["bounds"][1]) > 0.5 * min(h, t["bounds"][3] - t["bounds"][1])]
+        if row:
+            hints[e["index"]] = min(row, key=lambda t: abs(t["center"][0] - cx))["text"][:40]
+            continue
+        reach = 1.2 * (x2 - x1)
+        below = [t for t in labeled if t["bounds"][1] >= y2 - 5 and t["bounds"][1] - y2 < 0.12 * screen_h
+                 and t["bounds"][0] - reach <= cx <= t["bounds"][2] + reach]
+        if below:
+            overlaps = lambda t: min(x2, t["bounds"][2]) > max(x1, t["bounds"][0])
+            below.sort(key=lambda t: (not overlaps(t), t["bounds"][1], abs(t["center"][0] - cx)))
+            first = below[0]
+            col = [t for t in below if abs(t["center"][0] - first["center"][0]) < (x2 - x1)]
+            col.sort(key=lambda t: t["bounds"][1])
+            hints[e["index"]] = " / ".join(t["text"][:30] for t in col[:2])
+            continue
+        hints[e["index"]] = min(labeled, key=lambda t: (t["center"][0] - cx) ** 2 + (t["center"][1] - cy) ** 2)["text"][:40]
+    out = []
+    for line in text.splitlines():
+        m = re.match(r"\[(\d+)\]", line)
+        if m and int(m[1]) in hints:
+            line += f' near "{hints[int(m[1])]}"'
+        out.append(line)
+    return "\n".join(out)
+
+def ocr_clean_lines(case):
+    """Generic OCR noise filter: drop the status-bar band, low-confidence and 1-character lines."""
+    top = 0.04 * case["h"]
+    keep = []
+    for ln in ocr_lines(case, False)["lines"]:
+        if max(p["y"] for p in ln["position"]) < top or ln.get("score", 1) < 0.8 or len(ln["text"].strip()) <= 1:
+            continue
+        keep.append(ln)
+    return keep
+
+
 def compact_to_center(text):
     """Replace the first 'x1,y1,x2,y2' (0-1000 normalized) of each compact line by '@cx,cy'."""
     def one(line):
@@ -285,8 +318,8 @@ def compact_to_center(text):
 def listing(mode, s):
     import copy
     from artemis.utils.visualization import format_minimal_list_with_elements
-    if mode in ("ocr_only", "ocr_shot"):
-        els = ocr_elements(s)
+    if mode in ("ocr_only", "ocr_shot", "ocr_clean"):
+        els = ocr_elements(s, clean=mode == "ocr_clean")
         text = "\n".join(f'[{e["index"]}] "{e["text"]}" @{e["center"][0] * 1000 // s["w"]},'
                          f'{e["center"][1] * 1000 // s["h"]}' for e in els)
         return text, els
@@ -303,9 +336,11 @@ def listing(mode, s):
             text = center_text(els, s["w"], s["h"], icon_label='""')
         return text, els
     text, els, _ = format_minimal_list_with_elements(s["ui"], s["w"], s["h"], compact=mode != "list_full")
-    if mode in ("center2", "center2_shot", "center2_somU"):
+    if mode in ("center2_near", "somU_near", "wire_near"):
+        text = add_near_hints(text, els, s["h"])
+    if mode in ("center2", "center2_shot", "center2_somU", "center2_near"):
         text = compact_to_center(text)
-    if mode in ("list_center", "center_sketch", "center_som", "center_shot"):
+    if mode in ("list_center", "center_som", "center_shot"):
         text = "\n".join(f'[{e["index"]}] "{e.get("text", "")}" @{e["center"][0] * 1000 // s["w"]},'
                          f'{e["center"][1] * 1000 // s["h"]}' for e in els)
     elif mode == "list_label":
@@ -327,11 +362,9 @@ def decide_prompt(text, instr, desc=None, ocr=False, mode=""):
         what += ". The image shows the screen with each element's box and [index] drawn in red"
     elif mode in ("compact_somU", "center2_somU"):
         what += ". The image shows the screen; elements without a text label have their box and [index] drawn in red"
-    elif mode == "wire_text":
+    elif mode in ("wire_text", "wire_near"):
         what += (". The image is a black/white wireframe of the screen: each element's box with its [index] "
                  "and label (pictures shown as [image])")
-    elif mode in ("sketch", "center_sketch"):
-        what += ". The image is a wireframe of the screen: each element's box with its [index]"
     return (f"{head}{what}:\n{text}\n\nYou are operating this phone. "
             f"Your intent for this step:\n{instr}\n\nWhich element should be tapped? "
             "Reply ONLY JSON: {\"index\": N}")
@@ -509,11 +542,11 @@ def run(args):
                         r["wall"] += d["wall"]
                     else:
                         kind = IMAGE_MODES.get(mode)
-                        img = (b64_jpeg(shot, 768) if kind == "shot" else sketch(els, s["w"], s["h"]) if kind == "sketch"
+                        img = (b64_jpeg(shot, 768) if kind == "shot"
                                else som_image(s["img"], els) if kind == "som"
                                else som_image(s["img"], [e for e in els if not e.get("text")]) if kind == "somU"
                                else wire_text_image(s) if kind == "wiretext" else None)
-                        r = call(args, decide_prompt(text, instr, ocr=mode in ("ocr_only", "ocr_shot"), mode=mode), img)
+                        r = call(args, decide_prompt(text, instr, ocr=mode in ("ocr_only", "ocr_shot", "ocr_clean"), mode=mode), img)
                     ok, idx, lab = evaluate(r["reply"], mode, s, els)
                     f.write(json.dumps(dict(step=s["id"], mode=mode, model=model_id, ok=ok, idx=idx, picked=lab,
                                             accept=s["accept"], n_els=len(els), **r, **extra),
