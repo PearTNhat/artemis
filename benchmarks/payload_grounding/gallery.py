@@ -22,7 +22,7 @@ MODE_INFO = [  # (mode, short chip, label, group)
     ("center2_somU", "NT2+SốKN", "Nhãn + tâm (giữ loại) + ảnh chỉ đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
     ("center_som", "NT+Số", "Nhãn + tâm (bản cũ, mất loại) + ảnh vẽ khung & số mọi phần tử", "Có cây UI, có ảnh"),
     ("center_shot", "NT+Ảnh", "Nhãn + tâm (bản cũ, mất loại) + ảnh thật", "Có cây UI, có ảnh"),
-    ("wire2_near", "WF2", "Wireframe v2 (chữ vừa khung, vùng ảnh [image]) + list gọn có gợi ý gần chữ", "Có cây UI, ảnh vẽ lại (không pixel thật)"),
+    ("wire2_near", "WF2", "Wireframe v2 (chữ vừa khung, vùng ảnh [image]) + list gọn có gợi ý gần chữ — đo trên GPU laptop (RTX 3050), thời gian không so trực tiếp với Colab", "Có cây UI, ảnh vẽ lại (không pixel thật)"),
     ("wire_near", "WF chữ+gần", "Wireframe trắng đen có chữ + list gọn có gợi ý “gần chữ nào”", "Có cây UI, ảnh vẽ lại (không pixel thật)"),
     ("wire_text", "WF chữ", "Wireframe trắng đen có chữ + list gọn", "Có cây UI, ảnh vẽ lại (không pixel thật)"),
     ("somU_near", "Gọn+SốKN+gần", "List gọn có gợi ý “gần chữ nào” + ảnh đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
@@ -72,6 +72,51 @@ def answer_boxes(case):
     return [e["bounds"] for e in t]
 
 
+def _strip_marks(t):
+    import unicodedata
+    t = unicodedata.normalize("NFD", t.replace("đ", "d").replace("Đ", "D"))
+    return "".join(ch for ch in t if unicodedata.category(ch) != "Mn")
+
+
+def compare_ocr(case):
+    """Per element of the Flash list: what OCR (+ icon detector v2) delivers for it."""
+    norm = lambda t: " ".join((t or "").lower().split())
+    _, xml = B.listing("list_compact", case)
+    ocr = B.ocr_elements(case)
+    icons = B.detect_icons_v2(case)["boxes"]
+
+    def inside(p, e, m=8):
+        return e["bounds"][0] - m <= p[0] <= e["bounds"][2] + m and e["bounds"][1] - m <= p[1] <= e["bounds"][3] + m
+    rows = []
+    for e in xml:
+        if e.get("text"):
+            hits = [o for o in ocr if inside(o["center"], e)]
+            got = " | ".join(o["text"] for o in hits)
+            xt, j = norm(e["text"]), norm(got)
+            if not hits:
+                st = "missing"
+            elif xt in j or j in xt:
+                st = "ok"
+            else:
+                a, b2 = _strip_marks(xt).replace(" ", ""), _strip_marks(j).replace(" ", "")
+                if a in b2 or b2 in a:
+                    st = "accent"
+                elif len(j) > len(xt) * 1.6:
+                    st = "merged"
+                else:
+                    st = "wrong"
+            rows.append(dict(i=e["index"], xml=e["text"][:60], ocr=got[:60], st=st))
+        else:
+            found = any(inside(((b[0] + b[2]) // 2, (b[1] + b[3]) // 2), e) or
+                        (b[0] <= e["center"][0] <= b[2] and b[1] <= e["center"][1] <= b[3]) for b in icons)
+            rows.append(dict(i=e["index"], xml="(không nhãn: icon/công tắc/nút)", ocr="(icon) — không biết là gì" if found else "",
+                             st="icon_found" if found else "icon_missed"))
+    noise = [o["text"] for o in ocr if not any(inside(o["center"], e) for e in xml)]
+    icon_noise = sum(1 for b in icons if not any(b[0] <= e["center"][0] <= b[2] and b[1] <= e["center"][1] <= b[3]
+                                                    or inside(((b[0] + b[2]) // 2, (b[1] + b[3]) // 2), e, 0) for e in xml))
+    return dict(rows=rows, noise=noise, n_ocr=len(ocr), n_icons=len(icons), icon_noise=icon_noise)
+
+
 def covered(mode, case):
     """Is a correct answer present at all in what this mode sends?"""
     els = B.listing(mode, case)[1]
@@ -83,6 +128,7 @@ def main():
     ap.add_argument("--results", nargs="+", required=True)
     ap.add_argument("--out", default=os.path.join(HERE, "gallery"))
     ap.add_argument("--all-modes", action="store_true", help="also show retired modes")
+    ap.add_argument("--compare", nargs="*", default=[], help="result files of other models for the comparison table")
     args = ap.parse_args()
     out = args.out
     shutil.rmtree(out, ignore_errors=True)
@@ -126,8 +172,9 @@ def main():
         screens[s] = dict(id=s, w=c["w"], h=c["h"],
                           list_compact=B.listing("list_compact", c)[0],
                           list_center=B.listing("center2_near", c)[0],
-                          ocr_icons=B.listing("ocr_icons", c)[0],
-                          n_elements=len(els_c), n_unlabeled=sum(1 for e in els_c if not e.get("text")))
+                          ocr_icons=B.listing("ocr2_somU", c)[0],
+                          n_elements=len(els_c), n_unlabeled=sum(1 for e in els_c if not e.get("text")),
+                          ocr_compare=compare_ocr(c))
 
     # summary per mode and per tag
     summary = []
@@ -146,7 +193,40 @@ def main():
             row["by_tag"][t] = [sum(x["ok"] for x in T), len(T)]
         summary.append(row)
 
-    data = dict(
+    # totals of the XML-vs-OCR comparison over all screens
+    from collections import Counter
+    st_count = Counter(r["st"] for sc in screens.values() for r in sc["ocr_compare"]["rows"])
+    ocr_totals = dict(status=dict(st_count), labeled=sum(1 for sc in screens.values() for r in sc["ocr_compare"]["rows"]
+                                                         if not r["st"].startswith("icon")),
+                      unlabeled=sum(1 for sc in screens.values() for r in sc["ocr_compare"]["rows"] if r["st"].startswith("icon")),
+                      n_ocr=sum(sc["ocr_compare"]["n_ocr"] for sc in screens.values()),
+                      noise=sum(len(sc["ocr_compare"]["noise"]) for sc in screens.values()),
+                      n_icons=sum(sc["ocr_compare"]["n_icons"] for sc in screens.values()),
+                      icon_noise=sum(sc["ocr_compare"]["icon_noise"] for sc in screens.values()),
+                      roles=sum(len([l for l in sc["list_compact"].splitlines() if "] (" in l]) for sc in screens.values()))
+    # other models (e.g. Gemini): accuracy / time / tokens per mode, next to the main model
+    compare = []
+    for path in args.compare:
+        crows = [json.loads(l) for l in open(path)]
+        if not crows:
+            continue
+        cmodel = crows[0]["model"]
+        cres = {}
+        for r in crows:
+            c = by_id.get(r["step"])
+            if c:
+                cres[(r["step"], r["mode"])] = (B.evaluate(r["reply"], r["mode"], c)[0], r["wall"], r["in_tok"] + r.get("s1_in", 0))
+        for m, short, label, group in MODE_INFO:
+            Xo = [cres[(c["id"], m)] for c in cases if (c["id"], m) in cres]
+            Xm = [res[(c["id"], m)] for c in cases if (c["id"], m) in res]
+            if not Xo or not Xm:
+                continue
+            compare.append(dict(mode=m, label=label, model=cmodel, n=len(Xo), ok=sum(x[0] for x in Xo),
+                                wall=round(statistics.median(x[1] for x in Xo), 2), tok=round(statistics.median(x[2] for x in Xo)),
+                                main_n=len(Xm), main_ok=sum(x["ok"] for x in Xm),
+                                main_wall=round(statistics.median(x["wall"] for x in Xm), 2),
+                                main_tok=round(statistics.median(x["tok"] for x in Xm))))
+    data = dict(compare=compare, ocr_totals=ocr_totals,
         model=model, n_cases=len(cases), tags={t: TAG_INFO.get(t, t) for t in tags},
         modes=[dict(mode=m, short=s, label=l, group=g) for m, s, l, g in modes],
         summary=summary, screens=screens,

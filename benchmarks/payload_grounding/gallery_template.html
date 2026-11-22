@@ -64,11 +64,20 @@ button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-v
 .view img { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
 .view b { font-size: .85rem; }
 .view span { font-size: .78rem; color: var(--muted); }
-.lists { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 0 14px 14px; }
+.lists { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 0 14px 14px; }
 .lists > div { min-width: 0; display: grid; gap: 6px; align-content: start; }
 pre { margin: 0; font-family: var(--font-mono); font-size: .74rem; line-height: 1.45; background: var(--bg); border: 1px solid var(--line);
   border-radius: 6px; padding: 10px; max-height: 320px; overflow: auto; white-space: pre; }
 
+/* OCR comparison */
+.cmp { padding: 0 14px 14px; display: grid; gap: 8px; min-width: 0; }
+.cmp .tablebox { max-height: 380px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+.cmp td, .cmp th { white-space: normal; text-align: left; font-size: .8rem; }
+.st { font-size: .72rem; padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
+.st.ok, .st.icon_found { background: var(--ok-soft); color: var(--ok); }
+.st.missing, .st.icon_missed, .st.wrong, .st.merged { background: var(--bad-soft); color: var(--bad); }
+.st.accent { background: var(--accent-soft); color: var(--accent); }
+.noise { font-family: var(--font-mono); font-size: .75rem; color: var(--muted); }
 /* cases */
 .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
 .filters label { font-size: .82rem; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
@@ -136,6 +145,18 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
     <div class="panel tablebox"><table id="summary"></table></div>
   </section>
 
+  <section id="models" hidden>
+    <h2>So sánh model</h2>
+    <p class="muted">Cùng 52 bài, cùng cách gửi. Thời gian Gemini (gói miễn phí, gọi qua Internet) dao động theo hàng chờ, chỉ để tham khảo; token Gemini tính ảnh theo cách riêng (~258 token/ô 768 px).</p>
+    <div class="panel tablebox"><table id="modeltable"></table></div>
+  </section>
+
+  <section id="ocrgap">
+    <h2>OCR gửi lên gì, thiếu gì so với list XML</h2>
+    <p class="muted">Đo trên 18 màn hình: với mỗi phần tử trong list XML của Flash, OCR (+ dò icon v2) có đưa được thông tin đó lên không. Xem từng màn hình ở phần dưới.</p>
+    <div class="panel tablebox"><table id="ocrtotals"></table></div>
+  </section>
+
   <section id="viewer">
     <h2>Model nhận được gì</h2>
     <p class="muted">Chọn một màn hình để xem các loại ảnh và 2 dạng danh sách chữ đúng như gửi cho model.</p>
@@ -143,6 +164,7 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
     <div class="panel">
       <div class="views" id="views"></div>
       <div class="lists" id="lists"></div>
+      <div class="cmp" id="cmp"></div>
     </div>
   </section>
 
@@ -171,7 +193,7 @@ fetch("data.json").then((r) => r.json()).then((d) => { D = d; init(); })
 
 function init() {
   $("#meta").innerHTML = `<span>model ${esc(D.model)}</span><span>${D.n_cases} bài</span><span>${Object.keys(D.screens).length} màn hình</span><span>${D.modes.length} cách gửi</span>`;
-  renderSummary(); renderScreens(); renderFilters(); renderCases();
+  renderSummary(); renderModels(); renderOcrTotals(); renderScreens(); renderFilters(); renderCases();
 }
 
 function frac(a) { return a && a[1] ? `${a[0]}/${a[1]}` : "–"; }
@@ -192,6 +214,46 @@ function renderSummary() {
   $("#summary").innerHTML = h + "</tbody>";
 }
 
+const ST = {
+  ok: ["Khớp", "OCR đọc đúng nhãn"],
+  missing: ["Không đọc được", "Nhãn là mô tả của icon (content-desc) hoặc chữ không hiện trên màn hình — OCR không có gì để đọc"],
+  wrong: ["Sai / mất chữ", "OCR đọc sai hoặc bỏ mất chữ tiếng Việt có dấu (vd. “sạc” → “sc”)"],
+  accent: ["Sai dấu", "Chỉ khác dấu tiếng Việt"],
+  merged: ["Gộp chữ", "Một dòng OCR dính chữ của phần tử bên cạnh"],
+  icon_found: ["Icon: có khung", "Bộ dò icon có khung ở đây nhưng chỉ ghi “(icon)”, không biết là nút gì"],
+  icon_missed: ["Icon: bỏ sót", "Bộ dò icon không thấy phần tử này — AI không thể chọn"],
+};
+function renderModels() {
+  if (!D.compare || !D.compare.length) return;
+  $("#models").hidden = false;
+  const other = D.compare[0].model;
+  $("#modeltable").innerHTML = `<thead><tr><th>Cách gửi</th><th>${esc(D.model.split("@")[0])} đúng</th><th>${esc(other)} đúng</th><th>${esc(D.model.split("@")[0])} thời gian</th><th>${esc(other)} thời gian</th><th>Token (qwen / gemini)</th></tr></thead><tbody>` +
+    D.compare.map((r) => `<tr><td>${esc(r.label)}</td><td class="${r.main_ok >= r.ok ? "cell-good" : ""}">${r.main_ok}/${r.main_n}</td><td class="${r.ok >= r.main_ok ? "cell-good" : ""}">${r.ok}/${r.n}</td><td>${r.main_wall.toFixed(2)} s</td><td>${r.wall.toFixed(2)} s</td><td>${r.main_tok} / ${r.tok}</td></tr>`).join("") + "</tbody>";
+}
+function renderOcrTotals() {
+  const t = D.ocr_totals, s = t.status, pct = (a, b) => b ? Math.round(100 * a / b) + "%" : "–";
+  const row = (what, xml, ocr, cls) => `<tr><td>${what}</td><td>${xml}</td><td class="${cls || ""}">${ocr}</td></tr>`;
+  $("#ocrtotals").innerHTML = `<thead><tr><th>Thông tin</th><th>List XML (Flash)</th><th>OCR + dò icon v2</th></tr></thead><tbody>` +
+    row("Nhãn của phần tử có chữ", `${t.labeled} nhãn đúng`, `${s.ok || 0} khớp (${pct(s.ok || 0, t.labeled)})`, (s.ok || 0) / t.labeled < .6 ? "cell-bad" : "") +
+    row("↳ không đọc được (nhãn là mô tả icon, vd. “More options”, “Search”)", "có (content-desc)", `${s.missing || 0} trống`, "cell-bad") +
+    row("↳ sai / mất chữ tiếng Việt (“sạc” → “sc”)", "đúng", `${s.wrong || 0} sai`, "cell-bad") +
+    row("↳ gộp chữ của phần tử bên cạnh / chỉ sai dấu", "không", `${s.merged || 0} gộp · ${s.accent || 0} sai dấu`) +
+    row("Phần tử không có chữ (icon, công tắc, nút +)", `${t.unlabeled}, có loại`, `${s.icon_found || 0} có khung “(icon)” · ${s.icon_missed || 0} bỏ sót`, "cell-bad") +
+    row("Loại phần tử: (toggle), (button)…", `${t.roles} dòng`, "0", "cell-bad") +
+    row("Trạng thái: checked / selected…", "có", "0", "cell-bad") +
+    row("Dòng chữ nhiễu (chữ trong ảnh, banner, status bar)", "0", `${t.noise}/${t.n_ocr} dòng OCR (${pct(t.noise, t.n_ocr)})`, "cell-bad") +
+    row("Khung icon nhiễu (mảnh ảnh, logo)", "0", `${t.icon_noise}/${t.n_icons} khung (${pct(t.icon_noise, t.n_icons)})`, "cell-bad") + "</tbody>";
+}
+function renderCompare(sc) {
+  const c = sc.ocr_compare;
+  const rows = c.rows.map((r) => `<tr><td>[${r.i}]</td><td>${esc(r.xml)}</td><td>${esc(r.ocr) || "—"}</td><td><span class="st ${r.st}" title="${esc(ST[r.st][1])}">${ST[r.st][0]}</span></td></tr>`).join("");
+  const cnt = {}; c.rows.forEach((r) => cnt[r.st] = (cnt[r.st] || 0) + 1);
+  $("#cmp").innerHTML = `<b>So từng phần tử: list XML ↔ OCR + dò icon v2</b>
+    <div class="legend">${Object.keys(ST).filter((k) => cnt[k]).map((k) => `<span><span class="st ${k}">${ST[k][0]}</span> ${cnt[k]}</span>`).join("")}</div>
+    <div class="tablebox"><table><thead><tr><th>#</th><th>List XML gửi</th><th>OCR đọc được</th><th>Kết quả</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div><b>Dòng OCR nhiễu (không thuộc phần tử nào): ${c.noise.length}/${c.n_ocr}</b> · khung icon nhiễu: ${c.icon_noise}/${c.n_icons}</div>
+    <div class="noise">${c.noise.map(esc).join(" · ") || "—"}</div>`;
+}
 function renderScreens() {
   const ids = Object.keys(D.screens);
   $("#screens").innerHTML = ids.map((s) => `<button type="button" id="scr-${s}" data-s="${s}" aria-pressed="false">${s}</button>`).join("");
@@ -211,7 +273,9 @@ function showScreen(s) {
     v("ocr_icons", "Không cây UI: OCR + dò icon v2", "Chỉ đánh số các icon OpenCV tìm được; chữ lấy từ OCR. Cách “OCR+Icon2+Số”.");
   $("#lists").innerHTML =
     `<div><b>List gọn (Flash hiện tại) — ${sc.n_elements} phần tử, ${sc.n_unlabeled} không nhãn</b><pre>${esc(sc.list_compact)}</pre></div>` +
-    `<div><b>Nhãn + tâm (giữ loại) + gợi ý “gần chữ nào”</b><pre>${esc(sc.list_center)}</pre></div>`;
+    `<div><b>Nhãn + tâm (giữ loại) + gợi ý “gần chữ nào”</b><pre>${esc(sc.list_center)}</pre></div>` +
+    `<div><b>Không cây UI: OCR + dò icon v2 (so với list gọn ở trên)</b><pre>${esc(sc.ocr_icons)}</pre></div>`;
+  renderCompare(sc);
 }
 
 function renderFilters() {
