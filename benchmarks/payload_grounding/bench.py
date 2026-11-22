@@ -21,6 +21,11 @@ Modes (all answer {"index": N} over the Flash element list):
   center_sketch label + center list + the wireframe sketch
   center_som    label + center list + real screenshot with every element's box and index drawn on it
   center_shot   label + center list + plain real screenshot (768px)
+  center2       Flash compact list with each box replaced by its center: keeps role/state hints
+                ("(toggle) @833,321 checked:false"), no image
+  center2_shot  center2 + plain real screenshot
+  compact_somU  Flash compact list + screenshot with box+index drawn ONLY on unlabeled elements
+  center2_somU  center2 + the same unlabeled-only marked screenshot
   ocr_icons     no tree: OCR text boxes + OpenCV-detected icon boxes ("(icon)"), no image
   ocr_icons_som same list + real screenshot with those boxes and indices drawn on it
 Cases may reuse another case's screen ("screen": "case_00") and may define the answer as screen
@@ -48,12 +53,14 @@ REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, REPO)
 
 ALL_MODES = ["shot768", "sketch", "2stage", "list_full", "list_compact", "list_center", "list_label",
-             "center_sketch", "center_som", "center_shot", "ocr_only", "ocr_shot", "xml_ocr", "center_ocr",
+             "center_sketch", "center_som", "center_shot", "center2", "center2_shot", "compact_somU",
+             "center2_somU", "ocr_only", "ocr_shot", "xml_ocr", "center_ocr",
              "ocr_icons", "ocr_icons_som"]
 OCR_MODES = ("ocr_only", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
 NO_TREE_MODES = ("ocr_only", "ocr_shot", "ocr_icons", "ocr_icons_som")  # graded against the tree
 IMAGE_MODES = {"shot768": "shot", "ocr_shot": "shot", "sketch": "sketch", "center_sketch": "sketch",
-               "center_som": "som", "ocr_icons_som": "som", "center_shot": "shot"}
+               "center_som": "som", "ocr_icons_som": "som", "center_shot": "shot", "center2_shot": "shot",
+               "compact_somU": "somU", "center2_somU": "somU"}
 DESCRIBE = ("Describe this Android screen in at most 60 words: app/screen name, main sections, "
             "and any icon-only buttons with their position and look.")
 norm = lambda t: " ".join((t or "").lower().split())
@@ -199,6 +206,14 @@ def som_image(path, els, max_side=768):
     return b64_jpeg(im, max_side, 80)
 
 
+def compact_to_center(text):
+    """Replace the first 'x1,y1,x2,y2' (0-1000 normalized) of each compact line by '@cx,cy'."""
+    def one(line):
+        return re.sub(r"(-?\d+),(-?\d+),(-?\d+),(-?\d+)",
+                      lambda m: f"@{(int(m[1]) + int(m[3])) // 2},{(int(m[2]) + int(m[4])) // 2}", line, count=1)
+    return "\n".join(one(l) for l in text.splitlines())
+
+
 def listing(mode, s):
     import copy
     from artemis.utils.visualization import format_minimal_list_with_elements
@@ -220,6 +235,8 @@ def listing(mode, s):
             text = center_text(els, s["w"], s["h"], icon_label='""')
         return text, els
     text, els, _ = format_minimal_list_with_elements(s["ui"], s["w"], s["h"], compact=mode != "list_full")
+    if mode in ("center2", "center2_shot", "center2_somU"):
+        text = compact_to_center(text)
     if mode in ("list_center", "center_sketch", "center_som", "center_shot"):
         text = "\n".join(f'[{e["index"]}] "{e.get("text", "")}" @{e["center"][0] * 1000 // s["w"]},'
                          f'{e["center"][1] * 1000 // s["h"]}' for e in els)
@@ -240,6 +257,8 @@ def decide_prompt(text, instr, desc=None, ocr=False, mode=""):
         what = "UI elements on the Android screen"
     if mode in ("center_som", "ocr_icons_som"):
         what += ". The image shows the screen with each element's box and [index] drawn in red"
+    elif mode in ("compact_somU", "center2_somU"):
+        what += ". The image shows the screen; elements without a text label have their box and [index] drawn in red"
     elif mode in ("sketch", "center_sketch"):
         what += ". The image is a wireframe of the screen: each element's box with its [index]"
     return (f"{head}{what}:\n{text}\n\nYou are operating this phone. "
@@ -420,7 +439,8 @@ def run(args):
                     else:
                         kind = IMAGE_MODES.get(mode)
                         img = (b64_jpeg(shot, 768) if kind == "shot" else sketch(els, s["w"], s["h"]) if kind == "sketch"
-                               else som_image(s["img"], els) if kind == "som" else None)
+                               else som_image(s["img"], els) if kind == "som"
+                               else som_image(s["img"], [e for e in els if not e.get("text")]) if kind == "somU" else None)
                         r = call(args, decide_prompt(text, instr, ocr=mode in ("ocr_only", "ocr_shot"), mode=mode), img)
                     ok, idx, lab = evaluate(r["reply"], mode, s, els)
                     f.write(json.dumps(dict(step=s["id"], mode=mode, model=model_id, ok=ok, idx=idx, picked=lab,

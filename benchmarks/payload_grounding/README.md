@@ -58,6 +58,13 @@ Chấm điểm: model trả `{"index": N}` → lấy nhãn phần tử N → đ�
 | `center_sketch` | nhãn + tâm + ảnh wireframe (khung + số, không chữ) |
 | `center_som` | nhãn + tâm + **ảnh thật có vẽ khung đỏ và số** của từng phần tử (set-of-marks) |
 | `center_shot` | nhãn + tâm + ảnh thật 768 (không vẽ gì) |
+| `center2` | nhãn + tâm **giữ loại/trạng thái** từ list gọn (`[15] (toggle) @833,320 checked:false`), không ảnh |
+| `center2_shot` | `center2` + ảnh thật |
+| `compact_somU` | list gọn + ảnh thật **chỉ vẽ khung & số lên phần tử không nhãn** (không che chữ) |
+| `center2_somU` | `center2` + ảnh chỉ đánh số phần tử không nhãn |
+
+`list_center` / `center_*` (bản cũ) chỉ lấy chữ nên phần tử không nhãn thành `""` và mất loại
+(`(toggle)`, `checked:false`) mà list gọn của Flash có — `center2*` sửa điều đó.
 | `ocr_icons` | **không có cây UI**: OCR + icon do OpenCV dò (`(icon)`), nhãn + tâm, không ảnh |
 | `ocr_icons_som` | như `ocr_icons` + ảnh thật có vẽ khung và số |
 

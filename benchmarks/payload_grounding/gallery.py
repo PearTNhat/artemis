@@ -15,14 +15,18 @@ sys.path.insert(0, HERE)
 import bench as B  # noqa: E402
 
 MODE_INFO = [  # (mode, short chip, label, group)
+    ("compact_somU", "Gọn+SốKN", "List gọn + ảnh thật chỉ đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
     ("shot768", "Ảnh", "Ảnh thật + list gọn (Flash hiện tại)", "Có cây UI, có ảnh"),
-    ("center_som", "NT+Số", "Nhãn + tâm + ảnh thật vẽ khung & số", "Có cây UI, có ảnh"),
-    ("center_shot", "NT+Ảnh", "Nhãn + tâm + ảnh thật", "Có cây UI, có ảnh"),
+    ("center2_shot", "NT2+Ảnh", "Nhãn + tâm (giữ loại/trạng thái) + ảnh thật", "Có cây UI, có ảnh"),
+    ("center2_somU", "NT2+SốKN", "Nhãn + tâm (giữ loại) + ảnh chỉ đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
+    ("center_som", "NT+Số", "Nhãn + tâm (bản cũ, mất loại) + ảnh vẽ khung & số mọi phần tử", "Có cây UI, có ảnh"),
+    ("center_shot", "NT+Ảnh", "Nhãn + tâm (bản cũ, mất loại) + ảnh thật", "Có cây UI, có ảnh"),
     ("sketch", "WF", "Wireframe + list gọn", "Có cây UI, có ảnh"),
     ("center_sketch", "NT+WF", "Nhãn + tâm + wireframe", "Có cây UI, có ảnh"),
     ("2stage", "2 tầng", "2 tầng: mô tả ảnh → quyết định bằng chữ", "Có cây UI, có ảnh"),
     ("list_compact", "Gọn", "List gọn, không ảnh", "Có cây UI, không ảnh"),
-    ("list_center", "NT", "Nhãn + tâm, không ảnh", "Có cây UI, không ảnh"),
+    ("center2", "NT2", "Nhãn + tâm (giữ loại/trạng thái), không ảnh", "Có cây UI, không ảnh"),
+    ("list_center", "NT", "Nhãn + tâm (bản cũ, mất loại), không ảnh", "Có cây UI, không ảnh"),
     ("list_label", "Nhãn", "Chỉ nhãn, không ảnh", "Có cây UI, không ảnh"),
     ("xml_ocr", "X+OCR", "Cây UI + OCR gộp (list gọn)", "Có cây UI, không ảnh"),
     ("center_ocr", "X+OCR·NT", "Cây UI + OCR gộp (nhãn + tâm)", "Có cây UI, không ảnh"),
@@ -93,11 +97,13 @@ def main():
         save_b64(B.sketch(els_c, c["w"], c["h"], 360), os.path.join(out, "img", f"{s}_wireframe.jpg"))
         _, els_n = B.listing("center_som", c)
         save_b64(B.som_image(c["img"], els_n, 540), os.path.join(out, "img", f"{s}_som.jpg"))
+        save_b64(B.som_image(c["img"], [e for e in els_c if not e.get("text")], 540),
+                 os.path.join(out, "img", f"{s}_somU.jpg"))
         _, els_o = B.listing("ocr_icons_som", c)
         save_b64(B.som_image(c["img"], els_o, 540), os.path.join(out, "img", f"{s}_ocr_icons.jpg"))
         screens[s] = dict(id=s, w=c["w"], h=c["h"],
                           list_compact=B.listing("list_compact", c)[0],
-                          list_center=B.listing("list_center", c)[0],
+                          list_center=B.listing("center2", c)[0],
                           ocr_icons=B.listing("ocr_icons", c)[0],
                           n_elements=len(els_c), n_unlabeled=sum(1 for e in els_c if not e.get("text")))
 
