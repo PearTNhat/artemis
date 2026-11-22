@@ -22,7 +22,8 @@ MODE_INFO = [  # (mode, short chip, label, group)
     ("center2_somU", "NT2+SốKN", "Nhãn + tâm (giữ loại) + ảnh chỉ đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
     ("center_som", "NT+Số", "Nhãn + tâm (bản cũ, mất loại) + ảnh vẽ khung & số mọi phần tử", "Có cây UI, có ảnh"),
     ("center_shot", "NT+Ảnh", "Nhãn + tâm (bản cũ, mất loại) + ảnh thật", "Có cây UI, có ảnh"),
-    ("wire2_near", "WF2", "Wireframe v2 (chữ vừa khung, vùng ảnh [image]) + list gọn có gợi ý gần chữ — đo trên GPU laptop (RTX 3050), thời gian không so trực tiếp với Colab", "Có cây UI, ảnh vẽ lại (không pixel thật)"),
+    ("wire_hybrid", "WF lai", "Wireframe lai: chữ vẽ lại, phần phức tạp (icon, công tắc, ảnh) dán pixel thật + list gọn có gợi ý gần chữ", "Có cây UI, có ảnh"),
+    ("wire2_near", "WF2", "Wireframe v2 (chữ vừa khung, vùng ảnh [image]) + list gọn có gợi ý gần chữ", "Có cây UI, ảnh vẽ lại (không pixel thật)"),
     ("wire_near", "WF chữ+gần", "Wireframe trắng đen có chữ + list gọn có gợi ý “gần chữ nào”", "Có cây UI, ảnh vẽ lại (không pixel thật)"),
     ("wire_text", "WF chữ", "Wireframe trắng đen có chữ + list gọn", "Có cây UI, ảnh vẽ lại (không pixel thật)"),
     ("somU_near", "Gọn+SốKN+gần", "List gọn có gợi ý “gần chữ nào” + ảnh đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
@@ -42,6 +43,7 @@ MODE_INFO = [  # (mode, short chip, label, group)
     ("ocr2_somU", "OCR+Icon2+Số", "OCR + dò icon v2 + gợi ý gần chữ + ảnh chỉ đánh số icon", "Không cây UI (kiểu desktop)"),
     ("ocr2_near", "OCR+Icon2", "OCR + dò icon v2 + gợi ý gần chữ, không ảnh", "Không cây UI (kiểu desktop)"),
     ("ocr2_shot", "OCR+Icon2+Ảnh", "OCR + dò icon v2 + gợi ý gần chữ + ảnh thật (không vẽ)", "Không cây UI (kiểu desktop)"),
+    ("ocr_hybrid", "OCR lai", "OCR vẽ lại chữ + icon dò được dán pixel thật (1 ảnh) + list OCR/icon", "Không cây UI (kiểu desktop)"),
     ("ocr2_crops", "OCR+Icon2+Cắt", "OCR + dò icon v2 + chỉ gửi ảnh cắt nhỏ các icon", "Không cây UI (kiểu desktop)"),
 ]
 TAG_INFO = {
@@ -151,7 +153,8 @@ def main():
                                            tok=r["in_tok"] + r.get("s1_in", 0), ocr=r.get("ocr_ms", 0) / 1000)
     keep = None if args.all_modes else set(B.CORE_MODES) | {"wire_text", "center2", "somU_near", "ocr_clean",
                                                             "ocr_icons_som", "ocr2_near", "ocr2_shot", "ocr2_crops",
-                                                            "compact_crops", "wire2_near", "wire_near"}
+                                                            "compact_crops", "wire2_near", "wire_near",
+                                                            "wire_hybrid", "ocr_hybrid"}
     modes = [m for m in MODE_INFO if (keep is None or m[0] in keep) and any((c["id"], m[0]) in res for c in cases)]
 
     # images per screen
@@ -164,6 +167,9 @@ def main():
         _, els_c = B.listing("list_compact", c)
         save_b64(B.wire_text_image_v2(c, 768), os.path.join(out, "img", f"{s}_wiretext.jpg"))
         save_b64(B.crop_sheet(c["img"], [e for e in els_c if not e.get("text")]), os.path.join(out, "img", f"{s}_crops.jpg"))
+        save_b64(B.wire_text_image_v2(c, 768, paste_real=True), os.path.join(out, "img", f"{s}_hybrid.jpg"))
+        _, els_oh = B.listing("ocr_hybrid", c)
+        save_b64(B.ocr_hybrid_image(c, els_oh, 768), os.path.join(out, "img", f"{s}_ocrhybrid.jpg"))
         save_b64(B.som_image(c["img"], [e for e in els_c if not e.get("text")], 540),
                  os.path.join(out, "img", f"{s}_somU.jpg"))
         _, els_o = B.listing("ocr2_somU", c)

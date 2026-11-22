@@ -59,7 +59,7 @@ tr.current td:first-child::after { content: "Flash hiện tại"; margin-left: 8
   background: var(--surface); color: var(--ink); cursor: pointer; }
 .screens button[aria-pressed="true"], .chip-btn[aria-pressed="true"] { background: var(--accent); color: var(--surface); border-color: var(--accent); }
 button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.views { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; padding: 14px; }
+.views { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 14px; }
 .view { display: grid; gap: 6px; align-content: start; min-width: 0; }
 .view img { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
 .view b { font-size: .85rem; }
@@ -268,6 +268,8 @@ function showScreen(s) {
   $("#views").innerHTML =
     v("real", "Ảnh thật", "Gửi kèm ở các cách “Ảnh”, “NT+Ảnh”, “OCR+Ảnh”.") +
     v("wiretext", "Wireframe v2 có chữ", "Trắng đen, chữ vừa khung, loại/trạng thái cho phần tử không nhãn; vùng ảnh tìm trên ảnh chụp ghi [image].") +
+    v("hybrid", "Wireframe lai", "Chữ vẽ lại; icon, công tắc, ảnh dán pixel thật (khung đỏ + số). Cách “WF lai”.") +
+    v("ocrhybrid", "Không cây UI: OCR lai", "Chữ OCR vẽ lại; icon dò được dán pixel thật. Cách “OCR lai”.") +
     v("crops", "Chỉ ảnh cắt phần tử không nhãn", "Không gửi cả màn hình, chỉ các ô nhỏ có số. Cách “Gọn+Cắt”.") +
     v("somU", "Ảnh thật, chỉ đánh số phần tử không nhãn", "Không che chữ. Cách “Gọn+SốKN” — đúng nhiều nhất.") +
     v("ocr_icons", "Không cây UI: OCR + dò icon v2", "Chỉ đánh số các icon OpenCV tìm được; chữ lấy từ OCR. Cách “OCR+Icon2+Số”.");

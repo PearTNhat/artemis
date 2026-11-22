@@ -30,7 +30,11 @@ Modes (all answer {"index": N} over the Flash element list):
   ocr2_near     no tree: OCR text + icon detector v2 (nested icons, switches) + near-text hints, no image
   ocr2_somU     ocr2_near list + screenshot with only the detected icons boxed and numbered
   wire2_near    wireframe v2 (text sized to its box, no overlapping tags, duplicates skipped, picture
-                regions found on the screenshot drawn as [image]) + compact list with near hints
+                regions found on the screenshot drawn as [image], elements behind a menu/dialog
+                drawn faded) + compact list with near hints
+  wire_hybrid   wireframe v2 where the complex parts (unlabeled controls, picture regions) are the REAL
+                pixels, text redrawn; + compact list with near hints
+  ocr_hybrid    no tree: OCR text redrawn + detected icons as REAL pixels, all tagged; + ocr2_near list
   ocr2_shot     ocr2_near list + plain real screenshot
   ocr2_crops    ocr2_near list + a sheet of small cut-outs of the detected icons (no full screenshot)
   compact_crops Flash compact list + a sheet of cut-outs of the unlabeled elements (no full screenshot)
@@ -65,20 +69,20 @@ sys.path.insert(0, REPO)
 
 ALL_MODES = ["shot768", "2stage", "list_full", "list_compact", "list_center", "list_label",
              "center_som", "center_shot", "center2", "center2_shot", "compact_somU",
-             "center2_somU", "wire_text", "center2_near", "somU_near", "wire_near", "wire2_near",
-             "compact_crops", "ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_shot", "xml_ocr", "center_ocr",
+             "center2_somU", "wire_text", "center2_near", "somU_near", "wire_near", "wire2_near", "wire_hybrid",
+             "compact_crops", "ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "xml_ocr", "center_ocr",
              "ocr_icons", "ocr_icons_som"]
 # Default set: the ones worth running. The others stay runnable with --modes (and their old
 # results stay in results/*.jsonl) but proved useless: wireframe, 2-stage, no-image lists,
 # OCR fusion, and the old label+center that dropped role/state hints.
 CORE_MODES = ["shot768", "compact_somU", "center2_shot", "wire_near", "center2_near", "ocr_only", "ocr2_somU"]
-OCR_MODES = ("ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
-NO_TREE_MODES = ("ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_shot", "ocr_icons", "ocr_icons_som")  # graded against the tree
+OCR_MODES = ("ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
+NO_TREE_MODES = ("ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "ocr_icons", "ocr_icons_som")  # graded against the tree
 IMAGE_MODES = {"shot768": "shot", "ocr_shot": "shot",
                "center_som": "som", "ocr_icons_som": "som", "center_shot": "shot", "center2_shot": "shot",
                "compact_somU": "somU", "center2_somU": "somU", "wire_text": "wiretext", "somU_near": "somU",
                "wire_near": "wiretext", "ocr2_somU": "somU", "ocr2_shot": "shot", "ocr2_crops": "crops",
-               "compact_crops": "crops", "wire2_near": "wire2"}
+               "compact_crops": "crops", "wire2_near": "wire2", "wire_hybrid": "hybrid", "ocr_hybrid": "ocrhybrid"}
 DESCRIBE = ("Describe this Android screen in at most 60 words: app/screen name, main sections, "
             "and any icon-only buttons with their position and look.")
 norm = lambda t: " ".join((t or "").lower().split())
@@ -455,7 +459,7 @@ def picture_regions(case, els):
     return rects
 
 
-def wire_text_image_v2(case, max_side=768):
+def wire_text_image_v2(case, max_side=768, paste_real=False):
     """Wireframe v2: text sized to its box with an ellipsis, small index tags that do not cover the
     text, nested duplicates (same label) skipped, and picture regions found on the screenshot drawn
     as hatched "[image]" boxes."""
@@ -468,8 +472,9 @@ def wire_text_image_v2(case, max_side=768):
             hint[int(m[1])] = (m[2] + m[3]).strip().strip('"')
     w, h = case["w"], case["h"]
     sc = max_side / max(w, h)
-    im = Image.new("L", (int(w * sc), int(h * sc)), 255)
+    im = Image.new("RGB" if paste_real else "L", (int(w * sc), int(h * sc)), "white")
     d = ImageDraw.Draw(im)
+    real = Image.open(case["img"]).convert("RGB").resize(im.size) if paste_real else None
     fp = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     fonts = {}
 
@@ -481,31 +486,69 @@ def wire_text_image_v2(case, max_side=768):
                 fonts[sz] = ImageFont.load_default()
         return fonts[sz]
     tagf = font(9)
+    # layering: an element that overlaps a LATER one in the list (drawn on top: menu, dialog,
+    # bottom sheet) is behind it -> drawn faded; front elements get a white fill that hides it
+    behind = set()
+    for line in text.splitlines():
+        m = re.match(r"\[(\d+)\].*\(overlaps ([^)]*)", line)
+        if m and any(int(k) > int(m[1]) for k in re.findall(r"\[(\d+)\]", m[2])):
+            behind.add(int(m[1]))
+    G = (lambda v: (v, v, v)) if paste_real else (lambda v: v)
     for r in picture_regions(case, els):
         x1, y1, x2, y2 = (int(v * sc) for v in r)
+        if paste_real:  # complex part: real pixels instead of a placeholder
+            im.paste(real.crop((x1, y1, x2, y2)), (x1, y1))
+            d.rectangle([x1, y1, x2 - 1, y2 - 1], outline=G(140))
+            continue
         d.rectangle([x1, y1, x2 - 1, y2 - 1], outline=140, fill=235)
         for k in range(x1 - (y2 - y1), x2, 10):  # hatch
             d.line([max(x1, k), y1 + max(0, x1 - k), min(x2 - 1, k + (y2 - y1)), y1 + min(y2 - y1, x2 - 1 - k)], fill=205)
         d.text((x1 + 3, y1 + 2), "[image]", fill=90, font=font(10))
+    # a parent that repeats the label of an element inside it (tab + its text) is not drawn
+    skip = set()
+    for e in els:
+        lab = " ".join((e.get("text") or "").split())
+        if not lab:
+            continue
+        b = e["bounds"]
+        for k in els:
+            kb = k["bounds"]
+            if k is not e and " ".join((k.get("text") or "").split()) == lab and b[0] <= kb[0] and b[1] <= kb[1] \
+                    and b[2] >= kb[2] and b[3] >= kb[3] and (kb[2] - kb[0]) * (kb[3] - kb[1]) < (b[2] - b[0]) * (b[3] - b[1]):
+                skip.add(e["index"])
+                break
     drawn = []
-    for e in sorted(els, key=lambda e: (e["bounds"][2] - e["bounds"][0]) * (e["bounds"][3] - e["bounds"][1])):
+    order = sorted(els, key=lambda e: (e["index"] not in behind, -(e["bounds"][2] - e["bounds"][0]) * (e["bounds"][3] - e["bounds"][1])))
+    for e in order:  # behind first, then front (big before small so small labels stay on top)
         label = " ".join((e.get("text") or hint.get(e["index"], "")).split())
         b = e["bounds"]
-        if label and any(label == l and b[0] <= c[0] and b[1] <= c[1] and b[2] >= c[2] and b[3] >= c[3] for l, c in drawn):
-            continue  # a parent repeating its child's label
+        if e["index"] in skip:
+            continue
         drawn.append((label, b))
         x1, y1, x2, y2 = (int(v * sc) for v in b)
         x2, y2 = max(x1 + 3, x2 - 1), max(y1 + 3, y2 - 1)
-        d.rectangle([x1, y1, x2, y2], outline=0, width=1)
+        faded = e["index"] in behind
+        ink = G(175 if faded else 0)
+        unl = not e.get("text")
+        if paste_real and unl and not faded:  # unlabeled control: show its real pixels
+            im.paste(real.crop((x1, y1, x2 + 1, y2 + 1)), (x1, y1))
+            d.rectangle([x1, y1, x2, y2], outline=(220, 30, 30), width=1)
+        else:
+            d.rectangle([x1, y1, x2, y2], outline=ink, width=1, fill=None if faded else G(255))
         tag = str(e["index"])
         tw = d.textlength(tag, font=tagf)
-        d.rectangle([x1, y1, x1 + tw + 2, y1 + 9], fill=0)
-        d.text((x1 + 1, y1 - 1), tag, fill=255, font=tagf)
+        d.rectangle([x1, y1, x1 + tw + 2, y1 + 9], fill=(220, 30, 30) if paste_real and unl and not faded else ink)
+        d.text((x1 + 1, y1 - 1), tag, fill=G(255), font=tagf)
+        if paste_real and unl and not faded:
+            continue  # the pixels say what it is; its role/state is in the list
         if not label:
             continue
         bh = y2 - y1
         sz = max(7, min(16, int(bh * 0.55)))
         avail = x2 - x1 - 4 - (tw + 3 if bh < 2 * sz + 4 else 0)
+        if avail < 10 and len(label) <= 3:  # short label in a narrow box (rating chip "≥4"): draw below the tag
+            d.text((x1 + 2, y1 + 9), label, fill=ink, font=font(8))
+            continue
         if avail < 10:
             continue
         while sz > 7 and d.textlength(label, font=font(sz)) > avail:  # shrink before cutting
@@ -517,8 +560,41 @@ def wire_text_image_v2(case, max_side=768):
             label += "…"
         tx = x1 + 2 + (tw + 3 if bh < 2 * sz + 4 else 0)
         ty = y1 + max(0, (bh - sz) // 2) if bh < 2 * sz + 4 else y1 + 10
-        d.text((tx, ty), label, fill=0, font=f)
+        d.text((tx, ty), label, fill=ink, font=f)
     return b64_jpeg(im.convert("RGB"), max_side, 85)
+
+
+def ocr_hybrid_image(case, els, max_side=768):
+    """No accessibility tree: OCR text redrawn in its boxes (black on white), detected icons shown
+    with their REAL pixels; every element tagged with its [index]."""
+    from PIL import Image, ImageDraw, ImageFont
+    w, h = case["w"], case["h"]
+    sc = max_side / max(w, h)
+    im = Image.new("RGB", (int(w * sc), int(h * sc)), "white")
+    real = Image.open(case["img"]).convert("RGB").resize(im.size)
+    d = ImageDraw.Draw(im)
+    fp = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    tagf = ImageFont.truetype(fp, 9)
+    for e in els:
+        x1, y1, x2, y2 = (int(v * sc) for v in e["bounds"])
+        x2, y2 = max(x1 + 3, x2), max(y1 + 3, y2)
+        if e.get("text"):
+            sz = max(7, min(16, int((y2 - y1) * 0.8)))
+            f = ImageFont.truetype(fp, sz)
+            while sz > 7 and d.textlength(e["text"], font=f) > (x2 - x1) + 6:
+                sz -= 1
+                f = ImageFont.truetype(fp, sz)
+            d.text((x1, y1), e["text"], fill=(0, 0, 0), font=f)
+            tagc = (90, 90, 90)
+        else:
+            im.paste(real.crop((x1, y1, x2, y2)), (x1, y1))
+            d.rectangle([x1, y1, x2 - 1, y2 - 1], outline=(220, 30, 30), width=1)
+            tagc = (220, 30, 30)
+        tag = str(e["index"])
+        tw = d.textlength(tag, font=tagf)
+        d.rectangle([x1 - 1, y1 - 9, x1 + tw + 1, y1], fill=tagc)
+        d.text((x1, y1 - 10), tag, fill=(255, 255, 255), font=tagf)
+    return b64_jpeg(im, max_side, 85)
 
 
 def compact_to_center(text):
@@ -537,7 +613,7 @@ def listing(mode, s):
         text = "\n".join(f'[{e["index"]}] "{e["text"]}" @{e["center"][0] * 1000 // s["w"]},'
                          f'{e["center"][1] * 1000 // s["h"]}' for e in els)
         return text, els
-    if mode in ("ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops"):
+    if mode in ("ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid"):
         els = ocr_elements(s)
         for b in detect_icons_v2(s)["boxes"]:
             els.append(dict(index=len(els) + 1, text="", bounds=b, center=[(b[0] + b[2]) // 2, (b[1] + b[3]) // 2]))
@@ -555,7 +631,7 @@ def listing(mode, s):
             text = center_text(els, s["w"], s["h"], icon_label='""')
         return text, els
     text, els, _ = format_minimal_list_with_elements(s["ui"], s["w"], s["h"], compact=mode != "list_full")
-    if mode in ("center2_near", "somU_near", "wire_near", "wire2_near"):
+    if mode in ("center2_near", "somU_near", "wire_near", "wire2_near", "wire_hybrid"):
         text = add_near_hints(text, els, s["h"])
     if mode in ("center2", "center2_shot", "center2_somU", "center2_near"):
         text = compact_to_center(text)
@@ -569,7 +645,7 @@ def listing(mode, s):
 
 def decide_prompt(text, instr, desc=None, ocr=False, mode=""):
     head = f"Screen description: {desc}\n\n" if desc else ""
-    if mode in ("ocr_icons", "ocr_icons_som", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops"):
+    if mode in ("ocr_icons", "ocr_icons_som", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid"):
         what = ("Elements found on the screen by OCR and icon detection ([index] text @x,y center in 0-1000 "
                 "normalized coords; (icon) = a graphic without text)")
     elif ocr:
@@ -577,7 +653,13 @@ def decide_prompt(text, instr, desc=None, ocr=False, mode=""):
                 "icons without text are not listed)")
     else:
         what = "UI elements on the Android screen"
-    if mode in ("compact_crops", "ocr2_crops"):
+    if mode == "wire_hybrid":
+        what += (". The image is a black/white wireframe of the screen (text redrawn); graphics, pictures and "
+                 "elements without a text label show the REAL screen pixels, boxed in red with their [index]")
+    elif mode == "ocr_hybrid":
+        what += (". The image redraws the OCR text in black on white; each detected icon shows the REAL screen "
+                 "pixels, boxed in red with its [index]")
+    elif mode in ("compact_crops", "ocr2_crops"):
         what += (". The image is NOT the full screen: it is a sheet of small cut-outs of the elements that have "
                  "no text label, each tagged with its [index]")
     elif mode == "ocr2_somU":
@@ -736,6 +818,8 @@ def run(args):
     steps = load_cases(args.steps)
     model_id = model_digest(args)
     done = {(r["step"], r["mode"]) for r in map(json.loads, open(args.out))} if os.path.exists(args.out) else set()
+    for extra_file in args.also_done:  # results kept in another file (e.g. the Colab run) count as done
+        done |= {(r["step"], r["mode"]) for r in map(json.loads, open(extra_file))}
     todo = [s for s in steps if any((s["id"], m) not in done for m in modes)]
     print(f"{len(steps)} steps selected, {len(todo)} with work left; model {model_id}", flush=True)
     with open(args.out, "a") as f:
@@ -758,7 +842,7 @@ def run(args):
                         extra["ocr_ms"] = ocr_lines(s, mode in ("xml_ocr", "center_ocr"))["ms"]
                     if mode in ("ocr_icons", "ocr_icons_som"):
                         extra["ocr_ms"] += detect_icons(s)["ms"]
-                    if mode in ("ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops"):
+                    if mode in ("ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid"):
                         extra["ocr_ms"] += detect_icons_v2(s)["ms"]
                     if mode == "2stage":
                         d = call(args, DESCRIBE, b64_jpeg(shot, 768), 150)
@@ -773,7 +857,9 @@ def run(args):
                                else som_image(s["img"], [e for e in els if not e.get("text")]) if kind == "somU"
                                else wire_text_image(s) if kind == "wiretext"
                                else crop_sheet(s["img"], [e for e in els if not e.get("text")]) if kind == "crops"
-                               else wire_text_image_v2(s) if kind == "wire2" else None)
+                               else wire_text_image_v2(s) if kind == "wire2"
+                               else wire_text_image_v2(s, paste_real=True) if kind == "hybrid"
+                               else ocr_hybrid_image(s, els) if kind == "ocrhybrid" else None)
                         r = call(args, decide_prompt(text, instr, ocr=mode in ("ocr_only", "ocr_shot", "ocr_clean"), mode=mode), img)
                     ok, idx, lab = evaluate(r["reply"], mode, s, els)
                     f.write(json.dumps(dict(step=s["id"], mode=mode, model=model_id, ok=ok, idx=idx, picked=lab,
@@ -856,6 +942,7 @@ def main():
     ap.add_argument("--batch", type=int, default=5)
     ap.add_argument("--rest", type=int, default=40)
     ap.add_argument("--pause", type=float, default=None)
+    ap.add_argument("--also-done", nargs="*", default=[], help="other result files whose (case, mode) pairs are not re-run")
     ap.add_argument("--num-ctx", type=int, default=4096, help="Ollama context; raise if a WARNING says truncated")
     ap.add_argument("--summary", nargs="*")
     ap.add_argument("--failures", action="store_true", help="with --summary: print the per-case matrix")
