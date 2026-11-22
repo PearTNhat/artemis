@@ -21,6 +21,7 @@ MODE_INFO = [  # (mode, short chip, label, group)
     ("center2_somU", "NT2+SốKN", "Nhãn + tâm (giữ loại) + ảnh chỉ đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
     ("center_som", "NT+Số", "Nhãn + tâm (bản cũ, mất loại) + ảnh vẽ khung & số mọi phần tử", "Có cây UI, có ảnh"),
     ("center_shot", "NT+Ảnh", "Nhãn + tâm (bản cũ, mất loại) + ảnh thật", "Có cây UI, có ảnh"),
+    ("wire_text", "WF chữ", "Wireframe trắng đen CÓ chữ + list gọn", "Có cây UI, có ảnh"),
     ("sketch", "WF", "Wireframe + list gọn", "Có cây UI, có ảnh"),
     ("center_sketch", "NT+WF", "Nhãn + tâm + wireframe", "Có cây UI, có ảnh"),
     ("2stage", "2 tầng", "2 tầng: mô tả ảnh → quyết định bằng chữ", "Có cây UI, có ảnh"),
@@ -85,7 +86,7 @@ def main():
         ok, idx, lab = B.evaluate(r["reply"], r["mode"], c)
         res[(r["step"], r["mode"])] = dict(ok=ok, idx=idx, picked=lab, wall=r["wall"],
                                            tok=r["in_tok"] + r.get("s1_in", 0), ocr=r.get("ocr_ms", 0) / 1000)
-    keep = None if args.all_modes else set(B.CORE_MODES)
+    keep = None if args.all_modes else set(B.CORE_MODES) | {"wire_text"}
     modes = [m for m in MODE_INFO if (keep is None or m[0] in keep) and any((c["id"], m[0]) in res for c in cases)]
 
     # images per screen
@@ -97,6 +98,7 @@ def main():
         thumb(c["img"], os.path.join(out, "img", f"{s}_real.jpg"))
         _, els_c = B.listing("list_compact", c)
         save_b64(B.sketch(els_c, c["w"], c["h"], 360), os.path.join(out, "img", f"{s}_wireframe.jpg"))
+        save_b64(B.wire_text_image(c, 768), os.path.join(out, "img", f"{s}_wiretext.jpg"))
         save_b64(B.som_image(c["img"], [e for e in els_c if not e.get("text")], 540),
                  os.path.join(out, "img", f"{s}_somU.jpg"))
         _, els_o = B.listing("ocr_icons_som", c)

@@ -26,6 +26,8 @@ Modes (all answer {"index": N} over the Flash element list):
   center2_shot  center2 + plain real screenshot
   compact_somU  Flash compact list + screenshot with box+index drawn ONLY on unlabeled elements
   center2_somU  center2 + the same unlabeled-only marked screenshot
+  wire_text     black/white wireframe WITH text: each box shows its label, or its role/state for
+                unlabeled elements ("(toggle) checked:false"), images drawn as "[image]"; + compact list
   ocr_icons     no tree: OCR text boxes + OpenCV-detected icon boxes ("(icon)"), no image
   ocr_icons_som same list + real screenshot with those boxes and indices drawn on it
 Cases may reuse another case's screen ("screen": "case_00") and may define the answer as screen
@@ -54,7 +56,7 @@ sys.path.insert(0, REPO)
 
 ALL_MODES = ["shot768", "sketch", "2stage", "list_full", "list_compact", "list_center", "list_label",
              "center_sketch", "center_som", "center_shot", "center2", "center2_shot", "compact_somU",
-             "center2_somU", "ocr_only", "ocr_shot", "xml_ocr", "center_ocr",
+             "center2_somU", "wire_text", "ocr_only", "ocr_shot", "xml_ocr", "center_ocr",
              "ocr_icons", "ocr_icons_som"]
 # Default set: the ones worth running. The others stay runnable with --modes (and their old
 # results stay in results/*.jsonl) but proved useless: wireframe, 2-stage, no-image lists,
@@ -64,7 +66,7 @@ OCR_MODES = ("ocr_only", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_
 NO_TREE_MODES = ("ocr_only", "ocr_shot", "ocr_icons", "ocr_icons_som")  # graded against the tree
 IMAGE_MODES = {"shot768": "shot", "ocr_shot": "shot", "sketch": "sketch", "center_sketch": "sketch",
                "center_som": "som", "ocr_icons_som": "som", "center_shot": "shot", "center2_shot": "shot",
-               "compact_somU": "somU", "center2_somU": "somU"}
+               "compact_somU": "somU", "center2_somU": "somU", "wire_text": "wiretext"}
 DESCRIBE = ("Describe this Android screen in at most 60 words: app/screen name, main sections, "
             "and any icon-only buttons with their position and look.")
 norm = lambda t: " ".join((t or "").lower().split())
@@ -210,6 +212,68 @@ def som_image(path, els, max_side=768):
     return b64_jpeg(im, max_side, 80)
 
 
+def wire_text_image(case, max_side=768):
+    """Black/white rendering of the element list: box + [index] + its label (or role/state hint
+    from the Flash compact list for unlabeled elements; image views as "[image]")."""
+    from PIL import Image, ImageDraw, ImageFont
+    text, els = listing("list_compact", case)
+    hint = {}
+    for line in text.splitlines():
+        m = re.match(r"\[(\d+)\]\s+(.*?)\s+-?\d+,-?\d+,-?\d+,-?\d+(.*)$", line)
+        if m:
+            hint[int(m[1])] = (m[2] + m[3]).strip().strip('"')
+    w, h = case["w"], case["h"]
+    sc = max_side / max(w, h)
+    im = Image.new("L", (int(w * sc), int(h * sc)), 255)
+    d = ImageDraw.Draw(im)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
+        bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 10)
+    except OSError:
+        font = bold = ImageFont.load_default()
+    # non-interactive pictures from the raw tree (not in the element list): gray X + "[image]", no index
+    stack, seen = list(case["ui"]), {tuple(e["bounds"]) for e in els}
+    while stack:
+        n = stack.pop()
+        if not isinstance(n, dict):
+            continue
+        stack.extend(n.get("children") or [])
+        b = n.get("parsed_bounds")
+        if not b or "image" not in (n.get("class") or "").lower():
+            continue
+        bb = (b["left"], b["top"], min(b["right"], w), min(b["bottom"], h))
+        if bb in seen or (bb[2] - bb[0]) < 0.06 * w or (bb[3] - bb[1]) < 0.03 * h or (bb[2] - bb[0]) * (bb[3] - bb[1]) > 0.5 * w * h:
+            continue
+        seen.add(bb)
+        x1, y1, x2, y2 = (int(v * sc) for v in bb)
+        d.rectangle([x1, y1, x2 - 1, y2 - 1], outline=150, width=1)
+        d.line([x1, y1, x2 - 1, y2 - 1], fill=200)
+        d.line([x1, y2 - 1, x2 - 1, y1], fill=200)
+        d.text((x1 + 3, y2 - 13), "[image]", fill=110, font=font)
+    for e in els:
+        x1, y1, x2, y2 = (int(v * sc) for v in e["bounds"])
+        x2, y2 = max(x1 + 2, x2 - 1), max(y1 + 2, y2 - 1)
+        is_img = "image" in (e.get("class") or "").lower() and not e.get("text")
+        d.rectangle([x1, y1, x2, y2], outline=0, width=1)
+        if is_img:
+            d.line([x1, y1, x2, y2], fill=170)
+            d.line([x1, y2, x2, y1], fill=170)
+        label = "[image]" if is_img else (e.get("text") or hint.get(e["index"], ""))
+        label = " ".join(label.split())  # one line
+        tag = str(e["index"])
+        tw = d.textlength(tag, font=bold)
+        d.rectangle([x1, y1, x1 + tw + 3, y1 + 11], fill=0)
+        d.text((x1 + 2, y1), tag, fill=255, font=bold)
+        avail = x2 - x1 - 4
+        if label and avail > 8:
+            while label and d.textlength(label, font=font) > avail:
+                label = label[:-1]
+            ty = y1 + 12 if y2 - y1 > 24 else y1 + 1
+            tx = x1 + 2 if y2 - y1 > 24 else x1 + tw + 6
+            d.text((tx, ty), label, fill=0, font=font)
+    return b64_jpeg(im.convert("RGB"), max_side, 85)
+
+
 def compact_to_center(text):
     """Replace the first 'x1,y1,x2,y2' (0-1000 normalized) of each compact line by '@cx,cy'."""
     def one(line):
@@ -263,6 +327,9 @@ def decide_prompt(text, instr, desc=None, ocr=False, mode=""):
         what += ". The image shows the screen with each element's box and [index] drawn in red"
     elif mode in ("compact_somU", "center2_somU"):
         what += ". The image shows the screen; elements without a text label have their box and [index] drawn in red"
+    elif mode == "wire_text":
+        what += (". The image is a black/white wireframe of the screen: each element's box with its [index] "
+                 "and label (pictures shown as [image])")
     elif mode in ("sketch", "center_sketch"):
         what += ". The image is a wireframe of the screen: each element's box with its [index]"
     return (f"{head}{what}:\n{text}\n\nYou are operating this phone. "
@@ -444,7 +511,8 @@ def run(args):
                         kind = IMAGE_MODES.get(mode)
                         img = (b64_jpeg(shot, 768) if kind == "shot" else sketch(els, s["w"], s["h"]) if kind == "sketch"
                                else som_image(s["img"], els) if kind == "som"
-                               else som_image(s["img"], [e for e in els if not e.get("text")]) if kind == "somU" else None)
+                               else som_image(s["img"], [e for e in els if not e.get("text")]) if kind == "somU"
+                               else wire_text_image(s) if kind == "wiretext" else None)
                         r = call(args, decide_prompt(text, instr, ocr=mode in ("ocr_only", "ocr_shot"), mode=mode), img)
                     ok, idx, lab = evaluate(r["reply"], mode, s, els)
                     f.write(json.dumps(dict(step=s["id"], mode=mode, model=model_id, ok=ok, idx=idx, picked=lab,

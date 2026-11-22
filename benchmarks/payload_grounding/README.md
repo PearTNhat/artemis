@@ -67,6 +67,7 @@ Chấm điểm: model trả `{"index": N}` → lấy nhãn phần tử N → đ�
 | `center2_shot` | `center2` + ảnh thật |
 | `compact_somU` | list gọn + ảnh thật **chỉ vẽ khung & số lên phần tử không nhãn** (không che chữ) |
 | `center2_somU` | `center2` + ảnh chỉ đánh số phần tử không nhãn |
+| `wire_text` | wireframe trắng đen **có chữ**: mỗi khung ghi nhãn, hoặc loại/trạng thái nếu không nhãn; ImageView vẽ `[image]`; + list gọn |
 
 `list_center` / `center_*` (bản cũ) chỉ lấy chữ nên phần tử không nhãn thành `""` và mất loại
 (`(toggle)`, `checked:false`) mà list gọn của Flash có — `center2*` sửa điều đó.
