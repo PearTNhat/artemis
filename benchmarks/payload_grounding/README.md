@@ -10,7 +10,7 @@ Bộ test **tự chứa**: chỉ đọc `cases.jsonl` + `data/`, không cần `t
 
 ```
 benchmarks/payload_grounding/
-├── cases.jsonl          # 18 bài test — SỬA TRỰC TIẾP được
+├── cases.jsonl          # 52 bài test (18 gốc + 34 bài khó viết tay) — SỬA TRỰC TIẾP được
 ├── data/case_XX/
 │   ├── screen.jpg       # ảnh màn hình 1280×2772 (đã che dữ liệu cá nhân)
 │   └── ui_tree.json     # cây UI (XML accessibility) cùng thời điểm
@@ -29,6 +29,13 @@ Play Store, Chrome…). Một dòng trong `cases.jsonl`:
 
 - `instruction`: lý do của agent lúc đó (đã bỏ số index / toạ độ để không lộ đáp án). Sửa thoải mái.
 - `accept`: nhãn phần tử được tính là đúng. Thêm nhãn khác nếu có nhiều đáp án hợp lệ.
+- `accept_box`: thay cho `accept` khi đích **không có nhãn** (icon, công tắc, ảnh): danh sách vùng
+  `[x1,y1,x2,y2]` theo pixel ảnh; đúng khi tâm phần tử được chọn nằm trong một vùng.
+- `screen`: dùng lại màn hình của bài khác (vd. `"case_00"`) — nhiều câu lệnh trên cùng 1 màn hình.
+- `tags`: nhóm bài để `--summary` tính riêng: `orig` (18 bài gốc, đích có chữ), `hard` (34 bài viết tay),
+  `icon`, `unlabeled`, `spatial` (vị trí: "tab thứ 4", "mục cuối"), `relation` ("nút + của món X"),
+  `toggle`, `dup_label` (chữ trùng ở 2 chỗ).
+- `near_y`: khi chữ đáp án xuất hiện 2 lần, chọn dòng gần toạ độ y này.
 - Xoá dòng để bỏ bài; thêm bài bằng `build_dataset.py --count N` (dựng lại toàn bộ).
 
 Chấm điểm: model trả `{"index": N}` → lấy nhãn phần tử N → đúng nếu khớp một nhãn trong `accept`.
@@ -47,6 +54,18 @@ Chấm điểm: model trả `{"index": N}` → lấy nhãn phần tử N → đ�
 | `ocr_only` | **không có cây UI** (giả lập desktop): chỉ các dòng OCR `[i] "chữ" @cx,cy`, không ảnh |
 | `ocr_shot` | như `ocr_only` + ảnh thật 768 |
 | `xml_ocr` | list gọn sau khi gộp OCR vào cây UI (như Flash `ocr.mode="always"`), không ảnh |
+| `center_ocr` | nhãn + tâm, lấy từ cây UI đã gộp OCR, không ảnh |
+| `center_sketch` | nhãn + tâm + ảnh wireframe (khung + số, không chữ) |
+| `center_som` | nhãn + tâm + **ảnh thật có vẽ khung đỏ và số** của từng phần tử (set-of-marks) |
+| `center_shot` | nhãn + tâm + ảnh thật 768 (không vẽ gì) |
+| `ocr_icons` | **không có cây UI**: OCR + icon do OpenCV dò (`(icon)`), nhãn + tâm, không ảnh |
+| `ocr_icons_som` | như `ocr_icons` + ảnh thật có vẽ khung và số |
+
+Wireframe (`sketch`) và ảnh đánh số (`som`) được vẽ lúc chạy từ danh sách phần tử (hàm
+`sketch()` / `som_image()` trong `bench.py`), không lưu file. Bộ dò icon (`detect_icons()`) là
+OpenCV thuần, không biết app nào: viền Canny → khối cỡ icon (3–16% chiều rộng, gần vuông) không
+trùng chữ OCR; kết quả cache ở `data/<screen>/icons.json`. Nó bỏ sót icon đè lên ảnh (nút "+"
+trên ảnh món) và icon mảnh ("⋯").
 
 OCR dùng đúng OCR của Flash (`artemis/utils/local_ocr.py`: RapidOCR + PP-OCRv5 Latin, chạy CPU trên
 máy chạy benchmark), chạy 1 lần mỗi bài và cache ở `data/case_XX/ocr_full.json` / `ocr_xml.json`
@@ -79,6 +98,8 @@ uv run python benchmarks/payload_grounding/bench.py --backend gemini --model gem
 # Cột: wall = thời gian 1 lần gọi phía client (gồm mạng), prefill/gen = phía server Ollama,
 # ocr = thời gian OCR cục bộ, total = wall + ocr. Lần gọi đầu có nạp model (load) nên chạy lại riêng nếu cần.
 uv run python benchmarks/payload_grounding/bench.py --summary benchmarks/payload_grounding/results/*.jsonl
+# thêm bảng ✓/✗ từng bài × từng mode
+uv run python benchmarks/payload_grounding/bench.py --summary benchmarks/payload_grounding/results/*.jsonl --failures
 ```
 
 Chạy lại cùng `--out` sẽ **chạy tiếp** chỗ còn thiếu, không chạy lại bài đã xong.

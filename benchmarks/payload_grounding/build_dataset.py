@@ -168,7 +168,7 @@ def main():
         instr = clean_instruction(s["think"])
         for rx in regexes:
             instr = rx.sub(REDACTED, instr)
-        cases.append(dict(id=cid, instruction=instr, accept=[s["target_text"]], width=s["w"], height=s["h"],
+        cases.append(dict(id=cid, instruction=instr, accept=[s["target_text"]], width=im.width, height=im.height,
                           app=s["app"], source=s["source"], redacted_regions=len(boxes)))
         print(f"{cid}  {s['app'][:28]:28s} target={s['target_text'][:30]!r} redacted={len(boxes)}")
     with open(os.path.join(HERE, "cases.jsonl"), "w", encoding="utf-8") as f:

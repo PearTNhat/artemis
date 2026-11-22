@@ -422,7 +422,30 @@ Bộ test tự chứa `benchmarks/payload_grounding/` (18 lần bấm thật t�
 - **Chỉ OCR không đủ** (11/18): 4/7 lỗi là đích là **icon không chữ** (nút "+" Add alarm ×2, kính lúp Search, Home) — OCR không tạo ra phần tử nào để chọn; thêm ảnh cũng không cứu được (11/18) vì AI thấy icon nhưng không có index để trả. Còn lại: 2 dòng "Bình Thường" trùng chữ (chọn sai hàng), chữ trong ảnh thumbnail. Model OCR Latin làm mất dấu tiếng Việt. → Cho desktop không có cây accessibility cần thêm **dò icon** (vd. OpenCV/model nhỏ) bên cạnh OCR; trước đó nên dùng cây accessibility của OS (Windows UIA, macOS AX, Linux AT-SPI) khi có.
 - Gộp OCR vào cây UI: +1 bài đúng so với list gọn nhưng +373 token và +0.65 s OCR mỗi lần nhìn → giữ `ocr.mode="auto"` (chỉ khi cây nghèo).
 
-- Giới hạn: chỉ có bài nhắm phần tử **có nhãn**; ý định do agent đã thấy ảnh viết ra → chưa đo icon không nhãn, màu/hình, và việc tự lập bước tiếp theo khi không có ảnh. Hướng đề xuất: mặc định list "nhãn + tâm", gửi ảnh khi cần (nhiều phần tử không nhãn, lệnh về hình/màu, thao tác trước không tác dụng) — cần chạy task thật trước khi đưa vào Flash.
+- Giới hạn: chỉ có bài nhắm phần tử **có nhãn**; ý định do agent đã thấy ảnh viết ra → chưa đo icon không nhãn, màu/hình, và việc tự lập bước tiếp theo khi không có ảnh.
+- ⚠️ Các bảng trên có lỗi: 8/18 màn emulator 720×1280 bị khai 1280×2772 → toạ độ list/tâm/wireframe lệch (kết quả cũ ở `results/archive_v1/`). Đã sửa; số mới ở bảng dưới.
+
+**Bộ mở rộng 52 bài (18 gốc + 34 bài khó viết tay, đáp án là vùng pixel đã kiểm trên ảnh), Colab T4 `qwen3-vl:4b-16k@53a23302b5c9`, 2026-11-22.** Nhãn bài khó: icon 18, unlabeled (đích không có nhãn trong cây UI) 16, spatial ("tab thứ 4", "mục cuối") 19, relation ("nút + của món X", "công tắc của báo thức 9:00") 10, toggle 2, dup_label 2.
+
+| Cách gửi | Tổng | Gốc /18 | Khó /34 | Không nhãn /16 | Quan hệ /10 | wall | Token |
+|---|---|---|---|---|---|---|---|
+| **Ảnh 768 + list gọn (Flash hiện tại)** | **48/52** | 17 | **31** | 13 | **10** | 2.72 s | 1872 |
+| Nhãn + tâm + ảnh thật **vẽ khung + số** (set-of-marks) | 46/52 | 15 | **31** | **14** | **10** | 2.49 s | 1652 |
+| Nhãn + tâm + ảnh thật | 44/52 | 16 | 28 | 10 | 9 | 2.52 s | 1636 |
+| Cây UI + OCR gộp (list gọn) | 42/52 | 17 | 25 | 8 | 6 | 1.61 s + OCR 0.66 | 1582 |
+| 2 tầng | 41/52 | 18 | 23 | 6 | 6 | 4.53 s | 1995 |
+| Wireframe + list gọn / + nhãn + tâm | 40/52 | 15 / 16 | 25 / 24 | 8 / 6 | 5 | 2.3–2.6 s | 1650–1890 |
+| List gọn, không ảnh | 38/52 | 16 | 22 | 5 | 5 | 1.15 s | 814 |
+| Nhãn + tâm, không ảnh | 38/52 | **18** | 20 | 3 | 5 | **0.99 s** | 584 |
+| Chỉ nhãn | 36/52 | 18 | 18 | 2 | 4 | 0.82 s | 374 |
+| Không cây UI: OCR + icon OpenCV + ảnh đánh số | 29/52 | 12 | 17 | 6 | 4 | 2.63 s + 0.71 | 1874 |
+| Không cây UI: OCR + icon OpenCV | 26/52 | 12 | 14 | 6 | 3 | 1.15 s + 0.71 | 822 |
+| Không cây UI: chỉ OCR | 23/52 | 12 | 11 | 4 | 3 | 1.13 s + 0.71 | 662 |
+
+- **Sửa kết luận cũ:** "nhãn + tâm không ảnh" chỉ tốt khi đích **có chữ** (18/18 bài gốc); với icon/không nhãn/quan hệ nó rơi xuống 20/34 (không nhãn chỉ 3/16) — không ảnh thì model không biết phần tử `""` nào là công tắc, nút +, mũi tên. **Ảnh thật là cần thiết cho mọi app**; cách Flash đang làm (ảnh 768 + list gọn) đúng nhất (48/52).
+- **Vẽ khung + số lên ảnh thật** (gợi ý "vẽ cạnh" của anh lead) giúp đúng ở bài khó (31/34, không nhãn 14/16 — tốt nhất) nhưng che chữ nên tụt ở bài gốc (15/18). **Wireframe không giúp** (40/52, không nhãn 6–8/16): khung không có hình icon/ảnh, chỉ lặp lại toạ độ đã có trong list.
+- Chiến lược lai mô phỏng trên số đã đo (không gọi thêm): "≥3 phần tử không nhãn → ảnh đánh số, ngược lại chỉ chữ" 44/52, trung bình 1.79 s; "≥5" 41/52, 1.49 s; "chỉ chữ, nếu model chọn phần tử không nhãn thì hỏi lại kèm ảnh" 40/52, 1.40 s → **không cách lai nào bằng gửi ảnh luôn** (48/52, 2.70 s).
+- **Desktop không cây UI**: OCR + dò icon OpenCV chỉ 26–29/52 (bộ dò bỏ sót nút "+" đè trên ảnh, icon mảnh "⋯") → chưa dùng được; ưu tiên cây accessibility của OS (UIA/AX/AT-SPI), OCR + dò icon chỉ là phương án cuối và cần bộ dò tốt hơn (model dò icon).
 
 ## 2. TRẠNG THÁI TRIỂN KHAI (đến bản 3)
 

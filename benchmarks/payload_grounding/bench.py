@@ -17,6 +17,15 @@ Modes (all answer {"index": N} over the Flash element list):
   ocr_only      OCR text boxes only ([i] "text" @cx,cy) - no accessibility tree, no image (desktop-like)
   ocr_shot      OCR text boxes + screenshot 768 (no accessibility tree)
   xml_ocr       Flash compact list after fusing OCR into the tree (Flash ocr.mode="always"), no image
+  center_ocr    label + center list built from the tree fused with OCR, no image
+  center_sketch label + center list + the wireframe sketch
+  center_som    label + center list + real screenshot with every element's box and index drawn on it
+  center_shot   label + center list + plain real screenshot (768px)
+  ocr_icons     no tree: OCR text boxes + OpenCV-detected icon boxes ("(icon)"), no image
+  ocr_icons_som same list + real screenshot with those boxes and indices drawn on it
+Cases may reuse another case's screen ("screen": "case_00") and may define the answer as screen
+regions ("accept_box": [[x1,y1,x2,y2], ...], px) - needed for icons that have no label; the chosen
+element is then correct when its center lies in one of the boxes. "tags" group cases in --summary.
 OCR = Flash's own local OCR (artemis.utils.local_ocr: RapidOCR + PP-OCRv5 Latin), run once per
 case on this PC and cached in data/<case>/ocr_*.json together with its time (ocr_ms).
 
@@ -39,8 +48,12 @@ REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, REPO)
 
 ALL_MODES = ["shot768", "sketch", "2stage", "list_full", "list_compact", "list_center", "list_label",
-             "ocr_only", "ocr_shot", "xml_ocr"]
-OCR_MODES = ("ocr_only", "ocr_shot", "xml_ocr")
+             "center_sketch", "center_som", "center_shot", "ocr_only", "ocr_shot", "xml_ocr", "center_ocr",
+             "ocr_icons", "ocr_icons_som"]
+OCR_MODES = ("ocr_only", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
+NO_TREE_MODES = ("ocr_only", "ocr_shot", "ocr_icons", "ocr_icons_som")  # graded against the tree
+IMAGE_MODES = {"shot768": "shot", "ocr_shot": "shot", "sketch": "sketch", "center_sketch": "sketch",
+               "center_som": "som", "ocr_icons_som": "som", "center_shot": "shot"}
 DESCRIBE = ("Describe this Android screen in at most 60 words: app/screen name, main sections, "
             "and any icon-only buttons with their position and look.")
 norm = lambda t: " ".join((t or "").lower().split())
@@ -53,8 +66,10 @@ def load_cases(limit=None):
         if not line.strip():
             continue
         c = json.loads(line)
-        d = os.path.join(HERE, "data", c["id"])
-        cases.append(dict(id=c["id"], instr=c["instruction"], accept=c["accept"], near_y=c.get("near_y"),
+        screen = c.get("screen", c["id"])
+        d = os.path.join(HERE, "data", screen)
+        cases.append(dict(id=c["id"], screen=screen, dir=d, instr=c["instruction"], accept=c.get("accept", []),
+                          accept_box=c.get("accept_box"), near_y=c.get("near_y"), tags=c.get("tags", ["orig"]),
                           w=c["width"], h=c["height"],
                           img=os.path.join(d, "screen.jpg"), ui=json.load(open(os.path.join(d, "ui_tree.json")))))
     return cases[:limit] if limit else cases
@@ -95,7 +110,7 @@ def ocr_lines(case, with_xml):
 
     with_xml=False: no tree at all (desktop-like), the whole frame is read.
     with_xml=True: the tree is passed, so the status bar is cropped like in Flash."""
-    path = os.path.join(HERE, "data", case["id"], "ocr_xml.json" if with_xml else "ocr_full.json")
+    path = os.path.join(case["dir"], "ocr_xml.json" if with_xml else "ocr_full.json")
     if os.path.exists(path):
         return json.load(open(path, encoding="utf-8"))
     from artemis.utils import local_ocr
@@ -121,6 +136,69 @@ def ocr_elements(case):
     return els
 
 
+def detect_icons(case):
+    """Generic OpenCV icon/graphic detector (no app knowledge): edge blobs of icon-like size and
+    shape that do not overlap OCR text. Cached in data/<screen>/icons.json with its time."""
+    path = os.path.join(case["dir"], "icons.json")
+    if os.path.exists(path):
+        return json.load(open(path))
+    import cv2
+    import numpy as np
+    t = time.perf_counter()
+    img = cv2.imread(case["img"])
+    H, W = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 40, 120)
+    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=2)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    lo, hi = 0.03 * W, 0.16 * W
+    text_boxes = [e["bounds"] for e in ocr_elements(case)]
+    boxes = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if not (lo <= w <= hi and lo <= h <= hi and 0.6 <= w / h <= 1.67):
+            continue
+        cx, cy = x + w / 2, y + h / 2
+        if any(b[0] - 4 <= cx <= b[2] + 4 and b[1] - 4 <= cy <= b[3] + 4 for b in text_boxes):
+            continue
+        boxes.append([x, y, x + w, y + h])
+    boxes.sort(key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
+    kept = []
+    for b in boxes:  # drop boxes mostly inside an already kept (bigger) one
+        if not any(min(b[2], k[2]) - max(b[0], k[0]) > 0.6 * (b[2] - b[0])
+                   and min(b[3], k[3]) - max(b[1], k[1]) > 0.6 * (b[3] - b[1]) for k in kept):
+            kept.append(b)
+    kept = sorted(kept, key=lambda b: (b[1], b[0]))[:60]
+    out = dict(ms=round((time.perf_counter() - t) * 1000), boxes=kept)
+    json.dump(out, open(path, "w"))
+    return out
+
+
+def center_text(els, w, h, icon_label="(icon)"):
+    return "\n".join(f'[{e["index"]}] ' + (f'"{e["text"]}"' if e.get("text") else icon_label)
+                     + f' @{e["center"][0] * 1000 // w},{e["center"][1] * 1000 // h}' for e in els)
+
+
+def som_image(path, els, max_side=768):
+    """Real screenshot with every listed element's box and index drawn on it (set-of-marks)."""
+    from PIL import Image, ImageDraw, ImageFont
+    im = Image.open(path).convert("RGB")
+    d = ImageDraw.Draw(im)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", max(14, im.width // 40))
+    except OSError:
+        font = ImageFont.load_default()
+    for e in els:
+        d.rectangle(e["bounds"], outline=(255, 0, 0), width=max(2, im.width // 400))
+    for e in els:
+        x1, y1 = e["bounds"][:2]
+        lab = str(e["index"])
+        tw = d.textlength(lab, font=font)
+        d.rectangle([x1, y1, x1 + tw + 6, y1 + font.size + 4], fill=(255, 0, 0))
+        d.text((x1 + 3, y1 + 1), lab, fill=(255, 255, 255), font=font)
+    return b64_jpeg(im, max_side, 80)
+
+
 def listing(mode, s):
     import copy
     from artemis.utils.visualization import format_minimal_list_with_elements
@@ -129,13 +207,20 @@ def listing(mode, s):
         text = "\n".join(f'[{e["index"]}] "{e["text"]}" @{e["center"][0] * 1000 // s["w"]},'
                          f'{e["center"][1] * 1000 // s["h"]}' for e in els)
         return text, els
-    if mode == "xml_ocr":
+    if mode in ("ocr_icons", "ocr_icons_som"):
+        els = ocr_elements(s)
+        for b in detect_icons(s)["boxes"]:
+            els.append(dict(index=len(els) + 1, text="", bounds=b, center=[(b[0] + b[2]) // 2, (b[1] + b[3]) // 2]))
+        return center_text(els, s["w"], s["h"]), els
+    if mode in ("xml_ocr", "center_ocr"):
         from artemis.utils.ocr_xml_fusion import fuse_ocr_with_xml
         fused = fuse_ocr_with_xml(copy.deepcopy(s["ui"]), ocr_lines(s, True)["lines"], xml_first=True)
         text, els, _ = format_minimal_list_with_elements(fused, s["w"], s["h"], compact=True)
+        if mode == "center_ocr":
+            text = center_text(els, s["w"], s["h"], icon_label='""')
         return text, els
     text, els, _ = format_minimal_list_with_elements(s["ui"], s["w"], s["h"], compact=mode != "list_full")
-    if mode == "list_center":
+    if mode in ("list_center", "center_sketch", "center_som", "center_shot"):
         text = "\n".join(f'[{e["index"]}] "{e.get("text", "")}" @{e["center"][0] * 1000 // s["w"]},'
                          f'{e["center"][1] * 1000 // s["h"]}' for e in els)
     elif mode == "list_label":
@@ -143,10 +228,20 @@ def listing(mode, s):
     return text, els
 
 
-def decide_prompt(text, instr, desc=None, ocr=False):
+def decide_prompt(text, instr, desc=None, ocr=False, mode=""):
     head = f"Screen description: {desc}\n\n" if desc else ""
-    what = ("Text found on the screen by OCR ([index] text @x,y center in 0-1000 normalized coords; "
-            "icons without text are not listed)" if ocr else "UI elements on the Android screen")
+    if mode in ("ocr_icons", "ocr_icons_som"):
+        what = ("Elements found on the screen by OCR and icon detection ([index] text @x,y center in 0-1000 "
+                "normalized coords; (icon) = a graphic without text)")
+    elif ocr:
+        what = ("Text found on the screen by OCR ([index] text @x,y center in 0-1000 normalized coords; "
+                "icons without text are not listed)")
+    else:
+        what = "UI elements on the Android screen"
+    if mode in ("center_som", "ocr_icons_som"):
+        what += ". The image shows the screen with each element's box and [index] drawn in red"
+    elif mode in ("sketch", "center_sketch"):
+        what += ". The image is a wireframe of the screen: each element's box with its [index]"
     return (f"{head}{what}:\n{text}\n\nYou are operating this phone. "
             f"Your intent for this step:\n{instr}\n\nWhich element should be tapped? "
             "Reply ONLY JSON: {\"index\": N}")
@@ -185,7 +280,18 @@ def evaluate(reply, mode, case, els=None):
     matching text, on that element's row)."""
     if els is None:
         els = listing(mode, case)[1]
-    if mode not in ("ocr_only", "ocr_shot"):
+    if case.get("accept_box"):
+        m = re.search(r'"?index"?\s*:\s*(\d+)', reply or "")
+        if not m:
+            return False, None, ""
+        idx = int(m.group(1))
+        e = next((e for e in els if e["index"] == idx), None)
+        if not e:
+            return False, idx, ""
+        cx, cy = e["center"]
+        ok = any(b[0] <= cx <= b[2] and b[1] <= cy <= b[3] for b in case["accept_box"])
+        return ok, idx, norm(e.get("text"))
+    if mode not in NO_TREE_MODES:
         return grade(reply, els, case)
     m = re.search(r'"?index"?\s*:\s*(\d+)', reply or "")
     if not m:
@@ -302,7 +408,9 @@ def run(args):
                     text, els = listing(mode, s)
                     extra = {}
                     if mode in OCR_MODES:
-                        extra["ocr_ms"] = ocr_lines(s, mode == "xml_ocr")["ms"]
+                        extra["ocr_ms"] = ocr_lines(s, mode in ("xml_ocr", "center_ocr"))["ms"]
+                    if mode in ("ocr_icons", "ocr_icons_som"):
+                        extra["ocr_ms"] += detect_icons(s)["ms"]
                     if mode == "2stage":
                         d = call(args, DESCRIBE, b64_jpeg(shot, 768), 150)
                         time.sleep(pause)
@@ -310,17 +418,21 @@ def run(args):
                         extra = dict(s1_wall=d["wall"], s1_in=d["in_tok"], s1_out=d["out_tok"])
                         r["wall"] += d["wall"]
                     else:
-                        img = (b64_jpeg(shot, 768) if mode in ("shot768", "ocr_shot")
-                               else sketch(els, s["w"], s["h"]) if mode == "sketch" else None)
-                        r = call(args, decide_prompt(text, instr, ocr=mode in ("ocr_only", "ocr_shot")), img)
+                        kind = IMAGE_MODES.get(mode)
+                        img = (b64_jpeg(shot, 768) if kind == "shot" else sketch(els, s["w"], s["h"]) if kind == "sketch"
+                               else som_image(s["img"], els) if kind == "som" else None)
+                        r = call(args, decide_prompt(text, instr, ocr=mode in ("ocr_only", "ocr_shot"), mode=mode), img)
                     ok, idx, lab = evaluate(r["reply"], mode, s, els)
                     f.write(json.dumps(dict(step=s["id"], mode=mode, model=model_id, ok=ok, idx=idx, picked=lab,
                                             accept=s["accept"], n_els=len(els), **r, **extra),
                                        ensure_ascii=False) + "\n")
                     f.flush()
                     print(f"  {mode:13s} {'OK ' if ok else 'BAD'} {r['wall']:.2f}s in={r['in_tok']} "
-                          f"target={s['accept'][0][:22]!r} picked={lab[:22]!r}", flush=True)
+                          f"target={(s['accept'] or [s['id']])[0][:22]!r} picked={lab[:22]!r}", flush=True)
                     time.sleep(pause)
+
+
+FAILURES = False
 
 
 def summary(paths):
@@ -333,7 +445,7 @@ def summary(paths):
         if c is None:
             r["ok"] = False
             continue
-        lm = r["mode"] if r["mode"] in ("list_full", "ocr_only", "ocr_shot", "xml_ocr") else "list_compact"
+        lm = r["mode"] if r["mode"] in ("list_full",) + OCR_MODES else "list_compact"
         if (r["step"], lm) not in lists:
             lists[(r["step"], lm)] = listing(lm, c)[1]
         r["ok"] = evaluate(r["reply"], r["mode"], c, lists[(r["step"], lm)])[0]
@@ -360,6 +472,22 @@ def summary(paths):
             print(f"{m:13s} {sum(x['ok'] for x in X):2d}/{len(X):<3d} {statistics.median(W):8.2f} "
                   f"{W[int(0.9 * (len(W) - 1))]:6.2f} {med([x.get('prefill', 0) for x in X]):7.2f} "
                   f"{med([x.get('gen', 0) for x in X]):5.2f} {ocr:5.2f} {total:6.2f} {tok:7.0f}")
+        # accuracy per tag
+        tags = sorted({t for v in common for t in cases[next(iter(v.values()))["step"]]["tags"]})
+        print(f"\naccuracy by case tag  ({', '.join(f'{t}={sum(t in cases[next(iter(v.values()))['step']]['tags'] for v in common)}' for t in tags)})")
+        print(f"{'mode':13s} " + " ".join(f"{t[:9]:>9s}" for t in tags))
+        for m in modes:
+            cells = []
+            for t in tags:
+                X = [v[m] for v in common if t in cases[v[m]["step"]]["tags"]]
+                cells.append(f"{sum(x['ok'] for x in X):>4d}/{len(X):<4d}")
+            print(f"{m:13s} " + " ".join(f"{c:>9s}" for c in cells))
+        if FAILURES:
+            print("\nper case (✓ correct / ✗ wrong):")
+            print(f"{'case':22s} " + " ".join(f"{m[:6]:>6s}" for m in modes))
+            for v in sorted(common, key=lambda v: next(iter(v.values()))["step"]):
+                sid = next(iter(v.values()))["step"]
+                print(f"{sid:22s} " + " ".join(f"{'✓' if v[m]['ok'] else '✗':>6s}" for m in modes))
 
 
 def main():
@@ -375,8 +503,11 @@ def main():
     ap.add_argument("--pause", type=float, default=None)
     ap.add_argument("--num-ctx", type=int, default=4096, help="Ollama context; raise if a WARNING says truncated")
     ap.add_argument("--summary", nargs="*")
+    ap.add_argument("--failures", action="store_true", help="with --summary: print the per-case matrix")
     args = ap.parse_args()
     if args.summary:
+        global FAILURES
+        FAILURES = args.failures
         return summary(args.summary)
     args.model = args.model or ("qwen3-vl:4b-16k" if args.backend == "ollama" else "gemini-3.5-flash-lite")
     if args.backend == "gemini":
