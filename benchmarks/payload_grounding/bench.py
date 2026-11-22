@@ -603,7 +603,7 @@ def grade(reply, els, case):
     """Correct if the chosen element carries an accepted label, or is an unlabeled control
     (radio / checkbox / toggle) on the same row as an accepted label. When the accepted label
     occurs more than once, case["near_y"] (screen px) picks the intended row."""
-    m = re.search(r'"?index"?\s*:\s*(\d+)', reply or "")
+    m = re.search(r'"?index"?\s*:\s*\[?\s*(\d+)', reply or "")
     if not m:
         return False, None, ""
     idx = int(m.group(1))
@@ -628,7 +628,7 @@ def evaluate(reply, mode, case, els=None):
     if els is None:
         els = listing(mode, case)[1]
     if case.get("accept_box"):
-        m = re.search(r'"?index"?\s*:\s*(\d+)', reply or "")
+        m = re.search(r'"?index"?\s*:\s*\[?\s*(\d+)', reply or "")
         if not m:
             return False, None, ""
         idx = int(m.group(1))
@@ -640,7 +640,7 @@ def evaluate(reply, mode, case, els=None):
         return ok, idx, norm(e.get("text"))
     if mode not in NO_TREE_MODES:
         return grade(reply, els, case)
-    m = re.search(r'"?index"?\s*:\s*(\d+)', reply or "")
+    m = re.search(r'"?index"?\s*:\s*\[?\s*(\d+)', reply or "")
     if not m:
         return False, None, ""
     idx = int(m.group(1))
