@@ -121,3 +121,4 @@ Thumbs.db
 
 # Local binaries
 bin/
+benchmarks/payload_grounding/gallery/

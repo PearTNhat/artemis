@@ -106,6 +106,18 @@ Chạy lại cùng `--out` sẽ **chạy tiếp** chỗ còn thiếu, không ch�
 Mỗi lần gọi có một nonce ngẫu nhiên ở đầu prompt để Ollama không dùng lại cache tiền tố
 (mọi mode đều trả đủ prefill). Kết quả Ollama ghi kèm digest model để biết chạy trên bản nào.
 
+## Xem toàn bộ bài + ảnh model nhận được (gallery)
+
+```bash
+uv run python benchmarks/payload_grounding/gallery.py \
+    --results benchmarks/payload_grounding/results/qwen3-vl-4b-colab-t4.jsonl
+cd benchmarks/payload_grounding/gallery && python3 -m http.server 8000   # rồi mở http://localhost:8000
+```
+
+Sinh thư mục `gallery/` (không commit): bảng kết quả, 4 loại ảnh của mỗi màn hình (ảnh thật,
+wireframe, ảnh vẽ khung & số, OCR + dò icon), 2 dạng list chữ, và thẻ của từng bài (ảnh + khung
+đáp án + ✓/✗ từng cách gửi, lọc theo loại bài / cách gửi bị sai). Cần mở qua http (trang đọc `data.json`).
+
 ## Thêm / dựng lại dữ liệu
 
 ```bash

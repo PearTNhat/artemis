@@ -1,0 +1,232 @@
+<title>Payload Grounding Bench</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+/* Layout: lab report — summary table first, then "what the model sees" viewer, then the case grid. */
+:root {
+  --bg: #f5f6f8; --surface: #ffffff; --ink: #15191f; --muted: #5a6371; --line: #dde1e7;
+  --accent: #1f56c9; --accent-soft: #e6edfb; --ok: #18794e; --ok-soft: #dcf2e6; --bad: #b8322a; --bad-soft: #fbe3e1;
+  --mark: #e5484d;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #111418; --surface: #191d23; --ink: #e7eaee; --muted: #9aa4b2; --line: #2b313a;
+  --accent: #7ea6ff; --accent-soft: #1d2a45; --ok: #4cc38a; --ok-soft: #14301f; --bad: #ff7b72; --bad-soft: #3a1b19;
+  --mark: #ff6b6b; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #111418; --surface: #191d23; --ink: #e7eaee; --muted: #9aa4b2; --line: #2b313a;
+  --accent: #7ea6ff; --accent-soft: #1d2a45; --ok: #4cc38a; --ok-soft: #14301f; --bad: #ff7b72; --bad-soft: #3a1b19;
+  --mark: #ff6b6b; color-scheme: dark }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.5; }
+.wrap { max-width: 1240px; margin: 0 auto; padding-block: 28px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 40px; }
+h1, h2, h3 { margin: 0; text-wrap: balance; }
+h1 { font-size: 1.9rem; font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 1.3rem; font-weight: 600; }
+p { margin: 0; max-width: 72ch; }
+.muted { color: var(--muted); }
+.eyebrow { font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+header { display: grid; gap: 10px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-family: var(--font-mono); font-size: .82rem; color: var(--muted); }
+section { display: grid; gap: 14px; min-width: 0; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+.findings { display: grid; gap: 8px; padding: 16px 18px; }
+.findings li { margin: 0; }
+.findings ul { margin: 0; padding-left: 1.1rem; display: grid; gap: 6px; }
+
+/* summary table */
+.tablebox { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: .88rem; }
+th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; white-space: normal; min-width: 220px; }
+thead th { font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+tr.group td { background: var(--bg); color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; text-align: left; }
+tr.current td:first-child { font-weight: 600; }
+tr.current td:first-child::after { content: "Flash hiện tại"; margin-left: 8px; font-size: .68rem; font-weight: 600;
+  color: var(--accent); background: var(--accent-soft); padding: 1px 6px; border-radius: 4px; }
+.acc { display: inline-flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.bar { width: 64px; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); }
+.cell-good { color: var(--ok); font-weight: 600; }
+.cell-bad { color: var(--bad); }
+
+/* screen viewer */
+.screens { display: flex; flex-wrap: wrap; gap: 6px; }
+.screens button, .chip-btn { font: inherit; font-size: .8rem; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--ink); cursor: pointer; }
+.screens button[aria-pressed="true"], .chip-btn[aria-pressed="true"] { background: var(--accent); color: var(--surface); border-color: var(--accent); }
+button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.views { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 14px; }
+.view { display: grid; gap: 6px; align-content: start; min-width: 0; }
+.view img { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.view b { font-size: .85rem; }
+.view span { font-size: .78rem; color: var(--muted); }
+.lists { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 0 14px 14px; }
+.lists > div { min-width: 0; display: grid; gap: 6px; align-content: start; }
+pre { margin: 0; font-family: var(--font-mono); font-size: .74rem; line-height: 1.45; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 10px; max-height: 320px; overflow: auto; white-space: pre; }
+
+/* cases */
+.filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+.filters label { font-size: .82rem; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
+select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface); color: var(--ink); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 14px; }
+.card { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; padding: 12px; }
+.shot { position: relative; align-self: start; }
+.shot img { width: 120px; display: block; border-radius: 4px; border: 1px solid var(--line); }
+.shot .box { position: absolute; border: 2px solid var(--mark); border-radius: 2px; box-shadow: 0 0 0 1px rgba(255,255,255,.6); }
+.body { display: grid; gap: 7px; align-content: start; min-width: 0; }
+.head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.head code { font-family: var(--font-mono); font-size: .8rem; font-weight: 500; }
+.tag { font-size: .68rem; padding: 1px 6px; border-radius: 4px; background: var(--bg); border: 1px solid var(--line); color: var(--muted); }
+.instr { font-size: .88rem; }
+.ans { font-size: .8rem; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { font-family: var(--font-mono); font-size: .68rem; padding: 2px 6px; border-radius: 4px; cursor: help; }
+.chip.ok { background: var(--ok-soft); color: var(--ok); }
+.chip.bad { background: var(--bad-soft); color: var(--bad); }
+.chip.na { background: var(--bg); color: var(--muted); }
+.linkish { font: inherit; font-size: .78rem; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; justify-self: start; }
+.count { font-family: var(--font-mono); font-size: .8rem; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: .75rem; color: var(--muted); }
+.legend code { font-family: var(--font-mono); }
+@media (max-width: 860px) { .views { grid-template-columns: repeat(2, minmax(0, 1fr)); } .lists { grid-template-columns: 1fr; } }
+@media (max-width: 420px) { .card { grid-template-columns: 96px minmax(0, 1fr); } .shot img { width: 96px; } }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <span class="eyebrow">ARTEMIS · benchmark chọn phần tử</span>
+    <h1>Gửi gì cho model để bấm đúng và nhanh?</h1>
+    <p class="muted">Mỗi bài: một màn hình thật, một câu lệnh, một đáp án. Model trả về số thứ tự phần tử <code>{"index": N}</code>, code tự lấy toạ độ để bấm. So sánh 15 cách gửi: ảnh thật, wireframe, ảnh vẽ khung &amp; số, chỉ chữ, OCR, dò icon.</p>
+    <div class="meta" id="meta">Đang tải…</div>
+  </header>
+
+  <section>
+    <h2>Kết luận chính</h2>
+    <div class="panel findings">
+      <ul>
+        <li><b>Ảnh thật là bắt buộc.</b> Bỏ ảnh chỉ đúng khi đích có chữ; với icon, công tắc, nút "+" (không nhãn) thì gần như đoán mò.</li>
+        <li><b>Ảnh thật + list gọn</b> (cách Flash đang làm) đúng nhiều nhất. <b>Vẽ khung &amp; số lên ảnh thật</b> giúp nhất ở bài khó nhưng che chữ nên tụt ở bài có chữ.</li>
+        <li><b>Wireframe không giúp:</b> tốn token như ảnh thật nhưng không có hình icon, chỉ lặp lại toạ độ đã có trong list.</li>
+        <li><b>Không có cây UI</b> (kiểu desktop): OCR + dò icon OpenCV còn kém xa; desktop nên đọc cây accessibility của hệ điều hành (Windows UIA, macOS AX).</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>Kết quả theo cách gửi</h2>
+    <p class="muted">Đúng / tổng số bài. Thời gian là trung vị 1 lần gọi (gồm ~0.5 s mạng tới Colab); OCR chạy trên CPU máy chạy test. Token = token vào.</p>
+    <div class="panel tablebox"><table id="summary"></table></div>
+  </section>
+
+  <section id="viewer">
+    <h2>Model nhận được gì</h2>
+    <p class="muted">Chọn một màn hình để xem 4 loại ảnh và 2 dạng danh sách chữ đúng như gửi cho model.</p>
+    <div class="screens" id="screens" role="group" aria-label="Chọn màn hình"></div>
+    <div class="panel">
+      <div class="views" id="views"></div>
+      <div class="lists" id="lists"></div>
+    </div>
+  </section>
+
+  <section id="cases">
+    <h2>Toàn bộ bài test</h2>
+    <div class="filters">
+      <div class="screens" id="tagfilter" role="group" aria-label="Lọc theo loại bài"></div>
+      <label for="failmode">Sai ở cách gửi <select id="failmode"><option value="">(tất cả)</option></select></label>
+      <label for="q">Tìm <input type="search" id="q" placeholder="câu lệnh, mã bài…"></label>
+      <span class="count" id="count"></span>
+    </div>
+    <div class="legend" id="legend"></div>
+    <div class="grid" id="grid"></div>
+  </section>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+let D, curTag = "", curScreen = "";
+
+fetch("data.json").then((r) => r.json()).then((d) => { D = d; init(); })
+  .catch(() => { $("#meta").textContent = "Không tải được data.json — mở trang qua máy chủ web hoặc trang đã đăng."; });
+
+function init() {
+  $("#meta").innerHTML = `<span>model ${esc(D.model)}</span><span>${D.n_cases} bài</span><span>${Object.keys(D.screens).length} màn hình</span><span>${D.modes.length} cách gửi</span>`;
+  renderSummary(); renderScreens(); renderFilters(); renderCases();
+}
+
+function frac(a) { return a && a[1] ? `${a[0]}/${a[1]}` : "–"; }
+function renderSummary() {
+  const best = Math.max(...D.summary.map((r) => r.ok));
+  const tags = Object.keys(D.tags);
+  let h = `<thead><tr><th>Cách gửi</th><th>Tổng</th>${tags.map((t) => `<th>${esc(D.tags[t])}</th>`).join("")}<th>Thời gian</th><th>OCR</th><th>Token</th></tr></thead><tbody>`;
+  let group = "";
+  for (const r of D.summary) {
+    if (r.group !== group) { group = r.group; h += `<tr class="group"><td colspan="${tags.length + 5}">${esc(group)}</td></tr>`; }
+    const pct = (100 * r.ok / r.n).toFixed(0);
+    h += `<tr class="${r.mode === "shot768" ? "current" : ""}"><td>${esc(r.label)}</td>
+      <td><span class="acc ${r.ok === best ? "cell-good" : ""}">${r.ok}/${r.n}<span class="bar"><i style="width:${pct}%"></i></span></span></td>
+      ${tags.map((t) => { const a = r.by_tag[t]; const p = a[1] ? a[0] / a[1] : 0; return `<td class="${p >= .85 ? "cell-good" : p < .5 ? "cell-bad" : ""}">${frac(a)}</td>`; }).join("")}
+      <td>${r.wall.toFixed(2)} s</td><td>${r.ocr ? r.ocr.toFixed(2) + " s" : "–"}</td><td>${r.tok}</td></tr>`;
+  }
+  $("#summary").innerHTML = h + "</tbody>";
+}
+
+function renderScreens() {
+  const ids = Object.keys(D.screens);
+  $("#screens").innerHTML = ids.map((s) => `<button type="button" id="scr-${s}" data-s="${s}" aria-pressed="false">${s}</button>`).join("");
+  $("#screens").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) showScreen(b.dataset.s); });
+  showScreen(ids[0]);
+}
+function showScreen(s) {
+  curScreen = s;
+  document.querySelectorAll("#screens button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.s === s)));
+  const sc = D.screens[s];
+  const v = (file, title, note) => `<div class="view"><img src="img/${s}_${file}.jpg" alt="${esc(title)} — ${s}" loading="lazy"><b>${title}</b><span>${note}</span></div>`;
+  $("#views").innerHTML =
+    v("real", "Ảnh thật", "Gửi kèm ở các cách “Ảnh”, “NT+Ảnh”, “OCR+Ảnh”.") +
+    v("wireframe", "Wireframe", "Khung + số, không chữ, không hình. Cách “WF”, “NT+WF”.") +
+    v("som", "Ảnh thật vẽ khung & số", "Số trùng index trong list. Cách “NT+Số”.") +
+    v("ocr_icons", "Không cây UI: OCR + dò icon", "Chỉ những gì OCR/OpenCV tìm được. Cách “OCR+Icon+Số”.");
+  $("#lists").innerHTML =
+    `<div><b>List gọn (Flash hiện tại) — ${sc.n_elements} phần tử, ${sc.n_unlabeled} không nhãn</b><pre>${esc(sc.list_compact)}</pre></div>` +
+    `<div><b>Nhãn + tâm</b><pre>${esc(sc.list_center)}</pre></div>`;
+}
+
+function renderFilters() {
+  const tags = [["", "Tất cả"], ...Object.entries(D.tags)];
+  $("#tagfilter").innerHTML = tags.map(([t, l]) => `<button type="button" class="chip-btn" data-t="${t}" aria-pressed="${t === curTag}">${esc(l)}</button>`).join("");
+  $("#tagfilter").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; curTag = b.dataset.t;
+    document.querySelectorAll("#tagfilter button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.t === curTag))); renderCases(); });
+  $("#failmode").innerHTML += D.modes.map((m) => `<option value="${m.mode}">${esc(m.label)}</option>`).join("");
+  $("#failmode").addEventListener("change", renderCases);
+  $("#q").addEventListener("input", renderCases);
+  $("#legend").innerHTML = D.modes.map((m) => `<span><code>${esc(m.short)}</code> = ${esc(m.label)}</span>`).join("");
+}
+
+function renderCases() {
+  const fm = $("#failmode").value, q = $("#q").value.trim().toLowerCase();
+  const list = D.cases.filter((c) => (!curTag || c.tags.includes(curTag)) && (!fm || (c.results[fm] && !c.results[fm].ok))
+    && (!q || (c.id + " " + c.instruction).toLowerCase().includes(q)));
+  $("#count").textContent = `${list.length} bài`;
+  $("#grid").innerHTML = list.map((c) => {
+    const boxes = c.boxes.map((b) => `<span class="box" style="left:${(b[0] * 100).toFixed(2)}%;top:${(b[1] * 100).toFixed(2)}%;width:${((b[2] - b[0]) * 100).toFixed(2)}%;height:${((b[3] - b[1]) * 100).toFixed(2)}%"></span>`).join("");
+    const chips = D.modes.map((m) => { const r = c.results[m.mode]; if (!r) return `<span class="chip na">${esc(m.short)}</span>`;
+      const tip = `${m.label}: ${r.ok ? "đúng" : "sai"} — chọn [${r.idx ?? "?"}] "${r.picked || "(không nhãn)"}"`;
+      return `<span class="chip ${r.ok ? "ok" : "bad"}" title="${esc(tip)}">${r.ok ? "✓" : "✗"} ${esc(m.short)}</span>`; }).join("");
+    return `<article class="panel card"><div class="shot"><img src="img/${c.screen}_real.jpg" alt="Màn hình ${c.screen}" loading="lazy">${boxes}</div>
+      <div class="body"><div class="head"><code>${c.id}</code>${c.tags.map((t) => `<span class="tag">${esc(D.tags[t] || t)}</span>`).join("")}</div>
+      <div class="instr">${esc(c.instruction)}</div><div class="ans">Đáp án: ${esc(c.answer)} · màn hình <code>${c.screen}</code></div>
+      <div class="chips">${chips}</div>
+      <button type="button" class="linkish" data-s="${c.screen}">Xem ảnh &amp; list model nhận được →</button></div></article>`;
+  }).join("");
+}
+document.addEventListener("click", (e) => { const b = e.target.closest(".linkish"); if (!b) return; showScreen(b.dataset.s);
+  document.getElementById("viewer").scrollIntoView({ behavior: "smooth", block: "start" }); });
+</script>
