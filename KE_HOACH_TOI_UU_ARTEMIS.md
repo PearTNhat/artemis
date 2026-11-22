@@ -386,6 +386,25 @@ Phần cố định mỗi lượt: system prompt Flash ~18 100 ký tự + 16 too
 - Tóm tắt bước chạy nền cũng gọi Gemini → cạnh tranh quota free với AI chính (khi API quá tải có lúc trễ 5–8 bước).
 - Model local `qwen2.5vl:3b` (Ollama, RTX 3050 6GB): Ban đầu 0/3 màn chọn đúng do Ollama thiếu template tool calling và `context_length` mặc định 4k/8k < prompt 10k cắt mất danh sách UI. Sau khi cấu hình Modelfile với `num_ctx: 16384` + template Tool Calling (`<tools>`/`<tool_call>`) và luật index số nguyên (2026-11-20): đạt **5/5 màn chọn đúng (100% PASS)** trên trace Grab thật (`manage_app`, `click(target=3)`, `input_text(target=1, text="phở bò")`, `click(target=2)`, `click(target=7)`), thời gian trung bình **1.86 s/lượt** (100% GPU, ~4.5 GB VRAM, 49°C), hoàn toàn đủ điều kiện làm AI chính chạy offline.
 
+### 1.14. Gửi gì để chọn đúng phần tử nhanh nhất? — ảnh vs phác thảo vs 2 tầng vs list chữ (2026-11-21/22)
+Bộ test tự chứa `benchmarks/payload_grounding/` (18 lần bấm thật từ trace: Clock, Shopee, Grab, YouTube, Play Store; đã che địa chỉ/thông báo). Mỗi bài: ảnh + cây UI + ý định của agent (bỏ index/toạ độ) → model trả `{"index": N}`; chấm theo nhãn, tính cả radio/checkbox không nhãn cùng hàng. List lấy từ `format_minimal_list_with_elements` (đúng hàm Flash).
+
+| Cách gửi | Qwen3-VL 4B local (Ollama, 17 bài\*) đúng / thời gian / token | Gemini 3.5 Flash-Lite (18 bài) đúng / token |
+|---|---|---|
+| Ảnh 768 + list gọn (**Flash hiện tại**) | 15/17 · 1.80 s · 1943 | 16/18 · 1925 |
+| Ảnh phác thảo (wireframe đánh số) + list | 13/17 · 1.81 s · 1943 | 15/18 · 1925 |
+| 2 tầng: mô tả ảnh → quyết định bằng chữ | 14/17 · 3.04 s · 2050 | 17/18 · 2095 |
+| List đầy đủ, không ảnh | 14/17 · 0.83 s · 1384 | 17/18 · 1408 |
+| List gọn, không ảnh | 13/17 · 0.72 s · 884 | 16/18 · 847 |
+| **Nhãn + tâm** `[9] "Add alarm" @281,340` | **15/17 · 0.53 s · 605** | 16/18 · 580 |
+| Chỉ nhãn `[9] "Add alarm"` | 15/17 · 0.36 s · 378 | 17/18 · 377 |
+
+\* Qwen local chấm theo cách cũ (chỉ khớp nhãn), file kết quả bị mất khi dọn thư mục tạm — chạy lại bằng `bench.py --backend ollama` để có số theo cách chấm mới. Thời gian Gemini (free tier) dao động 1–10 s theo hàng chờ/mạng, không dùng để so tốc độ.
+
+- **Ollama tính mọi ảnh ~1058 token** bất kể 59×128 hay 591×1280, nén q20, trắng đen, làm mờ (Ollama tự đưa về kích thước cố định) → trên Ollama nén/thu nhỏ/phác thảo ảnh **không giảm token, không nhanh hơn**; chỉ bỏ ảnh mới giảm. (llama.cpp công ty tính theo pixel — §1.10.)
+- Bỏ ảnh, gửi "nhãn + tâm": nhanh hơn ~3.4×, giảm ~69% token vào, đúng ngang ảnh trên cả 2 model. Phác thảo tốn như ảnh mà kém nhất; 2 tầng chậm nhất.
+- Giới hạn: chỉ có bài nhắm phần tử **có nhãn**; ý định do agent đã thấy ảnh viết ra → chưa đo icon không nhãn, màu/hình, và việc tự lập bước tiếp theo khi không có ảnh. Hướng đề xuất: mặc định list "nhãn + tâm", gửi ảnh khi cần (nhiều phần tử không nhãn, lệnh về hình/màu, thao tác trước không tác dụng) — cần chạy task thật trước khi đưa vào Flash.
+
 ## 2. TRẠNG THÁI TRIỂN KHAI (đến bản 3)
 
 | Hạng mục | Trạng thái | Ghi chú |
