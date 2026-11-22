@@ -59,7 +59,7 @@ tr.current td:first-child::after { content: "Flash hiện tại"; margin-left: 8
   background: var(--surface); color: var(--ink); cursor: pointer; }
 .screens button[aria-pressed="true"], .chip-btn[aria-pressed="true"] { background: var(--accent); color: var(--surface); border-color: var(--accent); }
 button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.views { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 14px; }
+.views { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; padding: 14px; }
 .view { display: grid; gap: 6px; align-content: start; min-width: 0; }
 .view img { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
 .view b { font-size: .85rem; }
@@ -122,7 +122,8 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
         <li><b>Tốt nhất: list gọn + ảnh thật chỉ đánh số các phần tử không nhãn</b> (51/52, bài khó 33/34). Vẽ số lên mọi phần tử thì che chữ nên tụt ở bài có chữ; chỉ đánh số chỗ không có chữ thì giữ được cả hai.</li>
         <li><b>Ảnh thật + list gọn</b> (cách Flash đang làm) 49/52. <b>Nhãn + tâm có giữ loại/trạng thái + ảnh</b> 48/52 nhưng ít token hơn ~200 và nhanh hơn ~0.45 s.</li>
         <li><b>Wireframe có chữ</b> 44/52; thêm gợi ý “gần chữ nào” cho phần tử không nhãn (vd. công tắc gần “Sun, Sat”, nút + gần “PHỞ TÁI NẠM”) lên <b>46/52</b> — dùng khi không được gửi ảnh thật. Nhưng tốn token như ảnh thật, và nhiều app (vd. Grab) không khai ảnh trong cây UI nên không biết chỗ nào là ảnh.</li>
-        <li><b>OCR</b>: 35% dòng là chữ trong ảnh/banner/status bar. Lọc bằng độ tin cậy lại tệ hơn (17/52 so với 24/52) vì bỏ mất chữ tiếng Việt; vấn đề chính của OCR là thiếu icon và thiếu loại phần tử, không phải nhiễu.</li>
+        <li><b>OCR thiếu dữ kiện</b>: chỉ OCR thì 21/52 bài phần tử đúng không hề có trong list (icon, công tắc, nút "+"). Dò icon v2 + gợi ý gần chữ + ảnh chỉ đánh số icon nâng lên <b>35/52</b> (có đáp án 46/52) nhưng tổng ~3.5 s/lần. Không kèm ảnh thì nhiều icon thừa làm AI rối (19/52).</li>
+        <li><b>OCR nhiễu</b>: 35% dòng là chữ trong ảnh/banner/status bar. Lọc bằng độ tin cậy lại tệ hơn (17/52 so với 24/52) vì bỏ mất chữ tiếng Việt; vấn đề chính của OCR là thiếu icon và thiếu loại phần tử, không phải nhiễu.</li>
         <li><b>Wireframe rỗng (40/52) đã xoá:</b> vốn đã trắng đen nhưng vẫn tốn token như ảnh thật (Ollama tính theo kích thước cố định), lại không có hình icon, chỉ lặp lại toạ độ đã có trong list. Vẽ khung &amp; số lên ảnh thật chỉ tốn thêm ~10 ms.</li>
         <li><b>Không có cây UI</b> (kiểu desktop): OCR + dò icon OpenCV còn kém xa; desktop nên đọc cây accessibility của hệ điều hành (Windows UIA, macOS AX).</li>
       </ul>
@@ -131,7 +132,7 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
 
   <section>
     <h2>Kết quả theo cách gửi</h2>
-    <p class="muted">Đúng / tổng số bài. Thời gian là trung vị 1 lần gọi (gồm ~0.5 s mạng tới Colab); OCR chạy trên CPU máy chạy test. Token = token vào.</p>
+    <p class="muted">Đúng / tổng số bài. <b>Có đáp án</b> = số bài mà phần tử đúng có mặt trong list gửi đi (nếu không có thì AI không thể chọn đúng). Thời gian tính cho <b>1 lần chọn</b>: <b>Model</b> = trung vị thời gian gọi model (gồm ~0.5 s mạng tới Colab), <b>OCR</b> = OCR + dò icon trên CPU máy chạy test, <b>Tổng</b> = model + OCR (trung vị và trung bình trên 52 bài). Trung vị = giá trị ở giữa khi xếp 52 lần đo, ít bị ảnh hưởng bởi vài lần chậm bất thường. Token = token vào.</p>
     <div class="panel tablebox"><table id="summary"></table></div>
   </section>
 
@@ -177,15 +178,16 @@ function frac(a) { return a && a[1] ? `${a[0]}/${a[1]}` : "–"; }
 function renderSummary() {
   const best = Math.max(...D.summary.map((r) => r.ok));
   const tags = Object.keys(D.tags);
-  let h = `<thead><tr><th>Cách gửi</th><th>Tổng</th>${tags.map((t) => `<th>${esc(D.tags[t])}</th>`).join("")}<th>Thời gian</th><th>OCR</th><th>Token</th></tr></thead><tbody>`;
+  let h = `<thead><tr><th>Cách gửi</th><th>Đúng</th>${tags.map((t) => `<th>${esc(D.tags[t])}</th>`).join("")}<th>Có đáp án</th><th>Model</th><th>OCR</th><th>Tổng (trung vị)</th><th>Tổng (trung bình)</th><th>Token</th></tr></thead><tbody>`;
   let group = "";
   for (const r of D.summary) {
-    if (r.group !== group) { group = r.group; h += `<tr class="group"><td colspan="${tags.length + 5}">${esc(group)}</td></tr>`; }
+    if (r.group !== group) { group = r.group; h += `<tr class="group"><td colspan="${tags.length + 8}">${esc(group)}</td></tr>`; }
     const pct = (100 * r.ok / r.n).toFixed(0);
     h += `<tr class="${r.mode === "shot768" ? "current" : ""}"><td>${esc(r.label)}</td>
       <td><span class="acc ${r.ok === best ? "cell-good" : ""}">${r.ok}/${r.n}<span class="bar"><i style="width:${pct}%"></i></span></span></td>
       ${tags.map((t) => { const a = r.by_tag[t]; const p = a[1] ? a[0] / a[1] : 0; return `<td class="${p >= .85 ? "cell-good" : p < .5 ? "cell-bad" : ""}">${frac(a)}</td>`; }).join("")}
-      <td>${r.wall.toFixed(2)} s</td><td>${r.ocr ? r.ocr.toFixed(2) + " s" : "–"}</td><td>${r.tok}</td></tr>`;
+      <td class="${r.cov < r.n ? "cell-bad" : ""}">${r.cov}/${r.n}</td>
+      <td>${r.wall.toFixed(2)} s</td><td>${r.ocr ? r.ocr.toFixed(2) + " s" : "–"}</td><td><b>${r.total.toFixed(2)} s</b></td><td>${r.total_mean.toFixed(2)} s</td><td>${r.tok}</td></tr>`;
   }
   $("#summary").innerHTML = h + "</tbody>";
 }
@@ -203,9 +205,10 @@ function showScreen(s) {
   const v = (file, title, note) => `<div class="view"><img src="img/${s}_${file}.jpg" alt="${esc(title)} — ${s}" loading="lazy"><b>${title}</b><span>${note}</span></div>`;
   $("#views").innerHTML =
     v("real", "Ảnh thật", "Gửi kèm ở các cách “Ảnh”, “NT+Ảnh”, “OCR+Ảnh”.") +
-    v("wiretext", "Wireframe có chữ", "Trắng đen, mỗi khung ghi chữ hoặc loại/trạng thái; ảnh ghi [image] nếu cây UI có khai. 44/52.") +
+    v("wiretext", "Wireframe v2 có chữ", "Trắng đen, chữ vừa khung, loại/trạng thái cho phần tử không nhãn; vùng ảnh tìm trên ảnh chụp ghi [image].") +
+    v("crops", "Chỉ ảnh cắt phần tử không nhãn", "Không gửi cả màn hình, chỉ các ô nhỏ có số. Cách “Gọn+Cắt”.") +
     v("somU", "Ảnh thật, chỉ đánh số phần tử không nhãn", "Không che chữ. Cách “Gọn+SốKN” — đúng nhiều nhất.") +
-    v("ocr_icons", "Không cây UI: OCR + dò icon", "Chỉ những gì OCR/OpenCV tìm được. Cách “OCR+Icon+Số”.");
+    v("ocr_icons", "Không cây UI: OCR + dò icon v2", "Chỉ đánh số các icon OpenCV tìm được; chữ lấy từ OCR. Cách “OCR+Icon2+Số”.");
   $("#lists").innerHTML =
     `<div><b>List gọn (Flash hiện tại) — ${sc.n_elements} phần tử, ${sc.n_unlabeled} không nhãn</b><pre>${esc(sc.list_compact)}</pre></div>` +
     `<div><b>Nhãn + tâm (giữ loại) + gợi ý “gần chữ nào”</b><pre>${esc(sc.list_center)}</pre></div>`;
@@ -219,7 +222,7 @@ function renderFilters() {
   $("#failmode").innerHTML += D.modes.map((m) => `<option value="${m.mode}">${esc(m.label)}</option>`).join("");
   $("#showmode").innerHTML = D.modes.map((m) => `<option value="${m.mode}">${esc(m.label)}</option>`).join("");
   $("#showmode").addEventListener("change", renderCases);
-  $("#failmode").addEventListener("change", renderCases);
+  $("#failmode").addEventListener("change", () => { if ($("#failmode").value) $("#showmode").value = $("#failmode").value; renderCases(); });
   $("#q").addEventListener("input", renderCases);
   $("#legend").innerHTML = D.modes.map((m) => `<span><code>${esc(m.short)}</code> = ${esc(m.label)}</span>`).join("");
 }

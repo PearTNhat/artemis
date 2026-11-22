@@ -18,9 +18,11 @@ MODE_INFO = [  # (mode, short chip, label, group)
     ("compact_somU", "Gọn+SốKN", "List gọn + ảnh thật chỉ đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
     ("shot768", "Ảnh", "Ảnh thật + list gọn (Flash hiện tại)", "Có cây UI, có ảnh"),
     ("center2_shot", "NT2+Ảnh", "Nhãn + tâm (giữ loại/trạng thái) + ảnh thật", "Có cây UI, có ảnh"),
+    ("compact_crops", "Gọn+Cắt", "List gọn + chỉ gửi ảnh cắt nhỏ các phần tử không nhãn", "Có cây UI, có ảnh"),
     ("center2_somU", "NT2+SốKN", "Nhãn + tâm (giữ loại) + ảnh chỉ đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
     ("center_som", "NT+Số", "Nhãn + tâm (bản cũ, mất loại) + ảnh vẽ khung & số mọi phần tử", "Có cây UI, có ảnh"),
     ("center_shot", "NT+Ảnh", "Nhãn + tâm (bản cũ, mất loại) + ảnh thật", "Có cây UI, có ảnh"),
+    ("wire2_near", "WF2", "Wireframe v2 (chữ vừa khung, vùng ảnh [image]) + list gọn có gợi ý gần chữ", "Có cây UI, ảnh vẽ lại (không pixel thật)"),
     ("wire_near", "WF chữ+gần", "Wireframe trắng đen có chữ + list gọn có gợi ý “gần chữ nào”", "Có cây UI, ảnh vẽ lại (không pixel thật)"),
     ("wire_text", "WF chữ", "Wireframe trắng đen có chữ + list gọn", "Có cây UI, ảnh vẽ lại (không pixel thật)"),
     ("somU_near", "Gọn+SốKN+gần", "List gọn có gợi ý “gần chữ nào” + ảnh đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
@@ -36,7 +38,11 @@ MODE_INFO = [  # (mode, short chip, label, group)
     ("ocr_clean", "OCR lọc", "OCR đã lọc nhiễu (bỏ status bar, độ tin cậy thấp, 1 ký tự)", "Không cây UI (kiểu desktop)"),
     ("ocr_shot", "OCR+Ảnh", "OCR + ảnh thật", "Không cây UI (kiểu desktop)"),
     ("ocr_icons", "OCR+Icon", "OCR + dò icon OpenCV", "Không cây UI (kiểu desktop)"),
-    ("ocr_icons_som", "OCR+Icon+Số", "OCR + dò icon + ảnh vẽ khung & số", "Không cây UI (kiểu desktop)"),
+    ("ocr_icons_som", "OCR+Icon+Số", "OCR + dò icon v1 + ảnh vẽ khung & số", "Không cây UI (kiểu desktop)"),
+    ("ocr2_somU", "OCR+Icon2+Số", "OCR + dò icon v2 + gợi ý gần chữ + ảnh chỉ đánh số icon", "Không cây UI (kiểu desktop)"),
+    ("ocr2_near", "OCR+Icon2", "OCR + dò icon v2 + gợi ý gần chữ, không ảnh", "Không cây UI (kiểu desktop)"),
+    ("ocr2_shot", "OCR+Icon2+Ảnh", "OCR + dò icon v2 + gợi ý gần chữ + ảnh thật (không vẽ)", "Không cây UI (kiểu desktop)"),
+    ("ocr2_crops", "OCR+Icon2+Cắt", "OCR + dò icon v2 + chỉ gửi ảnh cắt nhỏ các icon", "Không cây UI (kiểu desktop)"),
 ]
 TAG_INFO = {
     "orig": "Bài gốc (đích có chữ)", "hard": "Bài khó viết tay", "icon": "Icon", "unlabeled": "Không nhãn",
@@ -66,6 +72,12 @@ def answer_boxes(case):
     return [e["bounds"] for e in t]
 
 
+def covered(mode, case):
+    """Is a correct answer present at all in what this mode sends?"""
+    els = B.listing(mode, case)[1]
+    return any(B.evaluate('{"index": %d}' % e["index"], mode, case, els)[0] for e in els)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", nargs="+", required=True)
@@ -91,7 +103,9 @@ def main():
         pb = [pe["bounds"][0] / c["w"], pe["bounds"][1] / c["h"], pe["bounds"][2] / c["w"], pe["bounds"][3] / c["h"]] if pe else None
         res[(r["step"], r["mode"])] = dict(ok=ok, idx=idx, picked=lab, pb=pb, wall=r["wall"],
                                            tok=r["in_tok"] + r.get("s1_in", 0), ocr=r.get("ocr_ms", 0) / 1000)
-    keep = None if args.all_modes else set(B.CORE_MODES) | {"wire_text", "center2", "somU_near", "ocr_clean"}
+    keep = None if args.all_modes else set(B.CORE_MODES) | {"wire_text", "center2", "somU_near", "ocr_clean",
+                                                            "ocr_icons_som", "ocr2_near", "ocr2_shot", "ocr2_crops",
+                                                            "compact_crops", "wire2_near", "wire_near"}
     modes = [m for m in MODE_INFO if (keep is None or m[0] in keep) and any((c["id"], m[0]) in res for c in cases)]
 
     # images per screen
@@ -102,11 +116,13 @@ def main():
         s = c["screen"]
         thumb(c["img"], os.path.join(out, "img", f"{s}_real.jpg"))
         _, els_c = B.listing("list_compact", c)
-        save_b64(B.wire_text_image(c, 768), os.path.join(out, "img", f"{s}_wiretext.jpg"))
+        save_b64(B.wire_text_image_v2(c, 768), os.path.join(out, "img", f"{s}_wiretext.jpg"))
+        save_b64(B.crop_sheet(c["img"], [e for e in els_c if not e.get("text")]), os.path.join(out, "img", f"{s}_crops.jpg"))
         save_b64(B.som_image(c["img"], [e for e in els_c if not e.get("text")], 540),
                  os.path.join(out, "img", f"{s}_somU.jpg"))
-        _, els_o = B.listing("ocr_icons_som", c)
-        save_b64(B.som_image(c["img"], els_o, 540), os.path.join(out, "img", f"{s}_ocr_icons.jpg"))
+        _, els_o = B.listing("ocr2_somU", c)
+        save_b64(B.som_image(c["img"], [e for e in els_o if not e.get("text")], 540),
+                 os.path.join(out, "img", f"{s}_ocr_icons.jpg"))
         screens[s] = dict(id=s, w=c["w"], h=c["h"],
                           list_compact=B.listing("list_compact", c)[0],
                           list_center=B.listing("center2_near", c)[0],
@@ -118,9 +134,12 @@ def main():
     tags = ["orig", "hard", "icon", "unlabeled", "spatial", "relation"]
     for m, short, label, group in modes:
         X = [res[(c["id"], m)] for c in cases if (c["id"], m) in res]
-        row = dict(mode=m, short=short, label=label, group=group, n=len(X), ok=sum(x["ok"] for x in X),
+        cov = sum(1 for c in cases if (c["id"], m) in res and covered(m, c))
+        row = dict(mode=m, short=short, label=label, group=group, n=len(X), ok=sum(x["ok"] for x in X), cov=cov,
                    wall=round(statistics.median(x["wall"] for x in X), 2),
                    ocr=round(statistics.median(x["ocr"] for x in X), 2),
+                   total=round(statistics.median(x["wall"] + x["ocr"] for x in X), 2),
+                   total_mean=round(statistics.mean(x["wall"] + x["ocr"] for x in X), 2),
                    tok=round(statistics.median(x["tok"] for x in X)), by_tag={})
         for t in tags:
             T = [res[(c["id"], m)] for c in cases if t in c["tags"] and (c["id"], m) in res]

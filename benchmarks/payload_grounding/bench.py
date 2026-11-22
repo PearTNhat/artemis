@@ -27,6 +27,13 @@ Modes (all answer {"index": N} over the Flash element list):
   center2_near  center2 + 'near "<closest label>"' after every unlabeled element, no image
   somU_near     compact list with the same near-label hints + unlabeled-only marked screenshot
   wire_near     text wireframe + compact list with near-label hints
+  ocr2_near     no tree: OCR text + icon detector v2 (nested icons, switches) + near-text hints, no image
+  ocr2_somU     ocr2_near list + screenshot with only the detected icons boxed and numbered
+  wire2_near    wireframe v2 (text sized to its box, no overlapping tags, duplicates skipped, picture
+                regions found on the screenshot drawn as [image]) + compact list with near hints
+  ocr2_shot     ocr2_near list + plain real screenshot
+  ocr2_crops    ocr2_near list + a sheet of small cut-outs of the detected icons (no full screenshot)
+  compact_crops Flash compact list + a sheet of cut-outs of the unlabeled elements (no full screenshot)
   ocr_clean     ocr_only after a generic noise filter (status bar band, score < 0.8, 1-char lines)
   wire_text     black/white wireframe WITH text: each box shows its label, or its role/state for
                 unlabeled elements ("(toggle) checked:false"), images drawn as "[image]"; + compact list
@@ -58,19 +65,20 @@ sys.path.insert(0, REPO)
 
 ALL_MODES = ["shot768", "2stage", "list_full", "list_compact", "list_center", "list_label",
              "center_som", "center_shot", "center2", "center2_shot", "compact_somU",
-             "center2_somU", "wire_text", "center2_near", "somU_near", "wire_near",
-             "ocr_only", "ocr_clean", "ocr_shot", "xml_ocr", "center_ocr",
+             "center2_somU", "wire_text", "center2_near", "somU_near", "wire_near", "wire2_near",
+             "compact_crops", "ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_shot", "xml_ocr", "center_ocr",
              "ocr_icons", "ocr_icons_som"]
 # Default set: the ones worth running. The others stay runnable with --modes (and their old
 # results stay in results/*.jsonl) but proved useless: wireframe, 2-stage, no-image lists,
 # OCR fusion, and the old label+center that dropped role/state hints.
-CORE_MODES = ["shot768", "compact_somU", "center2_shot", "wire_near", "center2_near", "ocr_only", "ocr_icons_som"]
-OCR_MODES = ("ocr_only", "ocr_clean", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
-NO_TREE_MODES = ("ocr_only", "ocr_clean", "ocr_shot", "ocr_icons", "ocr_icons_som")  # graded against the tree
+CORE_MODES = ["shot768", "compact_somU", "center2_shot", "wire_near", "center2_near", "ocr_only", "ocr2_somU"]
+OCR_MODES = ("ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
+NO_TREE_MODES = ("ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_shot", "ocr_icons", "ocr_icons_som")  # graded against the tree
 IMAGE_MODES = {"shot768": "shot", "ocr_shot": "shot",
                "center_som": "som", "ocr_icons_som": "som", "center_shot": "shot", "center2_shot": "shot",
                "compact_somU": "somU", "center2_somU": "somU", "wire_text": "wiretext", "somU_near": "somU",
-               "wire_near": "wiretext"}
+               "wire_near": "wiretext", "ocr2_somU": "somU", "ocr2_shot": "shot", "ocr2_crops": "crops",
+               "compact_crops": "crops", "wire2_near": "wire2"}
 DESCRIBE = ("Describe this Android screen in at most 60 words: app/screen name, main sections, "
             "and any icon-only buttons with their position and look.")
 norm = lambda t: " ".join((t or "").lower().split())
@@ -166,6 +174,53 @@ def detect_icons(case):
                    and min(b[3], k[3]) - max(b[1], k[1]) > 0.6 * (b[3] - b[1]) for k in kept):
             kept.append(b)
     kept = sorted(kept, key=lambda b: (b[1], b[0]))[:60]
+    out = dict(ms=round((time.perf_counter() - t) * 1000), boxes=kept)
+    json.dump(out, open(path, "w"))
+    return out
+
+
+def detect_icons_v2(case):
+    """Icon detector v2 (generic OpenCV): like detect_icons, but also keeps icons nested inside a
+    bigger graphic (a "+" drawn on a photo), allows wide shapes (switches), and only merges boxes
+    of similar size. Cached in data/<screen>/icons_v2.json with its time."""
+    path = os.path.join(case["dir"], "icons_v2.json")
+    if os.path.exists(path):
+        return json.load(open(path))
+    import cv2
+    import numpy as np
+    t = time.perf_counter()
+    img = cv2.imread(case["img"])
+    H, W = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    edges = cv2.dilate(cv2.Canny(gray, 40, 120), np.ones((3, 3), np.uint8), iterations=1)
+    contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    lo, hi = 0.025 * W, 0.16 * W
+    text_boxes = [e["bounds"] for e in ocr_elements(case)]
+    boxes = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if not (lo <= w <= hi and 0.6 * lo <= h <= hi and 0.4 <= w / h <= 2.5):
+            continue
+        cx, cy = x + w / 2, y + h / 2
+        if any(b[0] - 4 <= cx <= b[2] + 4 and b[1] - 4 <= cy <= b[3] + 4 for b in text_boxes):
+            continue
+        if y + h < 0.04 * H:  # status bar band
+            continue
+        boxes.append([x, y, x + w, y + h])
+    area = lambda b: (b[2] - b[0]) * (b[3] - b[1])
+    boxes.sort(key=area, reverse=True)
+    kept = []
+    for b in boxes:  # merge only near-duplicates (same place, similar size)
+        dup = False
+        for k in kept:
+            iw = min(b[2], k[2]) - max(b[0], k[0])
+            ih = min(b[3], k[3]) - max(b[1], k[1])
+            if iw > 0 and ih > 0 and iw * ih > 0.6 * area(b) and area(b) > 0.45 * area(k):
+                dup = True
+                break
+        if not dup:
+            kept.append(b)
+    kept = sorted(kept, key=lambda b: (b[1], b[0]))[:80]
     out = dict(ms=round((time.perf_counter() - t) * 1000), boxes=kept)
     json.dump(out, open(path, "w"))
     return out
@@ -307,6 +362,165 @@ def ocr_clean_lines(case):
     return keep
 
 
+def crop_sheet(path, els, max_side=768, cell_h=110, limit=48):
+    """Only small cut-outs of the given elements (each padded 15%, scaled to the same height),
+    tagged with their [index], packed into one sheet image. No full screenshot is sent."""
+    from PIL import Image, ImageDraw, ImageFont
+    im = Image.open(path).convert("RGB")
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
+    except OSError:
+        font = ImageFont.load_default()
+    tiles = []
+    for e in els[:limit]:
+        x1, y1, x2, y2 = e["bounds"]
+        px, py = int(0.15 * (x2 - x1)), int(0.15 * (y2 - y1))
+        c = im.crop((max(0, x1 - px), max(0, y1 - py), min(im.width, x2 + px), min(im.height, y2 + py)))
+        c = c.resize((max(1, int(c.width * cell_h / max(1, c.height))), cell_h))
+        if c.width > max_side // 2:
+            c = c.resize((max_side // 2, max(1, int(cell_h * (max_side // 2) / c.width))))
+        t = Image.new("RGB", (max(c.width, 40), c.height + 20), "white")
+        t.paste(c, (0, 20))
+        d = ImageDraw.Draw(t)
+        d.rectangle([0, 0, d.textlength(f"[{e['index']}]", font=font) + 6, 19], fill=(220, 30, 30))
+        d.text((3, 1), f"[{e['index']}]", fill="white", font=font)
+        tiles.append(t)
+    if not tiles:
+        tiles = [Image.new("RGB", (40, 40), "white")]
+    rows, row, x = [], [], 0
+    for t in tiles:  # simple row packing
+        if row and x + t.width + 6 > max_side:
+            rows.append(row)
+            row, x = [], 0
+        row.append(t)
+        x += t.width + 6
+    rows.append(row)
+    W = max(sum(t.width + 6 for t in r) for r in rows)
+    H = sum(max(t.height for t in r) + 6 for r in rows)
+    sheet = Image.new("RGB", (W, H), (235, 235, 235))
+    y = 0
+    for r in rows:
+        x = 0
+        for t in r:
+            sheet.paste(t, (x, y))
+            x += t.width + 6
+        y += max(t.height for t in r) + 6
+    return b64_jpeg(sheet, max_side, 85)
+
+
+def picture_regions(case, els):
+    """Generic picture finder on the screenshot (runs locally, only the drawing is sent):
+    32px blocks with high colour variation that hold no UI text, merged into rectangles."""
+    import numpy as np
+    from PIL import Image
+    path = os.path.join(case["dir"], "pictures.json")
+    if os.path.exists(path):
+        return json.load(open(path))
+    im = Image.open(case["img"]).convert("RGB")
+    W, H = im.size
+    B = 32
+    a = np.asarray(im.resize((W // B * B, H // B * B))).astype(np.float32)
+    gh, gw = a.shape[0] // B, a.shape[1] // B
+    blocks = a.reshape(gh, B, gw, B, 3)
+    std = blocks.std(axis=(1, 3)).mean(axis=-1)
+    sat = (blocks.max(axis=-1) - blocks.min(axis=-1)).mean(axis=(1, 3))
+    mask = (std > 30) & (sat > 25)
+    # only real text lines punch holes (not big labelled containers such as a video card)
+    text = [e["bounds"] for e in els if e.get("text") and (e["bounds"][3] - e["bounds"][1]) < 0.06 * H] + \
+           [e["bounds"] for e in ocr_elements(case)]
+    for x1, y1, x2, y2 in text:
+        mask[max(0, y1 // B):min(gh, (y2 + B - 1) // B), max(0, x1 // B):min(gw, (x2 + B - 1) // B)] = False
+    mask[: int(0.04 * H) // B + 1, :] = False  # status bar band
+    seen = np.zeros_like(mask)
+    rects = []
+    for i in range(gh):
+        for j in range(gw):
+            if not mask[i, j] or seen[i, j]:
+                continue
+            stack, cells = [(i, j)], []
+            seen[i, j] = True
+            while stack:
+                y, x = stack.pop()
+                cells.append((y, x))
+                for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < gh and 0 <= nx < gw and mask[ny, nx] and not seen[ny, nx]:
+                        seen[ny, nx] = True
+                        stack.append((ny, nx))
+            ys, xs = [c[0] for c in cells], [c[1] for c in cells]
+            r = [min(xs) * B, min(ys) * B, (max(xs) + 1) * B, (max(ys) + 1) * B]
+            if (r[2] - r[0]) >= 0.08 * W and (r[3] - r[1]) >= 0.04 * H and len(cells) >= 0.4 * ((r[2] - r[0]) // B) * ((r[3] - r[1]) // B):
+                rects.append(r)
+    json.dump(rects, open(path, "w"))
+    return rects
+
+
+def wire_text_image_v2(case, max_side=768):
+    """Wireframe v2: text sized to its box with an ellipsis, small index tags that do not cover the
+    text, nested duplicates (same label) skipped, and picture regions found on the screenshot drawn
+    as hatched "[image]" boxes."""
+    from PIL import Image, ImageDraw, ImageFont
+    text, els = listing("list_compact", case)
+    hint = {}
+    for line in text.splitlines():
+        m = re.match(r"\[(\d+)\]\s+(.*?)\s+-?\d+,-?\d+,-?\d+,-?\d+(.*)$", line)
+        if m:
+            hint[int(m[1])] = (m[2] + m[3]).strip().strip('"')
+    w, h = case["w"], case["h"]
+    sc = max_side / max(w, h)
+    im = Image.new("L", (int(w * sc), int(h * sc)), 255)
+    d = ImageDraw.Draw(im)
+    fp = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    fonts = {}
+
+    def font(sz):
+        if sz not in fonts:
+            try:
+                fonts[sz] = ImageFont.truetype(fp, sz)
+            except OSError:
+                fonts[sz] = ImageFont.load_default()
+        return fonts[sz]
+    tagf = font(9)
+    for r in picture_regions(case, els):
+        x1, y1, x2, y2 = (int(v * sc) for v in r)
+        d.rectangle([x1, y1, x2 - 1, y2 - 1], outline=140, fill=235)
+        for k in range(x1 - (y2 - y1), x2, 10):  # hatch
+            d.line([max(x1, k), y1 + max(0, x1 - k), min(x2 - 1, k + (y2 - y1)), y1 + min(y2 - y1, x2 - 1 - k)], fill=205)
+        d.text((x1 + 3, y1 + 2), "[image]", fill=90, font=font(10))
+    drawn = []
+    for e in sorted(els, key=lambda e: (e["bounds"][2] - e["bounds"][0]) * (e["bounds"][3] - e["bounds"][1])):
+        label = " ".join((e.get("text") or hint.get(e["index"], "")).split())
+        b = e["bounds"]
+        if label and any(label == l and b[0] <= c[0] and b[1] <= c[1] and b[2] >= c[2] and b[3] >= c[3] for l, c in drawn):
+            continue  # a parent repeating its child's label
+        drawn.append((label, b))
+        x1, y1, x2, y2 = (int(v * sc) for v in b)
+        x2, y2 = max(x1 + 3, x2 - 1), max(y1 + 3, y2 - 1)
+        d.rectangle([x1, y1, x2, y2], outline=0, width=1)
+        tag = str(e["index"])
+        tw = d.textlength(tag, font=tagf)
+        d.rectangle([x1, y1, x1 + tw + 2, y1 + 9], fill=0)
+        d.text((x1 + 1, y1 - 1), tag, fill=255, font=tagf)
+        if not label:
+            continue
+        bh = y2 - y1
+        sz = max(7, min(16, int(bh * 0.55)))
+        avail = x2 - x1 - 4 - (tw + 3 if bh < 2 * sz + 4 else 0)
+        if avail < 10:
+            continue
+        while sz > 7 and d.textlength(label, font=font(sz)) > avail:  # shrink before cutting
+            sz -= 1
+        f = font(sz)
+        if d.textlength(label, font=f) > avail:
+            while label and d.textlength(label + "…", font=f) > avail:
+                label = label[:-1]
+            label += "…"
+        tx = x1 + 2 + (tw + 3 if bh < 2 * sz + 4 else 0)
+        ty = y1 + max(0, (bh - sz) // 2) if bh < 2 * sz + 4 else y1 + 10
+        d.text((tx, ty), label, fill=0, font=f)
+    return b64_jpeg(im.convert("RGB"), max_side, 85)
+
+
 def compact_to_center(text):
     """Replace the first 'x1,y1,x2,y2' (0-1000 normalized) of each compact line by '@cx,cy'."""
     def one(line):
@@ -323,6 +537,11 @@ def listing(mode, s):
         text = "\n".join(f'[{e["index"]}] "{e["text"]}" @{e["center"][0] * 1000 // s["w"]},'
                          f'{e["center"][1] * 1000 // s["h"]}' for e in els)
         return text, els
+    if mode in ("ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops"):
+        els = ocr_elements(s)
+        for b in detect_icons_v2(s)["boxes"]:
+            els.append(dict(index=len(els) + 1, text="", bounds=b, center=[(b[0] + b[2]) // 2, (b[1] + b[3]) // 2]))
+        return add_near_hints(center_text(els, s["w"], s["h"]), els, s["h"]), els
     if mode in ("ocr_icons", "ocr_icons_som"):
         els = ocr_elements(s)
         for b in detect_icons(s)["boxes"]:
@@ -336,7 +555,7 @@ def listing(mode, s):
             text = center_text(els, s["w"], s["h"], icon_label='""')
         return text, els
     text, els, _ = format_minimal_list_with_elements(s["ui"], s["w"], s["h"], compact=mode != "list_full")
-    if mode in ("center2_near", "somU_near", "wire_near"):
+    if mode in ("center2_near", "somU_near", "wire_near", "wire2_near"):
         text = add_near_hints(text, els, s["h"])
     if mode in ("center2", "center2_shot", "center2_somU", "center2_near"):
         text = compact_to_center(text)
@@ -350,7 +569,7 @@ def listing(mode, s):
 
 def decide_prompt(text, instr, desc=None, ocr=False, mode=""):
     head = f"Screen description: {desc}\n\n" if desc else ""
-    if mode in ("ocr_icons", "ocr_icons_som"):
+    if mode in ("ocr_icons", "ocr_icons_som", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops"):
         what = ("Elements found on the screen by OCR and icon detection ([index] text @x,y center in 0-1000 "
                 "normalized coords; (icon) = a graphic without text)")
     elif ocr:
@@ -358,11 +577,16 @@ def decide_prompt(text, instr, desc=None, ocr=False, mode=""):
                 "icons without text are not listed)")
     else:
         what = "UI elements on the Android screen"
-    if mode in ("center_som", "ocr_icons_som"):
+    if mode in ("compact_crops", "ocr2_crops"):
+        what += (". The image is NOT the full screen: it is a sheet of small cut-outs of the elements that have "
+                 "no text label, each tagged with its [index]")
+    elif mode == "ocr2_somU":
+        what += ". The image shows the screen; each detected icon (graphic without text) has its box and [index] drawn in red"
+    elif mode in ("center_som", "ocr_icons_som"):
         what += ". The image shows the screen with each element's box and [index] drawn in red"
     elif mode in ("compact_somU", "center2_somU"):
         what += ". The image shows the screen; elements without a text label have their box and [index] drawn in red"
-    elif mode in ("wire_text", "wire_near"):
+    elif mode in ("wire_text", "wire_near", "wire2_near"):
         what += (". The image is a black/white wireframe of the screen: each element's box with its [index] "
                  "and label (pictures shown as [image])")
     return (f"{head}{what}:\n{text}\n\nYou are operating this phone. "
@@ -534,6 +758,8 @@ def run(args):
                         extra["ocr_ms"] = ocr_lines(s, mode in ("xml_ocr", "center_ocr"))["ms"]
                     if mode in ("ocr_icons", "ocr_icons_som"):
                         extra["ocr_ms"] += detect_icons(s)["ms"]
+                    if mode in ("ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops"):
+                        extra["ocr_ms"] += detect_icons_v2(s)["ms"]
                     if mode == "2stage":
                         d = call(args, DESCRIBE, b64_jpeg(shot, 768), 150)
                         time.sleep(pause)
@@ -545,7 +771,9 @@ def run(args):
                         img = (b64_jpeg(shot, 768) if kind == "shot"
                                else som_image(s["img"], els) if kind == "som"
                                else som_image(s["img"], [e for e in els if not e.get("text")]) if kind == "somU"
-                               else wire_text_image(s) if kind == "wiretext" else None)
+                               else wire_text_image(s) if kind == "wiretext"
+                               else crop_sheet(s["img"], [e for e in els if not e.get("text")]) if kind == "crops"
+                               else wire_text_image_v2(s) if kind == "wire2" else None)
                         r = call(args, decide_prompt(text, instr, ocr=mode in ("ocr_only", "ocr_shot", "ocr_clean"), mode=mode), img)
                     ok, idx, lab = evaluate(r["reply"], mode, s, els)
                     f.write(json.dumps(dict(step=s["id"], mode=mode, model=model_id, ok=ok, idx=idx, picked=lab,
