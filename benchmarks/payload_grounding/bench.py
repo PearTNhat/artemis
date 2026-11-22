@@ -56,6 +56,10 @@ ALL_MODES = ["shot768", "sketch", "2stage", "list_full", "list_compact", "list_c
              "center_sketch", "center_som", "center_shot", "center2", "center2_shot", "compact_somU",
              "center2_somU", "ocr_only", "ocr_shot", "xml_ocr", "center_ocr",
              "ocr_icons", "ocr_icons_som"]
+# Default set: the ones worth running. The others stay runnable with --modes (and their old
+# results stay in results/*.jsonl) but proved useless: wireframe, 2-stage, no-image lists,
+# OCR fusion, and the old label+center that dropped role/state hints.
+CORE_MODES = ["shot768", "compact_somU", "center2_shot", "center2", "ocr_only", "ocr_icons_som"]
 OCR_MODES = ("ocr_only", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
 NO_TREE_MODES = ("ocr_only", "ocr_shot", "ocr_icons", "ocr_icons_som")  # graded against the tree
 IMAGE_MODES = {"shot768": "shot", "ocr_shot": "shot", "sketch": "sketch", "center_sketch": "sketch",
@@ -453,6 +457,7 @@ def run(args):
 
 
 FAILURES = False
+SHOW_MODES = None
 
 
 def summary(paths):
@@ -472,7 +477,7 @@ def summary(paths):
     rows = [r for r in rows if r["step"] in cases]
     for model in sorted({r["model"] for r in rows}):
         R = [r for r in rows if r["model"] == model]
-        modes = [m for m in ALL_MODES if any(r["mode"] == m for r in R)]
+        modes = [m for m in (SHOW_MODES or ALL_MODES) if any(r["mode"] == m for r in R)]
         by = {}
         for r in R:
             by.setdefault(r["step"], {})[r["mode"]] = r
@@ -517,18 +522,23 @@ def main():
     ap.add_argument("--ollama-url", default="http://127.0.0.1:11434")
     ap.add_argument("--out")
     ap.add_argument("--steps", type=int, default=None, help="only the first N cases")
-    ap.add_argument("--modes", default=",".join(ALL_MODES))
+    ap.add_argument("--modes", default=",".join(CORE_MODES),
+                    help="comma list; default = CORE_MODES. 'all' = every mode (incl. retired ones)")
     ap.add_argument("--batch", type=int, default=5)
     ap.add_argument("--rest", type=int, default=40)
     ap.add_argument("--pause", type=float, default=None)
     ap.add_argument("--num-ctx", type=int, default=4096, help="Ollama context; raise if a WARNING says truncated")
     ap.add_argument("--summary", nargs="*")
     ap.add_argument("--failures", action="store_true", help="with --summary: print the per-case matrix")
+    ap.add_argument("--all", action="store_true", help="with --summary: include retired modes")
     args = ap.parse_args()
     if args.summary:
-        global FAILURES
+        global FAILURES, SHOW_MODES
         FAILURES = args.failures
+        SHOW_MODES = ALL_MODES if args.all else CORE_MODES
         return summary(args.summary)
+    if args.modes == "all":
+        args.modes = ",".join(ALL_MODES)
     args.model = args.model or ("qwen3-vl:4b-16k" if args.backend == "ollama" else "gemini-3.5-flash-lite")
     if args.backend == "gemini":
         args.rest = 0

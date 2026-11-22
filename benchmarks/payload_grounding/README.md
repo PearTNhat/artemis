@@ -42,6 +42,11 @@ Chấm điểm: model trả `{"index": N}` → lấy nhãn phần tử N → đ�
 
 ## Các cách gửi (`--modes`)
 
+**Mặc định chỉ chạy 6 cách đáng so sánh** (`CORE_MODES` trong `bench.py`): `shot768`, `compact_somU`,
+`center2_shot`, `center2`, `ocr_only`, `ocr_icons_som`. Các cách còn lại đã loại vì không có lợi
+(wireframe, 2 tầng, list không ảnh, gộp OCR, "nhãn + tâm" bản cũ mất loại phần tử…) nhưng vẫn chạy
+được bằng `--modes <tên>` hoặc `--modes all`; `--summary --all` / `gallery.py --all-modes` để xem lại.
+
 | Mode | Gửi gì |
 |---|---|
 | `shot768` | ảnh thật 768px + list gọn của Flash (**cách Flash đang làm**) |

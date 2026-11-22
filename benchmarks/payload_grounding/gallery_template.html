@@ -59,7 +59,7 @@ tr.current td:first-child::after { content: "Flash hiện tại"; margin-left: 8
   background: var(--surface); color: var(--ink); cursor: pointer; }
 .screens button[aria-pressed="true"], .chip-btn[aria-pressed="true"] { background: var(--accent); color: var(--surface); border-color: var(--accent); }
 button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.views { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; padding: 14px; }
+.views { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 14px; }
 .view { display: grid; gap: 6px; align-content: start; min-width: 0; }
 .view img { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
 .view b { font-size: .85rem; }
@@ -104,7 +104,7 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
   <header>
     <span class="eyebrow">ARTEMIS · benchmark chọn phần tử</span>
     <h1>Gửi gì cho model để bấm đúng và nhanh?</h1>
-    <p class="muted">Mỗi bài: một màn hình thật, một câu lệnh, một đáp án. Model trả về số thứ tự phần tử <code>{"index": N}</code>, code tự lấy toạ độ để bấm. So sánh 15 cách gửi: ảnh thật, wireframe, ảnh vẽ khung &amp; số, chỉ chữ, OCR, dò icon.</p>
+    <p class="muted">Mỗi bài: một màn hình thật, một câu lệnh, một đáp án. Model trả về số thứ tự phần tử <code>{"index": N}</code>, code tự lấy toạ độ để bấm. Trang này giữ 6 cách gửi đáng so sánh (đã thử 19; wireframe, 2 tầng, list không ảnh, gộp OCR… đã loại vì không có lợi).</p>
     <div class="meta" id="meta">Đang tải…</div>
   </header>
 
@@ -115,7 +115,7 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
         <li><b>Ảnh thật là bắt buộc.</b> Bỏ ảnh chỉ đúng khi đích có chữ; với icon, công tắc, nút "+" (không nhãn) thì gần như đoán mò.</li>
         <li><b>Tốt nhất: list gọn + ảnh thật chỉ đánh số các phần tử không nhãn</b> (49/52, bài khó 33/34). Vẽ số lên mọi phần tử thì che chữ nên tụt ở bài có chữ; chỉ đánh số chỗ không có chữ thì giữ được cả hai.</li>
         <li><b>Ảnh thật + list gọn</b> (cách Flash đang làm) 48/52. <b>Nhãn + tâm có giữ loại/trạng thái + ảnh</b> 47/52 nhưng ít token hơn ~200 và nhanh hơn ~0.45 s.</li>
-        <li><b>Wireframe không giúp:</b> tốn token như ảnh thật nhưng không có hình icon, chỉ lặp lại toạ độ đã có trong list.</li>
+        <li><b>Wireframe không giúp (40/52, đã loại):</b> vốn đã trắng đen nhưng vẫn tốn token như ảnh thật (Ollama tính theo kích thước cố định), lại không có hình icon, chỉ lặp lại toạ độ đã có trong list. Vẽ khung &amp; số lên ảnh thật chỉ tốn thêm ~10 ms.</li>
         <li><b>Không có cây UI</b> (kiểu desktop): OCR + dò icon OpenCV còn kém xa; desktop nên đọc cây accessibility của hệ điều hành (Windows UIA, macOS AX).</li>
       </ul>
     </div>
@@ -129,7 +129,7 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
 
   <section id="viewer">
     <h2>Model nhận được gì</h2>
-    <p class="muted">Chọn một màn hình để xem 5 loại ảnh và 2 dạng danh sách chữ đúng như gửi cho model.</p>
+    <p class="muted">Chọn một màn hình để xem các loại ảnh và 2 dạng danh sách chữ đúng như gửi cho model.</p>
     <div class="screens" id="screens" role="group" aria-label="Chọn màn hình"></div>
     <div class="panel">
       <div class="views" id="views"></div>
@@ -193,9 +193,8 @@ function showScreen(s) {
   const v = (file, title, note) => `<div class="view"><img src="img/${s}_${file}.jpg" alt="${esc(title)} — ${s}" loading="lazy"><b>${title}</b><span>${note}</span></div>`;
   $("#views").innerHTML =
     v("real", "Ảnh thật", "Gửi kèm ở các cách “Ảnh”, “NT+Ảnh”, “OCR+Ảnh”.") +
-    v("wireframe", "Wireframe", "Khung + số, không chữ, không hình. Cách “WF”, “NT+WF”.") +
+    v("wireframe", "Wireframe (đã loại)", "Trắng đen, khung + số, không chữ, không hình icon. Chỉ 40/52 — không hơn gửi chữ.") +
     v("somU", "Ảnh thật, chỉ đánh số phần tử không nhãn", "Không che chữ. Cách “Gọn+SốKN” — đúng nhiều nhất.") +
-    v("som", "Ảnh thật vẽ khung & số mọi phần tử", "Số trùng index trong list. Cách “NT+Số”.") +
     v("ocr_icons", "Không cây UI: OCR + dò icon", "Chỉ những gì OCR/OpenCV tìm được. Cách “OCR+Icon+Số”.");
   $("#lists").innerHTML =
     `<div><b>List gọn (Flash hiện tại) — ${sc.n_elements} phần tử, ${sc.n_unlabeled} không nhãn</b><pre>${esc(sc.list_compact)}</pre></div>` +

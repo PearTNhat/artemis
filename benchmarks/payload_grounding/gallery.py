@@ -67,6 +67,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", nargs="+", required=True)
     ap.add_argument("--out", default=os.path.join(HERE, "gallery"))
+    ap.add_argument("--all-modes", action="store_true", help="also show retired modes")
     args = ap.parse_args()
     out = args.out
     shutil.rmtree(out, ignore_errors=True)
@@ -84,7 +85,8 @@ def main():
         ok, idx, lab = B.evaluate(r["reply"], r["mode"], c)
         res[(r["step"], r["mode"])] = dict(ok=ok, idx=idx, picked=lab, wall=r["wall"],
                                            tok=r["in_tok"] + r.get("s1_in", 0), ocr=r.get("ocr_ms", 0) / 1000)
-    modes = [m for m in MODE_INFO if any((c["id"], m[0]) in res for c in cases)]
+    keep = None if args.all_modes else set(B.CORE_MODES)
+    modes = [m for m in MODE_INFO if (keep is None or m[0] in keep) and any((c["id"], m[0]) in res for c in cases)]
 
     # images per screen
     screens = {}
@@ -95,8 +97,6 @@ def main():
         thumb(c["img"], os.path.join(out, "img", f"{s}_real.jpg"))
         _, els_c = B.listing("list_compact", c)
         save_b64(B.sketch(els_c, c["w"], c["h"], 360), os.path.join(out, "img", f"{s}_wireframe.jpg"))
-        _, els_n = B.listing("center_som", c)
-        save_b64(B.som_image(c["img"], els_n, 540), os.path.join(out, "img", f"{s}_som.jpg"))
         save_b64(B.som_image(c["img"], [e for e in els_c if not e.get("text")], 540),
                  os.path.join(out, "img", f"{s}_somU.jpg"))
         _, els_o = B.listing("ocr_icons_som", c)
