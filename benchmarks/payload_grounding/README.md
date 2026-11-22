@@ -44,6 +44,14 @@ Chấm điểm: model trả `{"index": N}` → lấy nhãn phần tử N → đ�
 | `list_compact` | list gọn (`[9] "Add alarm" 206,305,356,375`), không ảnh |
 | `list_center` | nhãn + tâm (`[9] "Add alarm" @281,340`), không ảnh |
 | `list_label` | chỉ nhãn (`[9] "Add alarm"`), không ảnh |
+| `ocr_only` | **không có cây UI** (giả lập desktop): chỉ các dòng OCR `[i] "chữ" @cx,cy`, không ảnh |
+| `ocr_shot` | như `ocr_only` + ảnh thật 768 |
+| `xml_ocr` | list gọn sau khi gộp OCR vào cây UI (như Flash `ocr.mode="always"`), không ảnh |
+
+OCR dùng đúng OCR của Flash (`artemis/utils/local_ocr.py`: RapidOCR + PP-OCRv5 Latin, chạy CPU trên
+máy chạy benchmark), chạy 1 lần mỗi bài và cache ở `data/case_XX/ocr_full.json` / `ocr_xml.json`
+kèm thời gian (`ms`). Bài OCR-only được chấm theo vị trí: tâm box OCR phải nằm trong phần tử đúng
+của cây UI. Model nhận dạng Latin làm **mất dấu tiếng Việt** ("Phở Bò Thuần Việt" → "Ph B Thun Vit").
 
 List lấy từ `artemis/utils/visualization.py::format_minimal_list_with_elements` — đúng
 hàm Flash dùng, nên đổi định dạng list trong Flash thì benchmark đo theo luôn.
@@ -57,16 +65,19 @@ uv run python benchmarks/payload_grounding/bench.py --backend ollama \
     --model qwen3-vl:4b-16k --modes shot768,list_center \
     --out benchmarks/payload_grounding/results/qwen3-vl-4b.jsonl
 
-# Ollama khác (vd. Colab qua tunnel cổng 11435)
+# Ollama khác (vd. Colab T4 qua tunnel cổng 11435) — không có RAM guard/nghỉ vì model không chạy trên laptop
 uv run python benchmarks/payload_grounding/bench.py --backend ollama \
-    --ollama-url http://127.0.0.1:11435 --model qwen-16k --out benchmarks/payload_grounding/results/colab.jsonl
+    --ollama-url http://127.0.0.1:11435 --model qwen3-vl:4b-16k --num-ctx 8192 --pause 0.3 \
+    --out benchmarks/payload_grounding/results/qwen3-vl-4b-colab-t4.jsonl
 
 # Gemini API (key trong .env: GEMINI_API_KEY) — 18 bài × 7 mode ≈ 144 request
 set -a; . ./.env; set +a
 uv run python benchmarks/payload_grounding/bench.py --backend gemini --model gemini-3.5-flash-lite \
     --out benchmarks/payload_grounding/results/gemini-3.5-flash-lite.jsonl
 
-# Bảng tổng hợp (mỗi model một bảng, chỉ tính các bài có đủ mọi mode)
+# Bảng tổng hợp (mỗi model một bảng, chỉ tính các bài có đủ mọi mode).
+# Cột: wall = thời gian 1 lần gọi phía client (gồm mạng), prefill/gen = phía server Ollama,
+# ocr = thời gian OCR cục bộ, total = wall + ocr. Lần gọi đầu có nạp model (load) nên chạy lại riêng nếu cần.
 uv run python benchmarks/payload_grounding/bench.py --summary benchmarks/payload_grounding/results/*.jsonl
 ```
 

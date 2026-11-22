@@ -403,6 +403,25 @@ Bộ test tự chứa `benchmarks/payload_grounding/` (18 lần bấm thật t�
 
 - **Ollama tính mọi ảnh ~1058 token** bất kể 59×128 hay 591×1280, nén q20, trắng đen, làm mờ (Ollama tự đưa về kích thước cố định) → trên Ollama nén/thu nhỏ/phác thảo ảnh **không giảm token, không nhanh hơn**; chỉ bỏ ảnh mới giảm. (llama.cpp công ty tính theo pixel — §1.10.)
 - Bỏ ảnh, gửi "nhãn + tâm": nhanh hơn ~3.4×, giảm ~69% token vào, đúng ngang ảnh trên cả 2 model. Phác thảo tốn như ảnh mà kém nhất; 2 tầng chậm nhất.
+**Chạy lại trên Colab T4 — cùng model `qwen3-vl:4b-16k@53a23302b5c9`, 18 bài, cách chấm mới, thêm 3 chế độ OCR (2026-11-22).** `wall` gồm ~0.5 s tunnel SSH; `prefill`/`gen` phía server; OCR = `local_ocr` của Flash chạy CPU laptop:
+
+| Cách gửi | Đúng | wall | prefill + gen | OCR | Token vào |
+|---|---|---|---|---|---|
+| Ảnh 768 + list gọn (Flash hiện tại) | 17/18 | 2.60 s | 1.80 + 0.13 | – | 1930 |
+| Phác thảo + list | 16/18 | 2.58 s | 1.80 + 0.13 | – | 1929 |
+| 2 tầng (cùng model mô tả → quyết định) | **18/18** | 4.46 s | 2 lần gọi | – | 2044 |
+| List đầy đủ | 16/18 | 1.43 s | 0.77 + 0.14 | – | 1367 |
+| List gọn | 16/18 | 1.20 s | 0.52 + 0.13 | – | 871 |
+| **Nhãn + tâm** | **18/18** | **1.02 s** | 0.36 + 0.13 | – | **604** |
+| Chỉ nhãn | 17/18 | 0.82 s | 0.22 + 0.12 | – | 376 |
+| **Chỉ OCR, không cây UI** (giả lập desktop) | 11/18 | 0.94 s | 0.37 + 0.13 | 0.70 s | 621 |
+| Chỉ OCR + ảnh 768 | 11/18 | 2.42 s | 1.63 + 0.14 | 0.70 s | 1670 |
+| Cây UI + OCR gộp (Flash `ocr.mode=always`) | 17/18 | 1.41 s | 0.70 + 0.14 | 0.65 s | 1244 |
+
+- "Nhãn + tâm" tiếp tục tốt nhất: đúng 18/18, nhanh hơn ảnh ~2.5×, token −69%.
+- **Chỉ OCR không đủ** (11/18): 4/7 lỗi là đích là **icon không chữ** (nút "+" Add alarm ×2, kính lúp Search, Home) — OCR không tạo ra phần tử nào để chọn; thêm ảnh cũng không cứu được (11/18) vì AI thấy icon nhưng không có index để trả. Còn lại: 2 dòng "Bình Thường" trùng chữ (chọn sai hàng), chữ trong ảnh thumbnail. Model OCR Latin làm mất dấu tiếng Việt. → Cho desktop không có cây accessibility cần thêm **dò icon** (vd. OpenCV/model nhỏ) bên cạnh OCR; trước đó nên dùng cây accessibility của OS (Windows UIA, macOS AX, Linux AT-SPI) khi có.
+- Gộp OCR vào cây UI: +1 bài đúng so với list gọn nhưng +373 token và +0.65 s OCR mỗi lần nhìn → giữ `ocr.mode="auto"` (chỉ khi cây nghèo).
+
 - Giới hạn: chỉ có bài nhắm phần tử **có nhãn**; ý định do agent đã thấy ảnh viết ra → chưa đo icon không nhãn, màu/hình, và việc tự lập bước tiếp theo khi không có ảnh. Hướng đề xuất: mặc định list "nhãn + tâm", gửi ảnh khi cần (nhiều phần tử không nhãn, lệnh về hình/màu, thao tác trước không tác dụng) — cần chạy task thật trước khi đưa vào Flash.
 
 ## 2. TRẠNG THÁI TRIỂN KHAI (đến bản 3)

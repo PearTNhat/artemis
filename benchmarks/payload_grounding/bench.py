@@ -14,6 +14,11 @@ Modes (all answer {"index": N} over the Flash element list):
   list_compact  Flash compact list (current format), no image
   list_center   [i] "label" @cx,cy (0-1000 normalized center), no image
   list_label    [i] "label", no image
+  ocr_only      OCR text boxes only ([i] "text" @cx,cy) - no accessibility tree, no image (desktop-like)
+  ocr_shot      OCR text boxes + screenshot 768 (no accessibility tree)
+  xml_ocr       Flash compact list after fusing OCR into the tree (Flash ocr.mode="always"), no image
+OCR = Flash's own local OCR (artemis.utils.local_ocr: RapidOCR + PP-OCRv5 Latin), run once per
+case on this PC and cached in data/<case>/ocr_*.json together with its time (ocr_ms).
 
 Usage (repo root):
   # local Ollama, light on the laptop (batches of 5, 40s rest, stops if RAM < 3 GB)
@@ -33,7 +38,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, REPO)
 
-ALL_MODES = ["shot768", "sketch", "2stage", "list_full", "list_compact", "list_center", "list_label"]
+ALL_MODES = ["shot768", "sketch", "2stage", "list_full", "list_compact", "list_center", "list_label",
+             "ocr_only", "ocr_shot", "xml_ocr"]
+OCR_MODES = ("ocr_only", "ocr_shot", "xml_ocr")
 DESCRIBE = ("Describe this Android screen in at most 60 words: app/screen name, main sections, "
             "and any icon-only buttons with their position and look.")
 norm = lambda t: " ".join((t or "").lower().split())
@@ -83,8 +90,50 @@ def sketch(els, w, h, max_side=512):
     return b64_jpeg(im, max_side, 85)
 
 
+def ocr_lines(case, with_xml):
+    """Flash's local OCR on the case screenshot; cached per case (the time is measured once).
+
+    with_xml=False: no tree at all (desktop-like), the whole frame is read.
+    with_xml=True: the tree is passed, so the status bar is cropped like in Flash."""
+    path = os.path.join(HERE, "data", case["id"], "ocr_xml.json" if with_xml else "ocr_full.json")
+    if os.path.exists(path):
+        return json.load(open(path, encoding="utf-8"))
+    from artemis.utils import local_ocr
+    cfg = local_ocr.local_ocr_settings()
+    if local_ocr._get_engine(cfg) is None:  # build the engine outside the timed call
+        raise RuntimeError("local OCR engine unavailable")
+    local_ocr._cache.clear()  # the module caches by image hash; force a real run
+    data = open(case["img"], "rb").read()
+    t = time.perf_counter()
+    lines = local_ocr.recognize_screenshot(data, case["ui"] if with_xml else [], cfg)
+    out = dict(ms=round((time.perf_counter() - t) * 1000), lines=lines)
+    json.dump(out, open(path, "w", encoding="utf-8"), ensure_ascii=False)
+    return out
+
+
+def ocr_elements(case):
+    els = []
+    for i, ln in enumerate(ocr_lines(case, False)["lines"], 1):
+        xs = [p["x"] for p in ln["position"]]
+        ys = [p["y"] for p in ln["position"]]
+        b = [min(xs), min(ys), max(xs), max(ys)]
+        els.append(dict(index=i, text=ln["text"], bounds=b, center=[(b[0] + b[2]) // 2, (b[1] + b[3]) // 2]))
+    return els
+
+
 def listing(mode, s):
+    import copy
     from artemis.utils.visualization import format_minimal_list_with_elements
+    if mode in ("ocr_only", "ocr_shot"):
+        els = ocr_elements(s)
+        text = "\n".join(f'[{e["index"]}] "{e["text"]}" @{e["center"][0] * 1000 // s["w"]},'
+                         f'{e["center"][1] * 1000 // s["h"]}' for e in els)
+        return text, els
+    if mode == "xml_ocr":
+        from artemis.utils.ocr_xml_fusion import fuse_ocr_with_xml
+        fused = fuse_ocr_with_xml(copy.deepcopy(s["ui"]), ocr_lines(s, True)["lines"], xml_first=True)
+        text, els, _ = format_minimal_list_with_elements(fused, s["w"], s["h"], compact=True)
+        return text, els
     text, els, _ = format_minimal_list_with_elements(s["ui"], s["w"], s["h"], compact=mode != "list_full")
     if mode == "list_center":
         text = "\n".join(f'[{e["index"]}] "{e.get("text", "")}" @{e["center"][0] * 1000 // s["w"]},'
@@ -94,9 +143,11 @@ def listing(mode, s):
     return text, els
 
 
-def decide_prompt(text, instr, desc=None):
+def decide_prompt(text, instr, desc=None, ocr=False):
     head = f"Screen description: {desc}\n\n" if desc else ""
-    return (f"{head}UI elements on the Android screen:\n{text}\n\nYou are operating this phone. "
+    what = ("Text found on the screen by OCR ([index] text @x,y center in 0-1000 normalized coords; "
+            "icons without text are not listed)" if ocr else "UI elements on the Android screen")
+    return (f"{head}{what}:\n{text}\n\nYou are operating this phone. "
             f"Your intent for this step:\n{instr}\n\nWhich element should be tapped? "
             "Reply ONLY JSON: {\"index\": N}")
 
@@ -128,6 +179,32 @@ def grade(reply, els, case):
     return same_row, idx, lab
 
 
+def evaluate(reply, mode, case, els=None):
+    """Grade one stored answer for any mode. OCR-only lists are graded against the accessibility
+    tree: the chosen OCR box is correct if its center falls inside an accepted element (or, for a
+    matching text, on that element's row)."""
+    if els is None:
+        els = listing(mode, case)[1]
+    if mode not in ("ocr_only", "ocr_shot"):
+        return grade(reply, els, case)
+    m = re.search(r'"?index"?\s*:\s*(\d+)', reply or "")
+    if not m:
+        return False, None, ""
+    idx = int(m.group(1))
+    e = next((e for e in els if e["index"] == idx), None)
+    if not e:
+        return False, idx, ""
+    xml_els = listing("list_compact", case)[1]
+    targets = [t for t in xml_els if label_match(t.get("text"), case["accept"])]
+    if case.get("near_y") is not None and targets:
+        best = min(abs(t["center"][1] - case["near_y"]) for t in targets)
+        targets = [t for t in targets if abs(t["center"][1] - case["near_y"]) == best]
+    cx, cy = e["center"]
+    inside = any(t["bounds"][0] <= cx <= t["bounds"][2] and t["bounds"][1] <= cy <= t["bounds"][3] for t in targets)
+    row = label_match(e["text"], case["accept"]) and any(t["bounds"][1] <= cy <= t["bounds"][3] for t in targets)
+    return inside or row, idx, norm(e["text"])
+
+
 # ------------------------------------------------------------------ backends
 def post(url, body, headers, retries=6):
     for attempt in range(retries):
@@ -152,9 +229,15 @@ def call_ollama(args, prompt, image=None, max_out=20):
     nonce = {"role": "system", "content": f"run {random.getrandbits(48):012x}"}  # defeat prefix cache
     r, wall = post(f"{args.ollama_url}/api/chat",
                    {"model": args.model, "stream": False, "messages": [nonce, msg], "keep_alive": "1m",
-                    "options": {"temperature": 0, "num_ctx": 4096, "num_predict": max_out}}, {})
-    return dict(reply=r["message"]["content"], wall=wall, in_tok=r.get("prompt_eval_count", 0),
-                out_tok=r.get("eval_count", 0), prefill=r.get("prompt_eval_duration", 0) / 1e9)
+                    "options": {"temperature": 0, "num_ctx": args.num_ctx, "num_predict": max_out}}, {})
+    out = dict(reply=r["message"]["content"], wall=wall, in_tok=r.get("prompt_eval_count", 0),
+               out_tok=r.get("eval_count", 0), prefill=r.get("prompt_eval_duration", 0) / 1e9,
+               gen=r.get("eval_duration", 0) / 1e9, load=r.get("load_duration", 0) / 1e9,
+               server=r.get("total_duration", 0) / 1e9)
+    if out["in_tok"] >= args.num_ctx - 32:
+        out["truncated"] = True
+        print(f"  WARNING: prompt filled num_ctx={args.num_ctx} - raise --num-ctx", flush=True)
+    return out
 
 
 def call_gemini(args, prompt, image=None, max_out=40):
@@ -193,6 +276,8 @@ def model_digest(args):
 def run(args):
     from PIL import Image
     call = call_ollama if args.backend == "ollama" else call_gemini
+    # RAM guard / rests only matter when the model runs on this laptop
+    local_model = args.backend == "ollama" and re.search(r"(127\.0\.0\.1|localhost):11434", args.ollama_url)
     pause = args.pause if args.pause is not None else (2.5 if args.backend == "ollama" else 4.5)
     modes = args.modes.split(",")
     steps = load_cases(args.steps)
@@ -202,7 +287,7 @@ def run(args):
     print(f"{len(steps)} steps selected, {len(todo)} with work left; model {model_id}", flush=True)
     with open(args.out, "a") as f:
         for bi in range(0, len(todo), args.batch):
-            if bi:
+            if bi and local_model:
                 print(f"-- rest {args.rest}s (RAM available {mem_available_gb():.1f} GB)", flush=True)
                 time.sleep(args.rest)
             for s in todo[bi: bi + args.batch]:
@@ -211,11 +296,13 @@ def run(args):
                 for mode in modes:
                     if (s["id"], mode) in done:
                         continue
-                    if args.backend == "ollama" and mem_available_gb() < 3:
+                    if local_model and mem_available_gb() < 3:
                         print(f"STOP: only {mem_available_gb():.1f} GB RAM available", flush=True)
                         return
                     text, els = listing(mode, s)
                     extra = {}
+                    if mode in OCR_MODES:
+                        extra["ocr_ms"] = ocr_lines(s, mode == "xml_ocr")["ms"]
                     if mode == "2stage":
                         d = call(args, DESCRIBE, b64_jpeg(shot, 768), 150)
                         time.sleep(pause)
@@ -223,10 +310,10 @@ def run(args):
                         extra = dict(s1_wall=d["wall"], s1_in=d["in_tok"], s1_out=d["out_tok"])
                         r["wall"] += d["wall"]
                     else:
-                        img = (b64_jpeg(shot, 768) if mode == "shot768"
+                        img = (b64_jpeg(shot, 768) if mode in ("shot768", "ocr_shot")
                                else sketch(els, s["w"], s["h"]) if mode == "sketch" else None)
-                        r = call(args, decide_prompt(text, instr), img)
-                    ok, idx, lab = grade(r["reply"], els, s)
+                        r = call(args, decide_prompt(text, instr, ocr=mode in ("ocr_only", "ocr_shot")), img)
+                    ok, idx, lab = evaluate(r["reply"], mode, s, els)
                     f.write(json.dumps(dict(step=s["id"], mode=mode, model=model_id, ok=ok, idx=idx, picked=lab,
                                             accept=s["accept"], n_els=len(els), **r, **extra),
                                        ensure_ascii=False) + "\n")
@@ -246,10 +333,10 @@ def summary(paths):
         if c is None:
             r["ok"] = False
             continue
-        key = (r["step"], r["mode"] if r["mode"] in ("list_full",) else "compact")
-        if key not in lists:
-            lists[key] = listing("list_full" if key[1] == "list_full" else "list_compact", c)[1]
-        r["ok"] = grade(r["reply"], lists[key], c)[0]
+        lm = r["mode"] if r["mode"] in ("list_full", "ocr_only", "ocr_shot", "xml_ocr") else "list_compact"
+        if (r["step"], lm) not in lists:
+            lists[(r["step"], lm)] = listing(lm, c)[1]
+        r["ok"] = evaluate(r["reply"], r["mode"], c, lists[(r["step"], lm)])[0]
     rows = [r for r in rows if r["step"] in cases]
     for model in sorted({r["model"] for r in rows}):
         R = [r for r in rows if r["model"] == model]
@@ -259,15 +346,20 @@ def summary(paths):
             by.setdefault(r["step"], {})[r["mode"]] = r
         common = [v for v in by.values() if all(m in v for m in modes)]
         print(f"\n== {model}: {len(common)} steps with all of {modes}")
-        print(f"{'mode':13s} {'ok':>6s} {'wall_med':>8s} {'p90':>6s} {'in_tok':>7s}")
+        print(f"{'mode':13s} {'ok':>6s} {'wall_med':>8s} {'p90':>6s} {'prefill':>7s} {'gen':>5s} "
+              f"{'ocr':>5s} {'total':>6s} {'in_tok':>7s}")
+        med = lambda xs: statistics.median(xs) if xs else 0.0
         for m in modes:
             X = [v[m] for v in common]
             if not X:
                 continue
             W = sorted(x["wall"] for x in X)
             tok = statistics.median(x["in_tok"] + x.get("s1_in", 0) for x in X)
+            ocr = med([x.get("ocr_ms", 0) / 1000 for x in X])
+            total = med([x["wall"] + x.get("ocr_ms", 0) / 1000 for x in X])
             print(f"{m:13s} {sum(x['ok'] for x in X):2d}/{len(X):<3d} {statistics.median(W):8.2f} "
-                  f"{W[int(0.9 * (len(W) - 1))]:6.2f} {tok:7.0f}")
+                  f"{W[int(0.9 * (len(W) - 1))]:6.2f} {med([x.get('prefill', 0) for x in X]):7.2f} "
+                  f"{med([x.get('gen', 0) for x in X]):5.2f} {ocr:5.2f} {total:6.2f} {tok:7.0f}")
 
 
 def main():
@@ -281,6 +373,7 @@ def main():
     ap.add_argument("--batch", type=int, default=5)
     ap.add_argument("--rest", type=int, default=40)
     ap.add_argument("--pause", type=float, default=None)
+    ap.add_argument("--num-ctx", type=int, default=4096, help="Ollama context; raise if a WARNING says truncated")
     ap.add_argument("--summary", nargs="*")
     args = ap.parse_args()
     if args.summary:
