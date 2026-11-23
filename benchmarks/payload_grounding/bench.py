@@ -75,7 +75,7 @@ ALL_MODES = ["shot768", "2stage", "list_full", "list_compact", "list_center", "l
 # Default set: the ones worth running. The others stay runnable with --modes (and their old
 # results stay in results/*.jsonl) but proved useless: wireframe, 2-stage, no-image lists,
 # OCR fusion, and the old label+center that dropped role/state hints.
-CORE_MODES = ["shot768", "compact_somU", "center2_shot", "wire_near", "center2_near", "ocr_only", "ocr2_somU"]
+CORE_MODES = ["shot768", "compact_somU", "center2_shot", "wire_near", "wire_hybrid", "center2_near", "ocr2_somU"]
 OCR_MODES = ("ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
 NO_TREE_MODES = ("ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "ocr_icons", "ocr_icons_som")  # graded against the tree
 IMAGE_MODES = {"shot768": "shot", "ocr_shot": "shot",
@@ -764,6 +764,7 @@ def call_ollama(args, prompt, image=None, max_out=20):
     nonce = {"role": "system", "content": f"run {random.getrandbits(48):012x}"}  # defeat prefix cache
     r, wall = post(f"{args.ollama_url}/api/chat",
                    {"model": args.model, "stream": False, "messages": [nonce, msg], "keep_alive": "1m",
+                    **({"think": False} if args.no_think else {}),
                     "options": {"temperature": 0, "num_ctx": args.num_ctx, "num_predict": max_out}}, {})
     out = dict(reply=r["message"]["content"], wall=wall, in_tok=r.get("prompt_eval_count", 0),
                out_tok=r.get("eval_count", 0), prefill=r.get("prompt_eval_duration", 0) / 1e9,
@@ -942,6 +943,8 @@ def main():
     ap.add_argument("--batch", type=int, default=5)
     ap.add_argument("--rest", type=int, default=40)
     ap.add_argument("--pause", type=float, default=None)
+    ap.add_argument("--no-think", action="store_true",
+                    help="Ollama: disable the thinking phase (needed for thinking variants such as qwen3-vl:4b)")
     ap.add_argument("--also-done", nargs="*", default=[], help="other result files whose (case, mode) pairs are not re-run")
     ap.add_argument("--num-ctx", type=int, default=4096, help="Ollama context; raise if a WARNING says truncated")
     ap.add_argument("--summary", nargs="*")
