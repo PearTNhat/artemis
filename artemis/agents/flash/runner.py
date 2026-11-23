@@ -222,6 +222,24 @@ def _gemini_image_resolution(ctx: ArtemisContext) -> str | None:
     return None
 
 
+SCREENSHOT_SKIPPED_NOTE = (
+    "--- Screenshot omitted: the element list matches the previous observation (same screen). "
+    "Act from the list below. If you must see the screen (unlabeled icon, color, highlighted "
+    "error, picture content), call ask_explorer. ---"
+)
+
+
+def _list_signature(xml_list: str | None) -> set[str]:
+    """Element-list lines with indices and numbers removed, for a same-screen check."""
+    if not xml_list or "Not available" in xml_list:
+        return set()
+    return {
+        re.sub(r"\d+", "#", line.strip())
+        for line in xml_list.splitlines()
+        if line.strip()
+    }
+
+
 class FlashRunner:
     """Reactive, ultra-fast agent execution loop supporting all VLM providers."""
 
@@ -491,6 +509,9 @@ class FlashRunner:
         blocks: list[dict] = [
             {"type": "text", "text": obs_header}
         ]
+        if img_bytes and self._skip_screenshot(turns, xml_list, bool(notices)):
+            img_bytes = None
+            blocks.append({"type": "text", "text": SCREENSHOT_SKIPPED_NOTE})
         if img_bytes:
             # Only the model's copy shrinks; OCR, guards and traces keep the original.
             image_cfg = getattr(self, "model_image_cfg", None)
@@ -521,6 +542,39 @@ class FlashRunner:
         if ephemeral:
             mark_ephemeral(tail, ephemeral)
         return tail
+
+    def _skip_screenshot(self, turn: int, xml_list: str | None, has_notices: bool) -> bool:
+        """Decides whether this turn's screenshot can be left out (``skip_unchanged``).
+
+        Skips only when the previous turn sent a screenshot of a screen whose element
+        list is nearly the same as now, no notice (failed action, no visible change)
+        asks for attention, and fewer than ``max_consecutive_skips`` turns in a row
+        went without one. Records the decision for the next turn.
+        """
+        decided = getattr(self, "_skip_decision", None)
+        if decided and decided[0] == turn:
+            # A re-asked turn (pause / resume) keeps its first decision.
+            return decided[1]
+        cfg = getattr(self, "model_image_cfg", None)
+        sig = _list_signature(xml_list)
+        prev = getattr(self, "_last_image_sig", None)
+        skips = getattr(self, "_consecutive_skips", 0)
+        skip = bool(
+            cfg is not None
+            and getattr(cfg, "skip_unchanged", False)
+            and sig
+            and prev
+            and not has_notices
+            and skips < getattr(cfg, "max_consecutive_skips", 2)
+            and len(sig & prev) / len(sig | prev) >= getattr(cfg, "skip_similarity", 0.8)
+        )
+        if skip:
+            self._consecutive_skips = skips + 1
+        else:
+            self._consecutive_skips = 0
+            self._last_image_sig = sig
+        self._skip_decision = (turn, skip)
+        return skip
 
     def _extract_response_text(self, response) -> str:
         """Extracts the natural-language thought text from the model response."""

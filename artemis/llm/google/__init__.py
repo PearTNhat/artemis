@@ -38,11 +38,14 @@ from artemis.llm.google.provider import (
     supports_agentic_video,
     supports_thinking_level,
 )
+from artemis.llm.google.key_pool import GeminiKeyPool, get_key_pool
 from artemis.llm.google.usage import normalize_usage, usage_from_message
 
 __all__ = [
+    "GeminiKeyPool",
     "VideoProcessing",
     "gemini_version",
+    "get_key_pool",
     "is_agentic_video_auto_eligible",
     "is_gemini_model",
     "is_google_chat_model",

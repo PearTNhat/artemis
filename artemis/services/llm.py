@@ -409,6 +409,7 @@ async def _run_with_recovery[T](
     *,
     provider: str | None = None,
     endpoint_key: str | None = None,
+    model_wrapper: Any = None,
 ) -> T:
     """Execute one LLM call under the classified retry / pause / breaker policy.
 
@@ -445,6 +446,43 @@ async def _run_with_recovery[T](
                     failure = classify_failure(e)
                     if failure.category is FailureCategory.CANCELLED:
                         raise
+
+                    # Check for Gemini key rotation on rate limit (429) or invalid/unbilled key (401/403)
+                    if is_google_provider(provider) and model_wrapper is not None:
+                        from artemis.llm.google.key_pool import get_key_pool
+
+                        pool = get_key_pool()
+                        if pool.has_multiple_keys():
+                            err_str = str(e).lower()
+                            is_rate_limit = failure.category == FailureCategory.RATE_LIMIT
+                            is_auth_or_perm = (
+                                failure.category == FailureCategory.AUTHENTICATION
+                                or "free tier" in err_str
+                                or "api key not valid" in err_str
+                                or "permission_denied" in err_str
+                            )
+                            if is_rate_limit or is_auth_or_perm:
+                                target_model = getattr(model_wrapper, "base_model", model_wrapper)
+                                gm = pool.find_google_model(target_model)
+                                current_k = (
+                                    gm.google_api_key.get_secret_value()
+                                    if gm and gm.google_api_key
+                                    else None
+                                )
+                                next_k = pool.rotate_key(
+                                    current_key=current_k,
+                                    reason=f"{failure.category.value}: {str(e)[:100]}",
+                                    permanent=is_auth_or_perm,
+                                )
+                                if next_k:
+                                    pool.update_model_key(target_model, next_k)
+                                    llm_logger.warning(
+                                        f"🔄 [Auto Key Switch] Hot-swapped Gemini key to {pool.mask_key(next_k)}. "
+                                        "Retrying device action immediately without pause."
+                                    )
+                                    attempts.pop(failure.category, None)
+                                    continue
+
                     if endpoint_key:
                         _ENDPOINT_BREAKER.record_failure(endpoint_key, failure)
                     if not failure.retryable:
@@ -670,6 +708,7 @@ class RobustChatModelWrapper:
             functools.partial(self.base_model.ainvoke, *args, **kwargs),
             provider=self._provider_value(),
             endpoint_key=self._endpoint_key(),
+            model_wrapper=self,
         )
         self._meter_usage(response)
         return response
@@ -690,6 +729,7 @@ class RobustChatModelWrapper:
             functools.partial(self._complete_attempt, emit_deltas, *args, **kwargs),
             provider=self._provider_value(),
             endpoint_key=self._endpoint_key(),
+            model_wrapper=self,
         )
         self._meter_usage(response)
         return response

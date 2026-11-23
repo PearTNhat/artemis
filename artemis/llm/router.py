@@ -256,9 +256,12 @@ class ModelFactory:
                 HarmBlockThreshold,
                 HarmCategory,
             )
+            from artemis.llm.google.key_pool import get_key_pool
 
+            pool = get_key_pool()
             api_key = (
                 endpoint.api_key
+                or pool.get_active_key()
                 or (settings.GOOGLE_API_KEY.get_secret_value() if settings.GOOGLE_API_KEY else None)
                 or os.environ.get("GOOGLE_API_KEY")
                 or os.environ.get("GEMINI_API_KEY")
