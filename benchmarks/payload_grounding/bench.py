@@ -79,7 +79,7 @@ sys.path.insert(0, REPO)
 
 ALL_MODES = ["shot768", "2stage", "list_full", "list_compact", "list_center", "list_label",
              "center_som", "center_shot", "center2", "center2_shot", "compact_somU",
-             "center2_somU", "wire_text", "center2_near", "somU_near", "wire_near", "wire2_near", "wire_hybrid", "xml_ocr_somU", "fused_icons_somU", "gapfill_somU", "compact_somU2", "gapfill_somU2", "center2_rel", "gapfill_rel_somU2",
+             "center2_somU", "wire_text", "center2_near", "somU_near", "wire_near", "wire2_near", "wire_hybrid", "xml_ocr_somU", "fused_icons_somU", "gapfill_somU", "compact_somU2", "gapfill_somU2", "center2_rel", "gapfill_rel_somU2", "center2_ask",
              "compact_crops", "ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "xml_ocr", "center_ocr",
              "ocr_icons", "ocr_icons_som"]
 # Default set: the ones worth running. The others stay runnable with --modes (and their old
@@ -731,7 +731,7 @@ def listing(mode, s):
         for b in detect_icons(s)["boxes"]:
             els.append(dict(index=len(els) + 1, text="", bounds=b, center=[(b[0] + b[2]) // 2, (b[1] + b[3]) // 2]))
         return center_text(els, s["w"], s["h"]), els
-    if mode == "center2_rel":
+    if mode in ("center2_rel", "center2_ask"):
         text, els, _ = format_minimal_list_with_elements(s["ui"], s["w"], s["h"], compact=True)
         return compact_to_center(add_rel_hints(text, els, s["w"], s["h"])), els
     if mode == "gapfill_rel_somU2":
@@ -838,7 +838,10 @@ def decide_prompt(text, instr, desc=None, ocr=False, mode=""):
                  "and label (pictures shown as [image])")
     return (f"{head}{what}:\n{text}\n\nYou are operating this phone. "
             f"Your intent for this step:\n{instr}\n\nWhich element should be tapped? "
-            "Reply ONLY JSON: {\"index\": N}")
+            "Reply ONLY JSON: {\"index\": N}" + (
+                "\nYou see only this text, not the screen. If you cannot tell for sure which element it is "
+                "(e.g. the target is an icon or control without a label and its position is ambiguous), "
+                "reply ONLY {\"need_image\": true} instead." if mode == "center2_ask" else ""))
 
 
 def label_match(label, accept):
@@ -944,7 +947,7 @@ def call_ollama(args, prompt, image=None, max_out=20):
 _gemini_keys_cache = []
 _gemini_disabled_keys = set()
 _gemini_permanent_bad_keys = set()
-_gemini_key_idx = 0
+_gemini_key_idx = random.randint(0, 50)
 _gemini_lock = threading.Lock()
 _file_lock = threading.Lock()
 
