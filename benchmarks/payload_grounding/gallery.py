@@ -180,6 +180,9 @@ def main():
         save_b64(B.ocr_hybrid_image(c, els_oh, 768), os.path.join(out, "img", f"{s}_ocrhybrid.jpg"))
         save_b64(B.som_image(c["img"], [e for e in els_c if not e.get("text")], 540),
                  os.path.join(out, "img", f"{s}_somU.jpg"))
+        _, els_g = B.listing("gapfill_somU2", c)
+        save_b64(B.som_image_v2(c["img"], [e for e in els_g if not e.get("text")], 768),
+                 os.path.join(out, "img", f"{s}_gapfill.jpg"))
         _, els_o = B.listing("ocr2_somU", c)
         save_b64(B.som_image(c["img"], [e for e in els_o if not e.get("text")], 540),
                  os.path.join(out, "img", f"{s}_ocr_icons.jpg"))
@@ -187,6 +190,7 @@ def main():
                           list_compact=B.listing("list_compact", c)[0],
                           list_center=B.listing("center2_near", c)[0],
                           ocr_icons=B.listing("ocr2_somU", c)[0],
+                          list_gapfill=B.listing("gapfill_somU2", c)[0], n_compact=len(els_c),
                           n_elements=len(els_c), n_unlabeled=sum(1 for e in els_c if not e.get("text")),
                           ocr_compare=compare_ocr(c))
 

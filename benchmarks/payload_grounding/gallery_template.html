@@ -64,7 +64,7 @@ button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-v
 .view img { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
 .view b { font-size: .85rem; }
 .view span { font-size: .78rem; color: var(--muted); }
-.lists { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 0 14px 14px; }
+.lists { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 0 14px 14px; }
 .lists > div { min-width: 0; display: grid; gap: 6px; align-content: start; }
 pre { margin: 0; font-family: var(--font-mono); font-size: .74rem; line-height: 1.45; background: var(--bg); border: 1px solid var(--line);
   border-radius: 6px; padding: 10px; max-height: 320px; overflow: auto; white-space: pre; }
@@ -271,10 +271,12 @@ function showScreen(s) {
     v("hybrid", "Wireframe lai", "Chữ vẽ lại; icon, công tắc, ảnh dán pixel thật (khung đỏ + số). Cách “WF lai”.") +
     v("ocrhybrid", "Không cây UI: OCR lai", "Chữ OCR vẽ lại; icon dò được dán pixel thật. Cách “OCR lai”.") +
     v("crops", "Chỉ ảnh cắt phần tử không nhãn", "Không gửi cả màn hình, chỉ các ô nhỏ có số. Cách “Gọn+Cắt”.") +
+    v("gapfill", "XML + lấp chỗ trống + đánh số v2", "Ảnh thật; đánh số phần tử không nhãn của cây + icon cây thiếu; 1 icon 1 số, số đặt ngoài khung. Cách tốt nhất.") +
     v("somU", "Ảnh thật, chỉ đánh số phần tử không nhãn", "Không che chữ. Cách “Gọn+SốKN” — đúng nhiều nhất.") +
     v("ocr_icons", "Không cây UI: OCR + dò icon v2", "Chỉ đánh số các icon OpenCV tìm được; chữ lấy từ OCR. Cách “OCR+Icon2+Số”.");
   $("#lists").innerHTML =
     `<div><b>List gọn (Flash hiện tại) — ${sc.n_elements} phần tử, ${sc.n_unlabeled} không nhãn</b><pre>${esc(sc.list_compact)}</pre></div>` +
+    `<div><b>XML + lấp chỗ trống (list gọn + gợi ý gần chữ; các dòng sau dòng ${sc.n_compact} là phần THÊM vì cây thiếu)</b><pre>${esc(sc.list_gapfill)}</pre></div>` +
     `<div><b>Nhãn + tâm (giữ loại) + gợi ý “gần chữ nào”</b><pre>${esc(sc.list_center)}</pre></div>` +
     `<div><b>Không cây UI: OCR + dò icon v2 (so với list gọn ở trên)</b><pre>${esc(sc.ocr_icons)}</pre></div>`;
   renderCompare(sc);
