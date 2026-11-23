@@ -42,6 +42,16 @@ section { display: grid; gap: 14px; min-width: 0; }
 .findings li { margin: 0; }
 .findings ul { margin: 0; padding-left: 1.1rem; display: grid; gap: 6px; }
 
+/* glossary */
+.glossary-box { padding: 16px 18px; display: grid; gap: 14px; }
+.glossary-formula { background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 8px; padding: 10px 14px; font-size: .88rem; }
+.glossary-formula b { color: var(--accent); }
+.glossary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+.glossary-card { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: grid; gap: 6px; }
+.glossary-card h3 { font-size: .82rem; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; }
+.glossary-card ul { margin: 0; padding-left: 1.1rem; display: grid; gap: 6px; font-size: .82rem; }
+.glossary-card li { margin: 0; }
+
 /* summary table */
 .tablebox { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: .88rem; }
@@ -131,18 +141,55 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
   </header>
 
   <section>
+    <h2>Quy ước &amp; Giải thích thuật ngữ</h2>
+    <div class="panel glossary-box">
+      <div class="glossary-formula">
+        <b>Công thức cấu tạo:</b> Mọi cách gửi trong benchmark đều tuân theo công thức thống nhất: <code>Cách gửi = [Loại Ảnh] + [Loại Text UI] + [Bổ trợ (nếu có)]</code>
+      </div>
+      <div class="glossary-grid">
+        <div class="glossary-card">
+          <h3>1. Thành phần Ảnh (Vision)</h3>
+          <ul>
+            <li><b>Ảnh thật:</b> Ảnh chụp màn hình điện thoại nguyên bản, không vẽ thêm gì.</li>
+            <li><b>Ảnh SoM (Set-of-Marks):</b> Vẽ khung đỏ &amp; gắn số thứ tự <code>[index]</code> lên các icon/nút không nhãn để AI nhìn vào biết ngay số index cần bấm:
+              <br>• <i>SoM v1 (bản cũ):</i> Số vẽ <b>trong khung đỏ</b>, dễ che mất chi tiết của các icon nhỏ.
+              <br>• <i>SoM v2 (cải tiến):</i> Số nhỏ đặt <b>ngoài khung đỏ</b> (1 icon 1 số), giữ nguyên 100% hình vẽ icon cho AI nhìn.</li>
+            <li><b>Ảnh cắt (Crops):</b> Ghép các mảnh icon cắt nhỏ vào 1 tấm ảnh (không gửi full màn hình).</li>
+            <li><b>Wireframe:</b> Ảnh đen-trắng vẽ lại chữ và khung (không có pixel thật).</li>
+            <li><b>Không ảnh:</b> Chế độ chỉ dùng văn bản (Pure Text), hoàn toàn không gửi ảnh.</li>
+          </ul>
+        </div>
+        <div class="glossary-card">
+          <h3>2. Thành phần Text UI (Language)</h3>
+          <ul>
+            <li><b>Cây XML:</b> Cây phân cấp Accessibility chuẩn của Android (chữ, loại nút, toạ độ góc). Rất chuẩn xác với app native.</li>
+            <li><b>Nhãn &amp; Tâm (NT):</b> Rút gọn danh sách, chỉ giữ lại nhãn chữ và toạ độ tâm điểm chạm <code>@cx,cy</code> để tiết kiệm token.</li>
+            <li><b>OCR &amp; Icon OpenCV:</b> Không dùng cây UI (kiểu desktop/web canvas). Chữ đọc bằng OCR, icon dò bằng xử lý ảnh OpenCV.</li>
+          </ul>
+        </div>
+        <div class="glossary-card">
+          <h3>3. Kỹ thuật Bổ trợ (Enhancements)</h3>
+          <ul>
+            <li><b>Lấp trống (Gap-fill):</b> Bù đắp điểm mù của cây XML. Quét thêm icon/chữ mà app (Flutter, Custom Canvas) bỏ sót khỏi cây XML rồi chèn vào cuối danh sách text.</li>
+            <li><b>Gợi ý quan hệ (QH):</b> Với các icon lấp trống vô danh, tự động sinh mỏ neo không gian vị trí (vd: <code>[same row as "Delivery", left of it]</code>, <code>[above "Cart"; bottom bar, right]</code>).</li>
+            <li><b>Gợi ý gần chữ:</b> Gắn nhãn chữ gần icon nhất (vd: <code>near "Sun, Sat"</code>).</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
     <h2>Kết luận chính</h2>
     <div class="panel findings">
       <ul>
-        <li><b>Với Qwen 4B, ảnh thật là bắt buộc.</b> Bỏ ảnh chỉ đúng khi đích có chữ (42/56); với icon, công tắc, nút "+" thì gần như đoán mò. Gemini Flash-Lite thì không ảnh vẫn 52/56 — xem phần so sánh model.</li>
-        <li><b>Mặc định nên dùng: list gọn + ảnh thật chỉ đánh số các phần tử không nhãn</b> (Qwen 51/56, Gemini 51/56, không cần OCR, ~2.4 s). Chỉ trượt khi phần tử không có trong cây (0/4).</li>
-        <li><b>Khi cây thiếu phần tử: thêm OCR/icon vào chỗ trống, chỉ dòng thêm vào có gợi ý quan hệ</b> — Qwen 51/56 (không có trong cây 3/4), Gemini <b>56/56</b>; tốn thêm ~0.7 s OCR nên dùng như bước dự phòng. Gợi ý cho dòng của cây bỏ đi không mất điểm mà bớt ~95 token.</li>
-        <li><b>Ảnh thật + list gọn</b> (cách Flash đang làm) 49/56. <b>Nhãn + tâm có giữ loại/trạng thái + ảnh</b> 48/56 nhưng ít token hơn ~200. Gợi ý bằng chữ (gần chữ / quan hệ) không giúp Qwen 4B (42–44/56 khi không ảnh); ghi số khoảng cách pixel cũng không giúp.</li>
-        <li><b>Wireframe có chữ</b> 44/56; thêm gợi ý “gần chữ nào” cho phần tử không nhãn (vd. công tắc gần “Sun, Sat”, nút + gần “PHỞ TÁI NẠM”) lên <b>47/56</b> — dùng khi không được gửi ảnh thật. Nhưng tốn token như ảnh thật, và nhiều app (vd. Grab) không khai ảnh trong cây UI nên không biết chỗ nào là ảnh.</li>
-        <li><b>OCR thiếu dữ kiện</b>: chỉ OCR thì 21/52 bài (52 bài cũ) phần tử đúng không hề có trong list (icon, công tắc, nút "+"). Dò icon v2 + gợi ý gần chữ + ảnh chỉ đánh số icon nâng lên <b>40/56</b> (có đáp án 50/56) nhưng tổng ~3.4 s/lần. Không kèm ảnh thì nhiều icon thừa làm AI rối (19/52, đo trên 52 bài cũ).</li>
-        <li><b>OCR nhiễu</b>: 35% dòng là chữ trong ảnh/banner/status bar. Lọc bằng độ tin cậy lại tệ hơn (17/52 so với 24/52, 52 bài cũ) vì bỏ mất chữ tiếng Việt; vấn đề chính của OCR là thiếu icon và thiếu loại phần tử, không phải nhiễu.</li>
-        <li><b>Wireframe rỗng (40/52, 52 bài cũ) đã xoá:</b> vốn đã trắng đen nhưng vẫn tốn token như ảnh thật (Ollama tính theo kích thước cố định), lại không có hình icon, chỉ lặp lại toạ độ đã có trong list. Vẽ khung &amp; số lên ảnh thật chỉ tốn thêm ~10 ms.</li>
-        <li><b>Không có cây UI</b> (kiểu desktop): OCR + dò icon OpenCV còn kém xa; desktop nên đọc cây accessibility của hệ điều hành (Windows UIA, macOS AX).</li>
+        <li><b>Chính xác tuyệt đối 100%: <code>Ảnh SoM v2 + Cây XML + Lấp trống + QH</code> (gapfill_rel_somU2)</b> đạt <b>56/56 trên Gemini</b> (100%) và 51/56 trên Qwen. Giải quyết triệt để các bài icon không có trong cây (0/4 → 4/4 trên Gemini) nhờ bù icon thiếu kèm mỏ neo quan hệ vị trí.</li>
+        <li><b>Mặc định cân bằng tốt nhất (Không tốn OCR): <code>Ảnh SoM v1 + Cây XML</code> (compact_somU)</b> đạt 51/56 cả Qwen và Gemini, thời gian phản hồi nhanh (~2.4 s) do không tốn 0.7s chạy OCR. Chỉ trượt ở 4 bài icon bị thiếu trong cây XML.</li>
+        <li><b>Đánh số ngoài khung: <code>Ảnh SoM v2 + Cây XML</code> (compact_somU2)</b> đạt 51/56 Gemini, 49/56 Qwen. Đặt số ngoài khung giúp giữ nguyên chi tiết icon.</li>
+        <li><b>Chế độ Flash hiện tại: <code>Ảnh thật + Cây XML</code> (shot768)</b> đạt 49/56 Qwen, 48/56 Gemini. Gửi ảnh thật nguyên bản (không vẽ số) kèm danh sách cây XML rút gọn.</li>
+        <li><b>Với Qwen 4B, ảnh thật là bắt buộc:</b> Bỏ ảnh chỉ đúng khi đích có chữ (42/56); với icon, công tắc, nút "+" không nhãn thì gần như đoán mò nếu không có ảnh. Ngược lại, Gemini Flash-Lite đọc toạ độ tốt hơn nên khi <b>Không ảnh</b> vẫn đạt 52/56.</li>
+        <li><b>Thử nghiệm không ảnh (Chỉ Text):</b> Gợi ý quan hệ hay ghi khoảng cách pixel không giúp Qwen 4B khi không có ảnh (chỉ đạt 42–44/56).</li>
+        <li><b>Không có cây UI (Desktop):</b> Dùng OCR + dò icon OpenCV (40/56) còn kém xa so với dùng cây UI; trên Desktop nên đọc cây Accessibility của hệ điều hành (Windows UIA, macOS AX).</li>
       </ul>
     </div>
   </section>
@@ -164,16 +211,16 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
         <li><b>Gợi ý quan hệ chỉ có ích với model đủ lớn.</b> Cây + lấp chỗ trống + gợi ý quan hệ cho dòng thêm vào: Gemini <b>56/56</b>, Qwen 51/56 (bằng bản gợi ý “gần chữ”). Ví dụ <code>tree_03</code>: gợi ý cũ ghi hai icon đều “near CÀPHÊ”, gợi ý mới ghi <code>[top bar, right]</code> — Gemini chọn đúng [45], Qwen vẫn chọn [50] như cũ.</li>
         <li><b>Qwen bị kéo bởi dòng OCR thêm vào.</b> <code>case_16</code>: OCR dò thêm một icon <code>[72]</code> nằm ngay trong hàng kết quả cần bấm — Qwen chọn icon đó, Gemini vẫn chọn đúng dòng chữ [7]. Lấp chỗ trống cứu được phần tử không có trong cây (0/4 → 3/4) nhưng với model nhỏ thì phải lọc icon nằm <i>bên trong</i> phần tử đã có của cây.</li>
         <li><b>Qwen chọn khung chứa thay cho đáp án.</b> <code>case_03</code>: Qwen chọn <code>[27] (button) … (may be occluded)</code> — khung chứa nằm dưới dòng “Meet at lobby” — ở mọi cách có gợi ý; Gemini chọn đúng.</li>
-        <li><b>Bài mà cả hai đều đúng như nhau:</b> list gọn + ảnh đánh số phần tử không nhãn — 51 và 51. Đây là cách ổn định nhất nếu chưa biết model nào sẽ chạy.</li>
+        <li><b>Bài mà cả hai đều đúng như nhau:</b> <code>Ảnh SoM v1 + Cây XML</code> — 51 và 51. Đây là cách ổn định nhất nếu chưa biết model nào sẽ chạy.</li>
       </ul>
     </div>
     <div class="panel findings">
       <b>Những chỗ dễ đọc sai khi so sánh</b>
       <ul>
-        <li><b>Thời gian Gemini không so được giữa các lần chạy.</b> “List gọn + ảnh đánh số” trung vị 4.05 s, bản v2 chỉ 1.59 s — cùng ~1913 token, chỉ khác ngày chạy (hàng chờ gói miễn phí, mạng). Muốn so tốc độ phải chạy các cách gửi xen kẽ trong cùng một lần.</li>
+        <li><b>Thời gian Gemini không so được giữa các lần chạy.</b> “Ảnh SoM v1 + Cây XML” trung vị 4.05 s, bản SoM v2 chỉ 1.59 s — cùng ~1913 token, chỉ khác ngày chạy (hàng chờ gói miễn phí, mạng). Muốn so tốc độ phải chạy các cách gửi xen kẽ trong cùng một lần.</li>
         <li><b>Thời gian Qwen gồm ~0.5 s mạng tới Colab T4</b> và một số cách gửi có bài chạy ở máy local (cùng model, cùng digest). So tốc độ giữa các cách gửi của Qwen thì được, so với máy chủ Qwen của công ty thì không.</li>
         <li><b>Token hai bên bằng nhau</b> (~1060 token/ảnh ở cả hai), nên chênh thời gian không phải do khác số token.</li>
-        <li><b>Chênh 1–2 bài trên 56 là dao động.</b> Vd. Qwen “list gọn + ảnh đánh số” 51 và bản v2 49 chỉ khác cách vẽ số, đổi kết quả ở <code>case_03</code>, <code>hard_13</code>. Chỉ tin chênh lệch từ ~4 bài trở lên, hoặc chạy lặp lại.</li>
+        <li><b>Chênh 1–2 bài trên 56 là dao động.</b> Vd. Qwen “Ảnh SoM v1” 51 và bản “Ảnh SoM v2” 49 chỉ khác cách vẽ số, đổi kết quả ở <code>case_03</code>, <code>hard_13</code>. Chỉ tin chênh lệch từ ~4 bài trở lên, hoặc chạy lặp lại.</li>
         <li><b>“Không có trong cây” chỉ có 4 bài</b>: 3/4 so với 4/4 chưa đủ để kết luận; cần thêm bài loại này.</li>
       </ul>
     </div>
