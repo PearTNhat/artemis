@@ -8,10 +8,10 @@
   // ------------------------------------------------------------------------------
   "default": {
     "provider": "openai",
-    "model": "qwen2.5vl:3b",
+    "model": "qwen3-vl:4b-16k",
     "fallback": {
       "provider": "openai",
-      "model": "qwen2.5vl:3b"
+      "model": "qwen3-vl:4b-16k"
     }
   },
 
@@ -74,10 +74,10 @@
     // e.g., "gemini-robotics-er-2-preview". Non-ER models will fail spatial coordinate detection.
     "object_detector": {
       "provider": "openai",
-      "model": "qwen2.5vl:3b",
+      "model": "qwen3-vl:4b-16k",
       "fallback": {
         "provider": "openai",
-        "model": "qwen2.5vl:3b"
+        "model": "qwen3-vl:4b-16k"
       }
     },
 
@@ -95,10 +95,10 @@
     // 🔽 Hopper: Fast lightweight package name locator
     "hopper": {
       "provider": "openai",
-      "model": "qwen2.5vl:3b",
+      "model": "qwen3-vl:4b-16k",
       "fallback": {
         "provider": "openai",
-        "model": "qwen2.5vl:3b"
+        "model": "qwen3-vl:4b-16k"
       }
     },
 

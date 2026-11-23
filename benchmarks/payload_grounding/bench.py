@@ -70,7 +70,8 @@ Usage (repo root):
   uv run python benchmarks/payload_grounding/bench.py --summary benchmarks/payload_grounding/results/*.jsonl
 Output is resumable: rerunning the same --out continues where it stopped.
 """
-import argparse, base64, glob, io, json, os, random, re, statistics, sys, time, urllib.error, urllib.request
+import argparse, base64, glob, io, json, os, random, re, statistics, sys, threading, time, urllib.error, urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -942,7 +943,10 @@ def call_ollama(args, prompt, image=None, max_out=20):
 
 _gemini_keys_cache = []
 _gemini_disabled_keys = set()
+_gemini_permanent_bad_keys = set()
 _gemini_key_idx = 0
+_gemini_lock = threading.Lock()
+_file_lock = threading.Lock()
 
 
 def get_gemini_keys():
@@ -970,10 +974,12 @@ def get_gemini_keys():
 
 
 def get_active_gemini_keys():
-    all_keys = get_gemini_keys()
+    all_keys = [k for k in get_gemini_keys() if k not in _gemini_permanent_bad_keys]
+    if not all_keys:
+        raise RuntimeError("Tất cả Gemini API keys đều không hợp lệ (HTTP 400).")
     active = [k for k in all_keys if k not in _gemini_disabled_keys]
     if not active:
-        print(f"  ⚠️ Tất cả {len(all_keys)} Gemini API keys đều đã bị limit! Đang đợi 60s để reset hạn mức...", flush=True)
+        print(f"  ⚠️ Tất cả {len(all_keys)} Gemini API keys hợp lệ đều đã bị limit (429)! Đang đợi 60s để reset hạn mức...", flush=True)
         time.sleep(60)
         _gemini_disabled_keys.clear()
         active = all_keys
@@ -982,17 +988,23 @@ def get_active_gemini_keys():
 
 def get_next_gemini_key():
     global _gemini_key_idx
-    active = get_active_gemini_keys()
-    key = active[_gemini_key_idx % len(active)]
-    _gemini_key_idx += 1
-    return key
+    with _gemini_lock:
+        active = get_active_gemini_keys()
+        key = active[_gemini_key_idx % len(active)]
+        _gemini_key_idx += 1
+        return key
 
 
-def disable_gemini_key(key):
-    _gemini_disabled_keys.add(key)
-    remaining = [k for k in get_gemini_keys() if k not in _gemini_disabled_keys]
-    key_mask = f"...{key[-6:]}" if len(key) >= 6 else key
-    print(f"  🚫 [Gemini key {key_mask}] Bị Limit 429! Đã ghi nhớ và LOẠI BỎ KHỎI DANH SÁCH (còn lại {len(remaining)} keys hoạt động).", flush=True)
+def disable_gemini_key(key, reason="Bị Limit 429", permanent=False):
+    with _gemini_lock:
+        if permanent:
+            _gemini_permanent_bad_keys.add(key)
+        else:
+            _gemini_disabled_keys.add(key)
+        remaining = [k for k in get_gemini_keys() if k not in _gemini_disabled_keys and k not in _gemini_permanent_bad_keys]
+        key_mask = f"...{key[-6:]}" if len(key) >= 6 else key
+        status_txt = "Đã khóa vĩnh viễn" if permanent else "Đã tạm khóa"
+        print(f"  🚫 [Gemini key {key_mask}] {reason}! {status_txt} (còn lại {len(remaining)} keys hoạt động).", flush=True)
 
 
 def call_gemini(args, prompt, image=None, max_out=40):
@@ -1025,9 +1037,16 @@ def call_gemini(args, prompt, image=None, max_out=40):
         except urllib.error.HTTPError as e:
             last_err = e
             if e.code == 429:
-                disable_gemini_key(key)
+                disable_gemini_key(key, "Bị Limit 429", permanent=False)
                 time.sleep(0.5)
                 continue
+            elif e.code in (400, 403):
+                err_msg = e.read().decode('utf-8', errors='ignore')
+                if "free tier is not available" in err_msg.lower() or "api key not valid" in err_msg.lower() or "permission_denied" in err_msg.lower():
+                    disable_gemini_key(key, "Chưa bật Free Tier hoặc Key không hợp lệ", permanent=True)
+                    time.sleep(0.5)
+                    continue
+                raise RuntimeError(f"HTTP {e.code}: {err_msg[:300]}")
             elif e.code in (500, 503):
                 print(f"  [Gemini key {key_mask}] HTTP {e.code}, backoff {15 * (attempt + 1)}s", flush=True)
                 time.sleep(15 * (attempt + 1))
@@ -1063,7 +1082,7 @@ def run(args):
     call = call_ollama if args.backend == "ollama" else call_gemini
     # RAM guard / rests only matter when the model runs on this laptop
     local_model = args.backend == "ollama" and re.search(r"(127\.0\.0\.1|localhost):11434", args.ollama_url)
-    pause = args.pause if args.pause is not None else (2.5 if args.backend == "ollama" else 4.5)
+    pause = args.pause if args.pause is not None else (2.5 if args.backend == "ollama" else (1.0 if getattr(args, "workers", 1) > 1 else 4.5))
     modes = args.modes.split(",")
     steps = load_cases(args.steps)
     model_id = model_digest(args)
@@ -1071,57 +1090,84 @@ def run(args):
     for extra_file in args.also_done:  # results kept in another file (e.g. the Colab run) count as done
         done |= {(r["step"], r["mode"]) for r in map(json.loads, open(extra_file))}
     todo = [s for s in steps if any((s["id"], m) not in done for m in modes)]
-    print(f"{len(steps)} steps selected, {len(todo)} with work left; model {model_id}", flush=True)
-    with open(args.out, "a") as f:
+    print(f"{len(steps)} steps selected, {len(todo)} with work left; model {model_id} (workers={args.workers})", flush=True)
+
+    if args.out and os.path.dirname(args.out):
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+
+    def process_task(s, mode):
+        instr = s["instr"]
+        shot = Image.open(s["img"]).convert("RGB")
+        text, els = listing(mode, s)
+        extra = {}
+        if mode in OCR_MODES:
+            extra["ocr_ms"] = ocr_lines(s, mode in ("xml_ocr", "center_ocr", "xml_ocr_somU", "fused_icons_somU"))["ms"]
+        if mode in ("fused_icons_somU", "gapfill_somU", "gapfill_somU2", "gapfill_rel_somU2"):
+            extra["ocr_ms"] += detect_icons_v2(s)["ms"]
+        if mode in ("ocr_icons", "ocr_icons_som"):
+            extra["ocr_ms"] += detect_icons(s)["ms"]
+        if mode in ("ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid"):
+            extra["ocr_ms"] += detect_icons_v2(s)["ms"]
+        if mode == "2stage":
+            d = call(args, DESCRIBE, b64_jpeg(shot, 768), 150)
+            if pause:
+                time.sleep(pause)
+            r = call(args, decide_prompt(text, instr, d["reply"].strip()))
+            extra = dict(s1_wall=d["wall"], s1_in=d["in_tok"], s1_out=d["out_tok"])
+            r["wall"] += d["wall"]
+        else:
+            kind = IMAGE_MODES.get(mode)
+            img = (b64_jpeg(shot, 768) if kind == "shot"
+                   else som_image(s["img"], els) if kind == "som"
+                   else som_image(s["img"], [e for e in els if not e.get("text")]) if kind == "somU"
+                   else wire_text_image(s) if kind == "wiretext"
+                   else crop_sheet(s["img"], [e for e in els if not e.get("text")]) if kind == "crops"
+                   else som_image_v2(s["img"], [e for e in els if not e.get("text")]) if kind == "somU2"
+                   else wire_text_image_v2(s) if kind == "wire2"
+                   else wire_text_image_v2(s, paste_real=True) if kind == "hybrid"
+                   else ocr_hybrid_image(s, els) if kind == "ocrhybrid" else None)
+            r = call(args, decide_prompt(text, instr, ocr=mode in ("ocr_only", "ocr_shot", "ocr_clean"), mode=mode), img)
+        ok, idx, lab = evaluate(r["reply"], mode, s, els)
+        row = dict(step=s["id"], mode=mode, model=model_id, ok=ok, idx=idx, picked=lab,
+                   accept=s["accept"], n_els=len(els), **r, **extra)
+        with _file_lock:
+            with open(args.out, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                f.flush()
+            prefix = f"[{s['id']}] " if getattr(args, "workers", 1) > 1 else ""
+            print(f"  {prefix}{mode:13s} {'OK ' if ok else 'BAD'} {r['wall']:.2f}s in={r['in_tok']} "
+                  f"target={(s['accept'] or [s['id']])[0][:22]!r} picked={lab[:22]!r}", flush=True)
+        if pause:
+            time.sleep(pause)
+
+    if args.workers > 1:
+        task_queue = []
+        for s in todo:
+            for mode in modes:
+                if (s["id"], mode) not in done:
+                    task_queue.append((s, mode))
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            futures = [pool.submit(process_task, s, m) for s, m in task_queue]
+            try:
+                for fut in futures:
+                    fut.result()
+            except KeyboardInterrupt:
+                print("\nInterrupted by user, stopping pool...", flush=True)
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+    else:
         for bi in range(0, len(todo), args.batch):
             if bi and local_model:
                 print(f"-- rest {args.rest}s (RAM available {mem_available_gb():.1f} GB)", flush=True)
                 time.sleep(args.rest)
             for s in todo[bi: bi + args.batch]:
-                instr = s["instr"]
-                shot = Image.open(s["img"]).convert("RGB")
                 for mode in modes:
                     if (s["id"], mode) in done:
                         continue
                     if local_model and mem_available_gb() < 3:
                         print(f"STOP: only {mem_available_gb():.1f} GB RAM available", flush=True)
                         return
-                    text, els = listing(mode, s)
-                    extra = {}
-                    if mode in OCR_MODES:
-                        extra["ocr_ms"] = ocr_lines(s, mode in ("xml_ocr", "center_ocr", "xml_ocr_somU", "fused_icons_somU"))["ms"]
-                    if mode in ("fused_icons_somU", "gapfill_somU", "gapfill_somU2", "gapfill_rel_somU2"):
-                        extra["ocr_ms"] += detect_icons_v2(s)["ms"]
-                    if mode in ("ocr_icons", "ocr_icons_som"):
-                        extra["ocr_ms"] += detect_icons(s)["ms"]
-                    if mode in ("ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid"):
-                        extra["ocr_ms"] += detect_icons_v2(s)["ms"]
-                    if mode == "2stage":
-                        d = call(args, DESCRIBE, b64_jpeg(shot, 768), 150)
-                        time.sleep(pause)
-                        r = call(args, decide_prompt(text, instr, d["reply"].strip()))
-                        extra = dict(s1_wall=d["wall"], s1_in=d["in_tok"], s1_out=d["out_tok"])
-                        r["wall"] += d["wall"]
-                    else:
-                        kind = IMAGE_MODES.get(mode)
-                        img = (b64_jpeg(shot, 768) if kind == "shot"
-                               else som_image(s["img"], els) if kind == "som"
-                               else som_image(s["img"], [e for e in els if not e.get("text")]) if kind == "somU"
-                               else wire_text_image(s) if kind == "wiretext"
-                               else crop_sheet(s["img"], [e for e in els if not e.get("text")]) if kind == "crops"
-                               else som_image_v2(s["img"], [e for e in els if not e.get("text")]) if kind == "somU2"
-                               else wire_text_image_v2(s) if kind == "wire2"
-                               else wire_text_image_v2(s, paste_real=True) if kind == "hybrid"
-                               else ocr_hybrid_image(s, els) if kind == "ocrhybrid" else None)
-                        r = call(args, decide_prompt(text, instr, ocr=mode in ("ocr_only", "ocr_shot", "ocr_clean"), mode=mode), img)
-                    ok, idx, lab = evaluate(r["reply"], mode, s, els)
-                    f.write(json.dumps(dict(step=s["id"], mode=mode, model=model_id, ok=ok, idx=idx, picked=lab,
-                                            accept=s["accept"], n_els=len(els), **r, **extra),
-                                       ensure_ascii=False) + "\n")
-                    f.flush()
-                    print(f"  {mode:13s} {'OK ' if ok else 'BAD'} {r['wall']:.2f}s in={r['in_tok']} "
-                          f"target={(s['accept'] or [s['id']])[0][:22]!r} picked={lab[:22]!r}", flush=True)
-                    time.sleep(pause)
+                    process_task(s, mode)
 
 
 FAILURES = False
@@ -1202,6 +1248,8 @@ def main():
     ap.add_argument("--summary", nargs="*")
     ap.add_argument("--failures", action="store_true", help="with --summary: print the per-case matrix")
     ap.add_argument("--all", action="store_true", help="with --summary: include retired modes")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="Number of parallel worker threads (default: 2 for Gemini, 1 for Ollama)")
     args = ap.parse_args()
     if args.summary:
         global FAILURES, SHOW_MODES
@@ -1211,6 +1259,8 @@ def main():
     if args.modes == "all":
         args.modes = ",".join(ALL_MODES)
     args.model = args.model or ("qwen3-vl:4b-16k" if args.backend == "ollama" else "gemini-3.5-flash-lite")
+    if args.workers is None:
+        args.workers = 2 if args.backend == "gemini" else 1
     if args.backend == "gemini":
         args.rest = 0
     run(args)

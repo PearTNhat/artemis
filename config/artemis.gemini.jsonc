@@ -7,13 +7,16 @@
   // 1. Global Default Model (Applied to all sub-agents unless overridden below)
   // ------------------------------------------------------------------------------
   "default": {
-    "provider": "google",
-    "model": "gemini-3.6-flash",
-    "thinking_level": "medium",
+    // Reasoning runs in the local Antigravity CLI (agy): no API key needed,
+    // one open agy conversation per task. Models: `agy models`.
+    "provider": "agy",
+    "model": "gemini-3.8-flash-low",
+    // When agy fails, fall back to the Gemini API (needs GEMINI/GOOGLE key).
+    // Gemini CLI mode: every node runs on agy, no API key. If the CLI call
+    // fails, retry on a stronger CLI model rather than the Gemini API.
     "fallback": {
-      "provider": "google",
-      "model": "gemini-3.5-flash",
-      "thinking_level": "medium"
+      "provider": "agy",
+      "model": "gemini-3.8-flash-medium"
     }
   },
 
@@ -43,8 +46,8 @@
     },
     "local-ollama": {
       "provider": "openai",
-      "model": "llama3.2-vision",
-      "fallback": { "provider": "openai", "model": "llama3.2-vision" }
+      "model": "qwen2.5vl:3b",
+      "fallback": { "provider": "openai", "model": "qwen2.5vl:3b" }
     }
   },
 
@@ -61,7 +64,6 @@
     "operator": {
       "thinking_level": "medium",
       "include_thoughts": true
-      // "max_tokens": 2048 // cap on the answer length
     },
 
     // 🎬 Video Analyzer: Multimodal screen recording verification and temporal analysis
@@ -69,13 +71,14 @@
     //  - Native Gemini Files API for Gemini models with Google API keys (long video file stream);
     //    Gemini 3.6+ Flash sub-agents use agentic video understanding by default (see video_analyzer.processing below)
     //  - Universal Multi-Model Engine for Claude 3.5/3.7, GPT-4o, OpenRouter, Vertex AI (dynamic keyframe extraction + multimodal tool calling)
-    "video_analyzer": {},
+    "video_analyzer": { "provider": "google", "model": "gemini-3.5-flash" },
 
     // 👁️ Object Detector & Explorer (Flash Mode): Visual coordinates grounding and bounding boxes
     // CRITICAL REQUIREMENT: Standard LLMs (including standard Gemini Flash, GPT-4o, Claude 3.7) lack sub-pixel spatial coordinate fine-tuning.
     // To achieve accurate [x, y] point and bounding box localization, this node MUST use specialized Gemini ER (Embodied Reasoning / Robotics) models:
     // e.g., "gemini-robotics-er-2-preview". Non-ER models will fail spatial coordinate detection.
     "object_detector": {
+      "provider": "google",
       "model": "gemini-robotics-er-2-preview",
       "fallback": {
         "provider": "google",
@@ -92,15 +95,30 @@
     },
 
     // 📋 Summarizer: Aggregates step history and generates structured outcome
-    "summarizer": {},
+    // One-shot background helpers stay on the API (cheap, parallel).
+    // One-shot helpers: "agy_oneshot" = one independent `agy -p` run per call.
+    "summarizer": { "provider": "agy_oneshot", "model": "gemini-3.8-flash-low" },
 
     // 🔽 Hopper: Fast lightweight package name locator
     "hopper": {
-      "model": "gemini-3.5-flash-lite",
-      "fallback": {
-        "provider": "google",
-        "model": "gemini-3.1-flash-lite"
-      }
+      "provider": "agy_oneshot",
+      "model": "gemini-3.8-flash-low",
+      "fallback": { "provider": "agy_oneshot", "model": "gemini-3.8-flash-medium" }
+    },
+
+    // 🛡️ Pro pre-execution pixel safety net and planner milestone review.
+    // On the CLI each check is one `agy -p` run (~6-10 s per vetted action).
+    "validator_pixel_safety_net": {
+      "provider": "agy_oneshot",
+      "model": "gemini-3.8-flash-low",
+      "temperature": 0.0,
+      "fallback": { "provider": "agy_oneshot", "model": "gemini-3.8-flash-medium" }
+    },
+    "planner_validation": {
+      "provider": "agy_oneshot",
+      "model": "gemini-3.8-flash-low",
+      "temperature": 0.0,
+      "fallback": { "provider": "agy_oneshot", "model": "gemini-3.8-flash-medium" }
     },
 
     // 📝 Outputter: Synthesizes execution trace into final output report
@@ -140,19 +158,38 @@
     // Execution: Observe-Think-Act single LLM reactive loop without graph overhead.
     "flash": {
       "max_turns": 0, // Maximum reactive turns before stopping (0 = unlimited; history is bounded by transcript compression, not by a turn cap)
-      "explorer_mode": "flash", // Explorer tier for the Flash runner: 'flash' | 'pro' | 'ultra' (see top-level "explorer")
-      // 🖼️ Screenshot sent to the AI each turn (only the AI's copy)
+      "explorer_mode": "flash", // 'flash' grounds with the ER model (object_detector, Gemini API; called only on ask_explorer) Explorer tier for the Flash runner: 'flash' | 'pro' | 'ultra' (see top-level "explorer")
+      "fast_burst": true, // Execute consecutive actions in multi-action turns without intermediate screen captures
+      // 🖼️ Screenshot sent to the AI each turn (only the AI's copy; OCR/guards/traces keep the original)
+      // Coordinates are 0-1000 normalized, so shrinking changes none. Never blurred (Lanczos downscale).
+      // Measured on trace screenshots: 1280 q75 → ~76 KB vs ~203 KB original (-63%), UI text incl. Vietnamese tones still sharp.
       "model_image": {
-        "max_side": 1280, // Gemini bills a fixed ~1078 tokens/image at any size; a smaller image only shrinks the upload (1280 q75 ≈ 112 KB)
+        "max_side": 1280, // longest side in px; 0 = send the original
         "jpeg_quality": 75
       },
-      "element_list": "compact", // UI list: 'compact' (lean, lists unlabeled icons) | 'full'
+      // 🔤 Local OCR (ONNX Runtime on this PC: RapidOCR detector + PaddleOCR Latin v5 recognizer)
+      // Reads the screenshot the phone already sends (no extra transfer), ~0.5 s/screen on CPU.
+      // OCR lines appear in the UI list as "[n] ocr \"...\"" (compact) so the AI can target them by index.
+      // English + basic accents; Vietnamese hook/dot-below tones need a Vietnamese rec model (rec_model_path).
+      "ocr": {
+        "mode": "auto", // 'off' | 'auto' (only when the accessibility tree is poor: games, canvas, WebView) | 'always' (also banners/images; +~0.5 s per observation)
+        "min_xml_labels": 5, // 'auto': run OCR when fewer labeled app elements than this are visible
+        "threads": 4 // ONNX Runtime CPU threads (more is slower on hybrid P/E-core CPUs)
+        // "rec_model_path": "/path/to/model.onnx", "rec_keys_path": "/path/to/dict.txt" // optional custom recognizer
+      },
+      // 📋 UI element list sent to the AI: 'compact' = no status bar, no default states,
+      // '[n] "text" l,t,r,b', plus unlabeled buttons/icons as '[n] (icon) l,t,r,b' (index-tappable).
+      // Measured on 3 trace screens: ~63% fewer characters than 'full' (the historical format).
+      "element_list": "compact",
+      // ⏹️ After the task is reported done: max seconds to wait for step summaries still being written
+      // (they only compress history for later turns). Was the 30 s shutdown flush; measured 18-30 s per run.
+      "final_summary_wait_s": 3,
       // 🧠 Step Summarizer: Asynchronous visual context compressor
       // Summarizes intermediate steps in background without blocking the runner,
       // replacing images only after strictly objective, high-density summaries are ready.
       "step_summarizer": {
         "enabled": true, // Whether background step summarization is active
-        "model": "gemini-3.5-flash-lite", // Lightweight model for fast background inference
+        "model": "agy:gemini-3.8-flash-low", // "agy:<model>" = Gemini CLI one-shot; a plain name = Gemini API
         "prune_history_xml": true // Prune outdated heavy XML trees from historical steps
       }
     },
@@ -253,7 +290,8 @@
         // call each); milestone closes are exempt, the hard line waives it.
         "min_steps": 3,
         "target_source_tokens": 2000,
-        "model": "gemini-3.6-flash",
+        // "agy:<model>" = Gemini CLI one-shot (no API quota); a plain name = Gemini API.
+        "model": "agy:gemini-3.8-flash-low",
         "max_chunks": 8
         // "max_eras": 8 // independent era cap; omitted = follows max_chunks
       },

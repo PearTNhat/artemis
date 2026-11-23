@@ -1,3 +1,8 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Payload Grounding Bench</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -114,12 +119,14 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
 @media (max-width: 420px) { .card { grid-template-columns: 96px minmax(0, 1fr); } .shot img { width: 96px; } }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
 </style>
+</head>
+<body>
 
 <div class="wrap">
   <header>
     <span class="eyebrow">ARTEMIS · benchmark chọn phần tử</span>
     <h1>Gửi gì cho model để bấm đúng và nhanh?</h1>
-    <p class="muted">Mỗi bài: một màn hình thật, một câu lệnh, một đáp án. Model trả về số thứ tự phần tử <code>{"index": N}</code>, code tự lấy toạ độ để bấm. Trang này giữ 6 cách gửi đáng so sánh (đã thử 19; wireframe, 2 tầng, list không ảnh, gộp OCR… đã loại vì không có lợi).</p>
+    <p class="muted">Mỗi bài: một màn hình thật, một câu lệnh, một đáp án. Model trả về số thứ tự phần tử <code>{"index": N}</code>, code tự lấy toạ độ để bấm. Trang này giữ các cách gửi đáng so sánh (đã thử hơn 30; wireframe, 2 tầng, list không ảnh, gộp OCR… đã loại vì không có lợi).</p>
     <div class="meta" id="meta">Đang tải…</div>
   </header>
 
@@ -127,13 +134,14 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
     <h2>Kết luận chính</h2>
     <div class="panel findings">
       <ul>
-        <li><b>Ảnh thật là bắt buộc.</b> Bỏ ảnh chỉ đúng khi đích có chữ; với icon, công tắc, nút "+" (không nhãn) thì gần như đoán mò.</li>
-        <li><b>Tốt nhất: list gọn + ảnh thật chỉ đánh số các phần tử không nhãn</b> (51/52, bài khó 33/34). Vẽ số lên mọi phần tử thì che chữ nên tụt ở bài có chữ; chỉ đánh số chỗ không có chữ thì giữ được cả hai.</li>
-        <li><b>Ảnh thật + list gọn</b> (cách Flash đang làm) 49/52. <b>Nhãn + tâm có giữ loại/trạng thái + ảnh</b> 48/52 nhưng ít token hơn ~200 và nhanh hơn ~0.45 s.</li>
-        <li><b>Wireframe có chữ</b> 44/52; thêm gợi ý “gần chữ nào” cho phần tử không nhãn (vd. công tắc gần “Sun, Sat”, nút + gần “PHỞ TÁI NẠM”) lên <b>46/52</b> — dùng khi không được gửi ảnh thật. Nhưng tốn token như ảnh thật, và nhiều app (vd. Grab) không khai ảnh trong cây UI nên không biết chỗ nào là ảnh.</li>
-        <li><b>OCR thiếu dữ kiện</b>: chỉ OCR thì 21/52 bài phần tử đúng không hề có trong list (icon, công tắc, nút "+"). Dò icon v2 + gợi ý gần chữ + ảnh chỉ đánh số icon nâng lên <b>35/52</b> (có đáp án 46/52) nhưng tổng ~3.5 s/lần. Không kèm ảnh thì nhiều icon thừa làm AI rối (19/52).</li>
-        <li><b>OCR nhiễu</b>: 35% dòng là chữ trong ảnh/banner/status bar. Lọc bằng độ tin cậy lại tệ hơn (17/52 so với 24/52) vì bỏ mất chữ tiếng Việt; vấn đề chính của OCR là thiếu icon và thiếu loại phần tử, không phải nhiễu.</li>
-        <li><b>Wireframe rỗng (40/52) đã xoá:</b> vốn đã trắng đen nhưng vẫn tốn token như ảnh thật (Ollama tính theo kích thước cố định), lại không có hình icon, chỉ lặp lại toạ độ đã có trong list. Vẽ khung &amp; số lên ảnh thật chỉ tốn thêm ~10 ms.</li>
+        <li><b>Với Qwen 4B, ảnh thật là bắt buộc.</b> Bỏ ảnh chỉ đúng khi đích có chữ (42/56); với icon, công tắc, nút "+" thì gần như đoán mò. Gemini Flash-Lite thì không ảnh vẫn 52/56 — xem phần so sánh model.</li>
+        <li><b>Mặc định nên dùng: list gọn + ảnh thật chỉ đánh số các phần tử không nhãn</b> (Qwen 51/56, Gemini 51/56, không cần OCR, ~2.4 s). Chỉ trượt khi phần tử không có trong cây (0/4).</li>
+        <li><b>Khi cây thiếu phần tử: thêm OCR/icon vào chỗ trống, chỉ dòng thêm vào có gợi ý quan hệ</b> — Qwen 51/56 (không có trong cây 3/4), Gemini <b>56/56</b>; tốn thêm ~0.7 s OCR nên dùng như bước dự phòng. Gợi ý cho dòng của cây bỏ đi không mất điểm mà bớt ~95 token.</li>
+        <li><b>Ảnh thật + list gọn</b> (cách Flash đang làm) 49/56. <b>Nhãn + tâm có giữ loại/trạng thái + ảnh</b> 48/56 nhưng ít token hơn ~200. Gợi ý bằng chữ (gần chữ / quan hệ) không giúp Qwen 4B (42–44/56 khi không ảnh); ghi số khoảng cách pixel cũng không giúp.</li>
+        <li><b>Wireframe có chữ</b> 44/56; thêm gợi ý “gần chữ nào” cho phần tử không nhãn (vd. công tắc gần “Sun, Sat”, nút + gần “PHỞ TÁI NẠM”) lên <b>47/56</b> — dùng khi không được gửi ảnh thật. Nhưng tốn token như ảnh thật, và nhiều app (vd. Grab) không khai ảnh trong cây UI nên không biết chỗ nào là ảnh.</li>
+        <li><b>OCR thiếu dữ kiện</b>: chỉ OCR thì 21/52 bài (52 bài cũ) phần tử đúng không hề có trong list (icon, công tắc, nút "+"). Dò icon v2 + gợi ý gần chữ + ảnh chỉ đánh số icon nâng lên <b>40/56</b> (có đáp án 50/56) nhưng tổng ~3.4 s/lần. Không kèm ảnh thì nhiều icon thừa làm AI rối (19/52, đo trên 52 bài cũ).</li>
+        <li><b>OCR nhiễu</b>: 35% dòng là chữ trong ảnh/banner/status bar. Lọc bằng độ tin cậy lại tệ hơn (17/52 so với 24/52, 52 bài cũ) vì bỏ mất chữ tiếng Việt; vấn đề chính của OCR là thiếu icon và thiếu loại phần tử, không phải nhiễu.</li>
+        <li><b>Wireframe rỗng (40/52, 52 bài cũ) đã xoá:</b> vốn đã trắng đen nhưng vẫn tốn token như ảnh thật (Ollama tính theo kích thước cố định), lại không có hình icon, chỉ lặp lại toạ độ đã có trong list. Vẽ khung &amp; số lên ảnh thật chỉ tốn thêm ~10 ms.</li>
         <li><b>Không có cây UI</b> (kiểu desktop): OCR + dò icon OpenCV còn kém xa; desktop nên đọc cây accessibility của hệ điều hành (Windows UIA, macOS AX).</li>
       </ul>
     </div>
@@ -141,14 +149,34 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
 
   <section>
     <h2>Kết quả theo cách gửi</h2>
-    <p class="muted">Đúng / tổng số bài. <b>Có đáp án</b> = số bài mà phần tử đúng có mặt trong list gửi đi (nếu không có thì AI không thể chọn đúng). Thời gian tính cho <b>1 lần chọn</b>: <b>Model</b> = trung vị thời gian gọi model (gồm ~0.5 s mạng tới Colab), <b>OCR</b> = OCR + dò icon trên CPU máy chạy test, <b>Tổng</b> = model + OCR (trung vị và trung bình trên 52 bài). Trung vị = giá trị ở giữa khi xếp 52 lần đo, ít bị ảnh hưởng bởi vài lần chậm bất thường. Token = token vào.</p>
+    <p class="muted">Đúng / tổng số bài. <b>Có đáp án</b> = số bài mà phần tử đúng có mặt trong list gửi đi (nếu không có thì AI không thể chọn đúng). Thời gian tính cho <b>1 lần chọn</b>: <b>Model</b> = trung vị thời gian gọi model (gồm ~0.5 s mạng tới Colab), <b>OCR</b> = OCR + dò icon trên CPU máy chạy test, <b>Tổng</b> = model + OCR (trung vị và trung bình trên 56 bài). Trung vị = giá trị ở giữa khi xếp 56 lần đo, ít bị ảnh hưởng bởi vài lần chậm bất thường. Token = token vào.</p>
     <div class="panel tablebox"><table id="summary"></table></div>
   </section>
 
   <section id="models" hidden>
-    <h2>So sánh model</h2>
-    <p class="muted">Cùng 52 bài, cùng cách gửi. Thời gian Gemini (gói miễn phí, gọi qua Internet) dao động theo hàng chờ, chỉ để tham khảo; token Gemini tính ảnh theo cách riêng (~258 token/ô 768 px).</p>
+    <h2>So sánh model: Qwen 4B ↔ Gemini Flash-Lite</h2>
+    <p class="muted">Cùng bài, cùng prompt, cùng ảnh, cùng cách chấm; chỉ tính những bài cả hai model đều đã chạy. Cột “Bài khó / Không nhãn / Không có trong cây” ghi <b>Qwen / Gemini / tổng</b>. “Chỉ Qwen đúng”, “Chỉ Gemini đúng” là mã bài (rê chuột để xem câu lệnh).</p>
     <div class="panel tablebox"><table id="modeltable"></table></div>
+    <div class="panel findings">
+      <b>Vì sao hai model khác nhau</b>
+      <ul>
+        <li><b>Gemini đọc được chữ, Qwen 4B thì không.</b> Không gửi ảnh, chỉ list nhãn + tâm: Gemini 52/56, Qwen 42/56. Chênh lệch nằm hết ở bài khó (34 so với 24) và phần tử không nhãn (16/16 so với 6/16): Gemini suy ra “(button) ở hàng thứ 3, bên phải” từ toạ độ, Qwen thì không. Vì vậy với Qwen <b>ảnh là bắt buộc</b>, với Gemini ảnh gần như chỉ để chắc thêm.</li>
+        <li><b>Gợi ý quan hệ chỉ có ích với model đủ lớn.</b> Cây + lấp chỗ trống + gợi ý quan hệ cho dòng thêm vào: Gemini <b>56/56</b>, Qwen 51/56 (bằng bản gợi ý “gần chữ”). Ví dụ <code>tree_03</code>: gợi ý cũ ghi hai icon đều “near CÀPHÊ”, gợi ý mới ghi <code>[top bar, right]</code> — Gemini chọn đúng [45], Qwen vẫn chọn [50] như cũ.</li>
+        <li><b>Qwen bị kéo bởi dòng OCR thêm vào.</b> <code>case_16</code>: OCR dò thêm một icon <code>[72]</code> nằm ngay trong hàng kết quả cần bấm — Qwen chọn icon đó, Gemini vẫn chọn đúng dòng chữ [7]. Lấp chỗ trống cứu được phần tử không có trong cây (0/4 → 3/4) nhưng với model nhỏ thì phải lọc icon nằm <i>bên trong</i> phần tử đã có của cây.</li>
+        <li><b>Qwen chọn khung chứa thay cho đáp án.</b> <code>case_03</code>: Qwen chọn <code>[27] (button) … (may be occluded)</code> — khung chứa nằm dưới dòng “Meet at lobby” — ở mọi cách có gợi ý; Gemini chọn đúng.</li>
+        <li><b>Bài mà cả hai đều đúng như nhau:</b> list gọn + ảnh đánh số phần tử không nhãn — 51 và 51. Đây là cách ổn định nhất nếu chưa biết model nào sẽ chạy.</li>
+      </ul>
+    </div>
+    <div class="panel findings">
+      <b>Những chỗ dễ đọc sai khi so sánh</b>
+      <ul>
+        <li><b>Thời gian Gemini không so được giữa các lần chạy.</b> “List gọn + ảnh đánh số” trung vị 4.05 s, bản v2 chỉ 1.59 s — cùng ~1913 token, chỉ khác ngày chạy (hàng chờ gói miễn phí, mạng). Muốn so tốc độ phải chạy các cách gửi xen kẽ trong cùng một lần.</li>
+        <li><b>Thời gian Qwen gồm ~0.5 s mạng tới Colab T4</b> và một số cách gửi có bài chạy ở máy local (cùng model, cùng digest). So tốc độ giữa các cách gửi của Qwen thì được, so với máy chủ Qwen của công ty thì không.</li>
+        <li><b>Token hai bên bằng nhau</b> (~1060 token/ảnh ở cả hai), nên chênh thời gian không phải do khác số token.</li>
+        <li><b>Chênh 1–2 bài trên 56 là dao động.</b> Vd. Qwen “list gọn + ảnh đánh số” 51 và bản v2 49 chỉ khác cách vẽ số, đổi kết quả ở <code>case_03</code>, <code>hard_13</code>. Chỉ tin chênh lệch từ ~4 bài trở lên, hoặc chạy lặp lại.</li>
+        <li><b>“Không có trong cây” chỉ có 4 bài</b>: 3/4 so với 4/4 chưa đủ để kết luận; cần thêm bài loại này.</li>
+      </ul>
+    </div>
   </section>
 
   <section id="ocrgap">
@@ -227,8 +255,11 @@ function renderModels() {
   if (!D.compare || !D.compare.length) return;
   $("#models").hidden = false;
   const other = D.compare[0].model;
-  $("#modeltable").innerHTML = `<thead><tr><th>Cách gửi</th><th>${esc(D.model.split("@")[0])} đúng</th><th>${esc(other)} đúng</th><th>${esc(D.model.split("@")[0])} thời gian</th><th>${esc(other)} thời gian</th><th>Token (qwen / gemini)</th></tr></thead><tbody>` +
-    D.compare.map((r) => `<tr><td>${esc(r.label)}</td><td class="${r.main_ok >= r.ok ? "cell-good" : ""}">${r.main_ok}/${r.main_n}</td><td class="${r.ok >= r.main_ok ? "cell-good" : ""}">${r.ok}/${r.n}</td><td>${r.main_wall.toFixed(2)} s</td><td>${r.wall.toFixed(2)} s</td><td>${r.main_tok} / ${r.tok}</td></tr>`).join("") + "</tbody>";
+  const instr = Object.fromEntries(D.cases.map((c) => [c.id, c.instruction]));
+  const ids = (a) => a && a.length ? a.map((i) => `<code title="${esc(instr[i])}">${esc(i)}</code>`).join(" ") : "—";
+  const tg = (r, t) => r.by_tag && r.by_tag[t] ? r.by_tag[t].join(" / ") : "–";
+  $("#modeltable").innerHTML = `<thead><tr><th>Cách gửi</th><th>${esc(D.model.split("@")[0])} đúng</th><th>${esc(other)} đúng</th><th>Bài khó</th><th>Không nhãn</th><th>Không có trong cây</th><th>Chỉ Qwen đúng</th><th>Chỉ Gemini đúng</th><th>Thời gian (qwen / gemini)</th><th>Token (qwen / gemini)</th></tr></thead><tbody>` +
+    D.compare.map((r) => `<tr><td>${esc(r.label)}</td><td class="${r.main_ok >= r.ok ? "cell-good" : ""}">${r.main_ok}/${r.main_n}</td><td class="${r.ok >= r.main_ok ? "cell-good" : ""}">${r.ok}/${r.n}</td><td>${tg(r, "hard")}</td><td>${tg(r, "unlabeled")}</td><td>${tg(r, "not_in_tree")}</td><td style="white-space:normal">${ids(r.main_only)}</td><td style="white-space:normal">${ids(r.other_only)}</td><td>${r.main_wall.toFixed(2)} / ${r.wall.toFixed(2)} s</td><td>${r.main_tok} / ${r.tok}</td></tr>`).join("") + "</tbody>";
 }
 function renderOcrTotals() {
   const t = D.ocr_totals, s = t.status, pct = (a, b) => b ? Math.round(100 * a / b) + "%" : "–";
@@ -266,18 +297,18 @@ function showScreen(s) {
   const sc = D.screens[s];
   const v = (file, title, note) => `<div class="view"><img src="img/${s}_${file}.jpg" alt="${esc(title)} — ${s}" loading="lazy"><b>${title}</b><span>${note}</span></div>`;
   $("#views").innerHTML =
-    v("real", "Ảnh thật", "Gửi kèm ở các cách “Ảnh”, “NT+Ảnh”, “OCR+Ảnh”.") +
+    v("real", "Ảnh thật (nguyên bản)", "Gửi kèm ở các cách “Ảnh thật+Cây”, “Ảnh thật+NhãnTâm”, “Ảnh thật+OCR”.") +
     v("wiretext", "Wireframe v2 có chữ", "Trắng đen, chữ vừa khung, loại/trạng thái cho phần tử không nhãn; vùng ảnh tìm trên ảnh chụp ghi [image].") +
     v("hybrid", "Wireframe lai", "Chữ vẽ lại; icon, công tắc, ảnh dán pixel thật (khung đỏ + số). Cách “WF lai”.") +
     v("ocrhybrid", "Không cây UI: OCR lai", "Chữ OCR vẽ lại; icon dò được dán pixel thật. Cách “OCR lai”.") +
-    v("crops", "Chỉ ảnh cắt phần tử không nhãn", "Không gửi cả màn hình, chỉ các ô nhỏ có số. Cách “Gọn+Cắt”.") +
-    v("gapfill", "XML + lấp chỗ trống + đánh số v2", "Ảnh thật; đánh số phần tử không nhãn của cây + icon cây thiếu; 1 icon 1 số, số đặt ngoài khung. Cách tốt nhất.") +
-    v("somU", "Ảnh thật, chỉ đánh số phần tử không nhãn", "Không che chữ. Cách “Gọn+SốKN” — đúng nhiều nhất.") +
-    v("ocr_icons", "Không cây UI: OCR + dò icon v2", "Chỉ đánh số các icon OpenCV tìm được; chữ lấy từ OCR. Cách “OCR+Icon2+Số”.");
+    v("crops", "Chỉ ảnh cắt phần tử không nhãn", "Không gửi cả màn hình, chỉ các ô nhỏ có số. Cách “Ảnh cắt+Cây”.") +
+    v("gapfill", "Ảnh SoM v2 (Đánh số ngoài khung)", "Ảnh thật đánh số phần tử không nhãn của cây + icon cây thiếu; 1 icon 1 số ngoài khung. Dùng cho các cách Lấp trống.") +
+    v("somU", "Ảnh SoM v1 (Chỉ phần tử không nhãn)", "Không che chữ. Đánh số các control không nhãn có sẵn trong cây.") +
+    v("ocr_icons", "Không cây UI: OCR + dò icon v2", "Chỉ đánh số các icon OpenCV tìm được; chữ lấy từ OCR. Cách “Ảnh SoM+OCR+Icon2”.");
   $("#lists").innerHTML =
-    `<div><b>List gọn (Flash hiện tại) — ${sc.n_elements} phần tử, ${sc.n_unlabeled} không nhãn</b><pre>${esc(sc.list_compact)}</pre></div>` +
-    `<div><b>XML + lấp chỗ trống (list gọn + gợi ý gần chữ; các dòng sau dòng ${sc.n_compact} là phần THÊM vì cây thiếu)</b><pre>${esc(sc.list_gapfill)}</pre></div>` +
-    `<div><b>Nhãn + tâm (giữ loại) + gợi ý “gần chữ nào”</b><pre>${esc(sc.list_center)}</pre></div>` +
+    `<div><b>Cây UI list gọn (Flash hiện tại) — ${sc.n_elements} phần tử, ${sc.n_unlabeled} không nhãn</b><pre>${esc(sc.list_compact)}</pre></div>` +
+    `<div><b>Cây UI + Lấp chỗ trống (gốc ${sc.n_compact} phần tử; các dòng sau dòng ${sc.n_compact} là THÊM do OCR/Icon bổ sung)</b><pre>${esc(sc.list_gapfill)}</pre></div>` +
+    `<div><b>Nhãn + tâm (giữ loại) + gợi ý “gần chữ nào” (Không ảnh)</b><pre>${esc(sc.list_center)}</pre></div>` +
     `<div><b>Không cây UI: OCR + dò icon v2 (so với list gọn ở trên)</b><pre>${esc(sc.ocr_icons)}</pre></div>`;
   renderCompare(sc);
 }
@@ -318,3 +349,5 @@ function renderCases() {
 document.addEventListener("click", (e) => { const b = e.target.closest(".linkish"); if (!b) return; showScreen(b.dataset.s);
   document.getElementById("viewer").scrollIntoView({ behavior: "smooth", block: "start" }); });
 </script>
+</body>
+</html>
