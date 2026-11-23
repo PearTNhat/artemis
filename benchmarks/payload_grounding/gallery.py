@@ -15,6 +15,7 @@ sys.path.insert(0, HERE)
 import bench as B  # noqa: E402
 
 MODE_INFO = [  # (mode, short chip, label, group)
+    ("gapfill_rel_somU2", "XML+lấp trống+Số2+QH", "Như “XML+lấp trống+Số2” nhưng chỉ dòng OCR/icon thêm vào có gợi ý quan hệ (chứa / cùng hàng / trên / vùng màn hình), dòng của cây không gợi ý", "Có cây UI, có ảnh"),
     ("gapfill_somU2", "XML+lấp trống+Số2", "Cây UI + chỉ thêm OCR/icon ở chỗ cây thiếu + ảnh đánh số v2 (1 icon 1 số, số nhỏ đặt ngoài khung)", "Có cây UI, có ảnh"),
     ("compact_somU2", "Gọn+Số2", "List gọn + ảnh đánh số v2 (1 icon 1 số, số nhỏ đặt ngoài khung)", "Có cây UI, có ảnh"),
     ("gapfill_somU", "XML+lấp trống", "Cây UI giữ nguyên + chỉ thêm OCR/icon ở chỗ cây thiếu (ngoài mọi phần tử, ngoài vùng ảnh) + ảnh đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
@@ -34,6 +35,7 @@ MODE_INFO = [  # (mode, short chip, label, group)
     ("somU_near", "Gọn+SốKN+gần", "List gọn có gợi ý “gần chữ nào” + ảnh đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
     ("2stage", "2 tầng", "2 tầng: mô tả ảnh → quyết định bằng chữ", "Có cây UI, có ảnh"),
     ("list_compact", "Gọn", "List gọn, không ảnh", "Có cây UI, không ảnh"),
+    ("center2_rel", "NT2+QH", "Nhãn + tâm (giữ loại) + gợi ý quan hệ (chứa / cùng hàng, trái-phải / trên-dưới / vùng màn hình), không ảnh", "Có cây UI, không ảnh"),
     ("center2_near", "NT2+gần", "Nhãn + tâm (giữ loại) + gợi ý “gần chữ nào”, không ảnh", "Có cây UI, không ảnh"),
     ("center2", "NT2", "Nhãn + tâm (giữ loại/trạng thái), không ảnh", "Có cây UI, không ảnh"),
     ("list_center", "NT", "Nhãn + tâm (bản cũ, mất loại), không ảnh", "Có cây UI, không ảnh"),
@@ -162,7 +164,8 @@ def main():
                                                             "ocr_icons_som", "ocr2_shot", "ocr2_crops",
                                                             "compact_crops", "wire2_near", "wire_near",
                                                             "wire_hybrid", "ocr_hybrid", "xml_ocr_somU",
-                                                            "gapfill_somU", "gapfill_somU2", "compact_somU2"}) - {"ocr_only", "ocr_clean", "ocr2_near"}
+                                                            "gapfill_somU", "gapfill_somU2", "compact_somU2",
+                                                            "gapfill_rel_somU2", "center2_rel"}) - {"ocr_only", "ocr_clean", "ocr2_near"}
     modes = [m for m in MODE_INFO if (keep is None or m[0] in keep) and any((c["id"], m[0]) in res for c in cases)]
 
     # images per screen

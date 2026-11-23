@@ -36,6 +36,9 @@ Modes (all answer {"index": N} over the Flash element list):
                 pixels, text redrawn; + compact list with near hints
   ocr_hybrid    no tree: OCR text redrawn + detected icons as REAL pixels, all tagged; + ocr2_near list
   xml_ocr_somU  tree fused with OCR (as Flash does) + near hints + screenshot marking unlabeled elements
+  center2_rel   center2 + structural relation hints instead of "near" (contains "X" / same row as "X",
+                right of it / above "X" / screen zone), no pixel numbers, no image
+  gapfill_rel_somU2  gap-fill + marks v2, relation hints ONLY on the added OCR/icon lines
   compact_somU2 / gapfill_somU2  same lists, marks v2: one index per icon, small tags placed outside the box
   gapfill_somU  tree list unchanged + ONLY OCR lines / detected icons outside every tree element and
                 outside pictures (what the app left out of the tree) + unlabeled-only marked screenshot
@@ -75,14 +78,14 @@ sys.path.insert(0, REPO)
 
 ALL_MODES = ["shot768", "2stage", "list_full", "list_compact", "list_center", "list_label",
              "center_som", "center_shot", "center2", "center2_shot", "compact_somU",
-             "center2_somU", "wire_text", "center2_near", "somU_near", "wire_near", "wire2_near", "wire_hybrid", "xml_ocr_somU", "fused_icons_somU", "gapfill_somU", "compact_somU2", "gapfill_somU2",
+             "center2_somU", "wire_text", "center2_near", "somU_near", "wire_near", "wire2_near", "wire_hybrid", "xml_ocr_somU", "fused_icons_somU", "gapfill_somU", "compact_somU2", "gapfill_somU2", "center2_rel", "gapfill_rel_somU2",
              "compact_crops", "ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "xml_ocr", "center_ocr",
              "ocr_icons", "ocr_icons_som"]
 # Default set: the ones worth running. The others stay runnable with --modes (and their old
 # results stay in results/*.jsonl) but proved useless: wireframe, 2-stage, no-image lists,
 # OCR fusion, and the old label+center that dropped role/state hints.
 CORE_MODES = ["shot768", "compact_somU", "gapfill_somU2", "center2_shot", "wire_hybrid", "center2_near", "ocr2_somU"]
-OCR_MODES = ("gapfill_somU", "gapfill_somU2", "xml_ocr_somU", "fused_icons_somU", "ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
+OCR_MODES = ("gapfill_somU", "gapfill_somU2", "gapfill_rel_somU2", "xml_ocr_somU", "fused_icons_somU", "ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
 NO_TREE_MODES = ("ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "ocr_icons", "ocr_icons_som")  # graded against the tree
 IMAGE_MODES = {"shot768": "shot", "ocr_shot": "shot",
                "center_som": "som", "ocr_icons_som": "som", "center_shot": "shot", "center2_shot": "shot",
@@ -90,7 +93,7 @@ IMAGE_MODES = {"shot768": "shot", "ocr_shot": "shot",
                "wire_near": "wiretext", "ocr2_somU": "somU", "ocr2_shot": "shot", "ocr2_crops": "crops",
                "compact_crops": "crops", "wire2_near": "wire2", "wire_hybrid": "hybrid", "ocr_hybrid": "ocrhybrid",
                "xml_ocr_somU": "somU", "fused_icons_somU": "somU", "gapfill_somU": "somU",
-               "compact_somU2": "somU2", "gapfill_somU2": "somU2"}
+               "compact_somU2": "somU2", "gapfill_somU2": "somU2", "gapfill_rel_somU2": "somU2"}
 DESCRIBE = ("Describe this Android screen in at most 60 words: app/screen name, main sections, "
             "and any icon-only buttons with their position and look.")
 norm = lambda t: " ".join((t or "").lower().split())
@@ -362,6 +365,59 @@ def add_near_hints(text, els, screen_h):
             line += f' near "{hints[int(m[1])]}"'
         out.append(line)
     return "\n".join(out)
+
+def relation_hint(e, labeled, W, H):
+    """Structural relation of an unlabeled element to text, no pixel numbers:
+    contains "X" > same row as "X", left/right of it > above/below "X" (caption) > screen zone."""
+    x1, y1, x2, y2 = e["bounds"]
+    cx, cy = e["center"]
+    zone_v = "top bar" if cy < 0.12 * H else "bottom bar" if cy > 0.88 * H else ""
+    zone_h = "left" if cx < W / 3 else "right" if cx > 2 * W / 3 else "center"
+    zone = f"{zone_v}, {zone_h}" if zone_v else ""
+    inside = [t for t in labeled if x1 <= t["center"][0] <= x2 and y1 <= t["center"][1] <= y2]
+    if inside:
+        rel = f'contains "{min(inside, key=lambda t: t["bounds"][1])["text"][:35]}"'
+        return f"{rel}; {zone}" if zone else rel
+    row = [t for t in labeled if min(y2, t["bounds"][3]) - max(y1, t["bounds"][1]) > 0.5 * min(y2 - y1, t["bounds"][3] - t["bounds"][1])]
+    if row:
+        t = min(row, key=lambda t: abs(t["center"][0] - cx))
+        side = "right of it" if cx > t["center"][0] else "left of it"
+        rel = f'same row as "{t["text"][:35]}", {side}'
+        return f"{rel}; {zone}" if zone else rel
+    reach = 1.2 * (x2 - x1)
+    below = [t for t in labeled if t["bounds"][1] >= y2 - 5 and t["bounds"][1] - y2 < 0.12 * H
+             and t["bounds"][0] - reach <= cx <= t["bounds"][2] + reach]
+    if below:
+        t = min(below, key=lambda t: (t["bounds"][1], abs(t["center"][0] - cx)))
+        rel = f'above "{t["text"][:35]}"'
+        return f"{rel}; {zone}" if zone else rel
+    above = [t for t in labeled if t["bounds"][3] <= y1 + 5 and y1 - t["bounds"][3] < 0.12 * H
+             and t["bounds"][0] - reach <= cx <= t["bounds"][2] + reach]
+    if above:
+        t = min(above, key=lambda t: (-t["bounds"][3], abs(t["center"][0] - cx)))
+        rel = f'below "{t["text"][:35]}"'
+        return f"{rel}; {zone}" if zone else rel
+    return zone or ""
+
+
+def add_rel_hints(text, els, W, H, only=None):
+    """Append a structural relation to unlabeled elements (all, or only the indices in `only`)."""
+    labeled = [e for e in els if e.get("text")]
+    hints = {}
+    for e in els:
+        if e.get("text") or (only is not None and e["index"] not in only):
+            continue
+        h = relation_hint(e, labeled, W, H)
+        if h:
+            hints[e["index"]] = h
+    out = []
+    for line in text.splitlines():
+        m = re.match(r"\[(\d+)\]", line)
+        if m and int(m[1]) in hints:
+            line += f" [{hints[int(m[1])]}]"
+        out.append(line)
+    return "\n".join(out)
+
 
 def ocr_clean_lines(case):
     """Generic OCR noise filter: drop the status-bar band, low-confidence and 1-character lines."""
@@ -674,6 +730,15 @@ def listing(mode, s):
         for b in detect_icons(s)["boxes"]:
             els.append(dict(index=len(els) + 1, text="", bounds=b, center=[(b[0] + b[2]) // 2, (b[1] + b[3]) // 2]))
         return center_text(els, s["w"], s["h"]), els
+    if mode == "center2_rel":
+        text, els, _ = format_minimal_list_with_elements(s["ui"], s["w"], s["h"], compact=True)
+        return compact_to_center(add_rel_hints(text, els, s["w"], s["h"])), els
+    if mode == "gapfill_rel_somU2":
+        base_text, base_els, _ = format_minimal_list_with_elements(s["ui"], s["w"], s["h"], compact=True)
+        g_text, g_els = listing("gapfill_somU", s)
+        added = {e["index"] for e in g_els[len(base_els):]}
+        g_text = "\n".join(re.sub(r' near "[^"]*"$', "", l) for l in g_text.splitlines())  # drop near hints
+        return add_rel_hints(g_text, g_els, s["w"], s["h"], only=added), g_els
     if mode in ("compact_somU2", "gapfill_somU2"):
         return listing({"compact_somU2": "compact_somU", "gapfill_somU2": "gapfill_somU"}[mode], s)
     if mode == "gapfill_somU":
@@ -765,7 +830,7 @@ def decide_prompt(text, instr, desc=None, ocr=False, mode=""):
         what += ". The image shows the screen; each detected icon (graphic without text) has its box and [index] drawn in red"
     elif mode in ("center_som", "ocr_icons_som"):
         what += ". The image shows the screen with each element's box and [index] drawn in red"
-    elif mode in ("compact_somU", "center2_somU", "compact_somU2", "gapfill_somU2"):
+    elif mode in ("compact_somU", "center2_somU", "compact_somU2", "gapfill_somU2", "gapfill_rel_somU2"):
         what += ". The image shows the screen; elements without a text label have their box and [index] drawn in red"
     elif mode in ("wire_text", "wire_near", "wire2_near"):
         what += (". The image is a black/white wireframe of the screen: each element's box with its [index] "
@@ -1025,7 +1090,7 @@ def run(args):
                     extra = {}
                     if mode in OCR_MODES:
                         extra["ocr_ms"] = ocr_lines(s, mode in ("xml_ocr", "center_ocr", "xml_ocr_somU", "fused_icons_somU"))["ms"]
-                    if mode in ("fused_icons_somU", "gapfill_somU", "gapfill_somU2"):
+                    if mode in ("fused_icons_somU", "gapfill_somU", "gapfill_somU2", "gapfill_rel_somU2"):
                         extra["ocr_ms"] += detect_icons_v2(s)["ms"]
                     if mode in ("ocr_icons", "ocr_icons_som"):
                         extra["ocr_ms"] += detect_icons(s)["ms"]
