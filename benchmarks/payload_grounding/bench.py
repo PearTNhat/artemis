@@ -35,6 +35,11 @@ Modes (all answer {"index": N} over the Flash element list):
   wire_hybrid   wireframe v2 where the complex parts (unlabeled controls, picture regions) are the REAL
                 pixels, text redrawn; + compact list with near hints
   ocr_hybrid    no tree: OCR text redrawn + detected icons as REAL pixels, all tagged; + ocr2_near list
+  xml_ocr_somU  tree fused with OCR (as Flash does) + near hints + screenshot marking unlabeled elements
+  gapfill_somU  tree list unchanged + ONLY OCR lines / detected icons outside every tree element and
+                outside pictures (what the app left out of the tree) + unlabeled-only marked screenshot
+  fused_icons_somU  same + detected icons that lie outside every tree element and outside pictures,
+                added as (icon); catches buttons the app leaves out of the tree
   ocr2_shot     ocr2_near list + plain real screenshot
   ocr2_crops    ocr2_near list + a sheet of small cut-outs of the detected icons (no full screenshot)
   compact_crops Flash compact list + a sheet of cut-outs of the unlabeled elements (no full screenshot)
@@ -69,20 +74,21 @@ sys.path.insert(0, REPO)
 
 ALL_MODES = ["shot768", "2stage", "list_full", "list_compact", "list_center", "list_label",
              "center_som", "center_shot", "center2", "center2_shot", "compact_somU",
-             "center2_somU", "wire_text", "center2_near", "somU_near", "wire_near", "wire2_near", "wire_hybrid",
+             "center2_somU", "wire_text", "center2_near", "somU_near", "wire_near", "wire2_near", "wire_hybrid", "xml_ocr_somU", "fused_icons_somU", "gapfill_somU",
              "compact_crops", "ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "xml_ocr", "center_ocr",
              "ocr_icons", "ocr_icons_som"]
 # Default set: the ones worth running. The others stay runnable with --modes (and their old
 # results stay in results/*.jsonl) but proved useless: wireframe, 2-stage, no-image lists,
 # OCR fusion, and the old label+center that dropped role/state hints.
 CORE_MODES = ["shot768", "compact_somU", "center2_shot", "wire_near", "wire_hybrid", "center2_near", "ocr2_somU"]
-OCR_MODES = ("ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
+OCR_MODES = ("gapfill_somU", "xml_ocr_somU", "fused_icons_somU", "ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
 NO_TREE_MODES = ("ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "ocr_icons", "ocr_icons_som")  # graded against the tree
 IMAGE_MODES = {"shot768": "shot", "ocr_shot": "shot",
                "center_som": "som", "ocr_icons_som": "som", "center_shot": "shot", "center2_shot": "shot",
                "compact_somU": "somU", "center2_somU": "somU", "wire_text": "wiretext", "somU_near": "somU",
                "wire_near": "wiretext", "ocr2_somU": "somU", "ocr2_shot": "shot", "ocr2_crops": "crops",
-               "compact_crops": "crops", "wire2_near": "wire2", "wire_hybrid": "hybrid", "ocr_hybrid": "ocrhybrid"}
+               "compact_crops": "crops", "wire2_near": "wire2", "wire_hybrid": "hybrid", "ocr_hybrid": "ocrhybrid",
+               "xml_ocr_somU": "somU", "fused_icons_somU": "somU", "gapfill_somU": "somU"}
 DESCRIBE = ("Describe this Android screen in at most 60 words: app/screen name, main sections, "
             "and any icon-only buttons with their position and look.")
 norm = lambda t: " ".join((t or "").lower().split())
@@ -623,6 +629,52 @@ def listing(mode, s):
         for b in detect_icons(s)["boxes"]:
             els.append(dict(index=len(els) + 1, text="", bounds=b, center=[(b[0] + b[2]) // 2, (b[1] + b[3]) // 2]))
         return center_text(els, s["w"], s["h"]), els
+    if mode == "gapfill_somU":
+        # keep the tree list as is; add ONLY what the tree lacks: OCR lines and detected icons that lie
+        # outside every tree element, outside picture regions and below the status bar
+        text, els, _ = format_minimal_list_with_elements(s["ui"], s["w"], s["h"], compact=True)
+        pics = picture_regions(s, els)
+
+        def inside(p, b, m=0):
+            return b[0] - m <= p[0] <= b[2] + m and b[1] - m <= p[1] <= b[3] + m
+        top = 0.04 * s["h"]
+        extra = []
+        cands = [(o["text"], o["bounds"]) for o in ocr_elements(s)] + [("", bx) for bx in detect_icons_v2(s)["boxes"]]
+        for label, bx in cands:
+            c = ((bx[0] + bx[2]) // 2, (bx[1] + bx[3]) // 2)
+            if c[1] < top or any(inside(c, e["bounds"], 4) for e in els) or any(inside(c, r) for r in pics):
+                continue
+            if any(inside(c, x["bounds"]) for x in extra):
+                continue
+            extra.append(dict(index=len(els) + len(extra) + 1, text=label, bounds=bx, center=list(c)))
+        for e in extra:
+            b = e["bounds"]
+            tag = f'ocr "{e["text"]}"' if e["text"] else "(icon)"
+            text += (f"\n[{e['index']}] {tag} {b[0] * 1000 // s['w']},{b[1] * 1000 // s['h']},"
+                     f"{b[2] * 1000 // s['w']},{b[3] * 1000 // s['h']}")
+        els = els + extra
+        return add_near_hints(text, els, s["h"]), els
+    if mode in ("xml_ocr_somU", "fused_icons_somU"):
+        from artemis.utils.ocr_xml_fusion import fuse_ocr_with_xml
+        fused = fuse_ocr_with_xml(copy.deepcopy(s["ui"]), ocr_lines(s, True)["lines"], xml_first=True)
+        text, els, _ = format_minimal_list_with_elements(fused, s["w"], s["h"], compact=True)
+        if mode == "fused_icons_somU":  # icons the tree does not have (outside every element, not in a picture)
+            pics = picture_regions(s, els)
+            def inside(p, b, m=0):
+                return b[0] - m <= p[0] <= b[2] + m and b[1] - m <= p[1] <= b[3] + m
+            extra = []
+            for bx in detect_icons_v2(s)["boxes"]:
+                c = ((bx[0] + bx[2]) // 2, (bx[1] + bx[3]) // 2)
+                if any(inside(c, e["bounds"], 4) for e in els) or any(inside(c, r) for r in pics):
+                    continue
+                n = len(els) + len(extra) + 1
+                extra.append(dict(index=n, text="", bounds=bx, center=list(c)))
+            for e in extra:
+                b = e["bounds"]
+                text += (f"\n[{e['index']}] (icon) {b[0] * 1000 // s['w']},{b[1] * 1000 // s['h']},"
+                         f"{b[2] * 1000 // s['w']},{b[3] * 1000 // s['h']}")
+            els = els + extra
+        return add_near_hints(text, els, s["h"]), els
     if mode in ("xml_ocr", "center_ocr"):
         from artemis.utils.ocr_xml_fusion import fuse_ocr_with_xml
         fused = fuse_ocr_with_xml(copy.deepcopy(s["ui"]), ocr_lines(s, True)["lines"], xml_first=True)
@@ -776,19 +828,104 @@ def call_ollama(args, prompt, image=None, max_out=20):
     return out
 
 
+_gemini_keys_cache = []
+_gemini_disabled_keys = set()
+_gemini_key_idx = 0
+
+
+def get_gemini_keys():
+    global _gemini_keys_cache
+    if _gemini_keys_cache:
+        return _gemini_keys_cache
+    raw = os.environ.get("GEMINI_API_KEYS", os.environ.get("GEMINI_API_KEY", ""))
+    if not raw:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        for p in [os.path.join(repo_root, ".env"), os.path.join(repo_root, "artemis", ".env")]:
+            if os.path.exists(p):
+                for line in open(p):
+                    line = line.strip()
+                    if line.startswith("GEMINI_API_KEYS="):
+                        raw = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+                    elif line.startswith("GEMINI_API_KEY=") and not raw:
+                        raw = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if raw:
+                    break
+    _gemini_keys_cache = [k.strip() for k in raw.split(",") if k.strip()]
+    if not _gemini_keys_cache:
+        raise RuntimeError("No GEMINI_API_KEY or GEMINI_API_KEYS found in environment or .env file.")
+    return _gemini_keys_cache
+
+
+def get_active_gemini_keys():
+    all_keys = get_gemini_keys()
+    active = [k for k in all_keys if k not in _gemini_disabled_keys]
+    if not active:
+        print(f"  ⚠️ Tất cả {len(all_keys)} Gemini API keys đều đã bị limit! Đang đợi 60s để reset hạn mức...", flush=True)
+        time.sleep(60)
+        _gemini_disabled_keys.clear()
+        active = all_keys
+    return active
+
+
+def get_next_gemini_key():
+    global _gemini_key_idx
+    active = get_active_gemini_keys()
+    key = active[_gemini_key_idx % len(active)]
+    _gemini_key_idx += 1
+    return key
+
+
+def disable_gemini_key(key):
+    _gemini_disabled_keys.add(key)
+    remaining = [k for k in get_gemini_keys() if k not in _gemini_disabled_keys]
+    key_mask = f"...{key[-6:]}" if len(key) >= 6 else key
+    print(f"  🚫 [Gemini key {key_mask}] Bị Limit 429! Đã ghi nhớ và LOẠI BỎ KHỎI DANH SÁCH (còn lại {len(remaining)} keys hoạt động).", flush=True)
+
+
 def call_gemini(args, prompt, image=None, max_out=40):
     parts = [{"text": prompt}]
     if image:
         parts.insert(0, {"inline_data": {"mime_type": "image/jpeg", "data": image}})
-    r, wall = post(f"https://generativelanguage.googleapis.com/v1beta/models/{args.model}:generateContent",
-                   {"contents": [{"role": "user", "parts": parts}],
-                    "generationConfig": {"temperature": 0, "maxOutputTokens": max_out,
-                                         "thinkingConfig": {"thinkingLevel": "minimal"}}},
-                   {"x-goog-api-key": os.environ["GEMINI_API_KEY"]})
-    u = r.get("usageMetadata", {})
-    txt = "".join(p.get("text", "") for p in r["candidates"][0]["content"].get("parts", []))
-    return dict(reply=txt, wall=wall, in_tok=u.get("promptTokenCount", 0),
-                out_tok=u.get("candidatesTokenCount", 0), think_tok=u.get("thoughtsTokenCount", 0))
+    body = {
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": max_out,
+                             "thinkingConfig": {"thinkingLevel": "minimal"}}
+    }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{args.model}:generateContent"
+    keys = get_gemini_keys()
+    retries = max(6, len(keys) * 2)
+    last_err = None
+
+    for attempt in range(retries):
+        key = get_next_gemini_key()
+        headers = {"x-goog-api-key": key}
+        key_mask = f"...{key[-6:]}" if len(key) >= 6 else key
+        t0 = time.time()
+        try:
+            req = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json", **headers})
+            r = json.load(urllib.request.urlopen(req, timeout=300))
+            wall = time.time() - t0
+            u = r.get("usageMetadata", {})
+            txt = "".join(p.get("text", "") for p in r["candidates"][0]["content"].get("parts", []))
+            return dict(reply=txt, wall=wall, in_tok=u.get("promptTokenCount", 0),
+                        out_tok=u.get("candidatesTokenCount", 0), think_tok=u.get("thoughtsTokenCount", 0))
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code == 429:
+                disable_gemini_key(key)
+                time.sleep(0.5)
+                continue
+            elif e.code in (500, 503):
+                print(f"  [Gemini key {key_mask}] HTTP {e.code}, backoff {15 * (attempt + 1)}s", flush=True)
+                time.sleep(15 * (attempt + 1))
+                continue
+            raise RuntimeError(f"HTTP {e.code}: {e.read().decode()[:300]}")
+        except (urllib.error.URLError, ConnectionError) as e:
+            last_err = e
+            print(f"  [Gemini key {key_mask}] Connection error {e!r}, retry in 15s", flush=True)
+            time.sleep(15)
+    raise RuntimeError(f"Gave up after {retries} retries: {last_err}")
 
 
 def mem_available_gb():
@@ -840,7 +977,9 @@ def run(args):
                     text, els = listing(mode, s)
                     extra = {}
                     if mode in OCR_MODES:
-                        extra["ocr_ms"] = ocr_lines(s, mode in ("xml_ocr", "center_ocr"))["ms"]
+                        extra["ocr_ms"] = ocr_lines(s, mode in ("xml_ocr", "center_ocr", "xml_ocr_somU", "fused_icons_somU"))["ms"]
+                    if mode in ("fused_icons_somU", "gapfill_somU"):
+                        extra["ocr_ms"] += detect_icons_v2(s)["ms"]
                     if mode in ("ocr_icons", "ocr_icons_som"):
                         extra["ocr_ms"] += detect_icons(s)["ms"]
                     if mode in ("ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid"):

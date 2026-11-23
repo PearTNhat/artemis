@@ -15,6 +15,9 @@ sys.path.insert(0, HERE)
 import bench as B  # noqa: E402
 
 MODE_INFO = [  # (mode, short chip, label, group)
+    ("gapfill_somU", "XML+lấp trống", "Cây UI giữ nguyên + chỉ thêm OCR/icon ở chỗ cây thiếu (ngoài mọi phần tử, ngoài vùng ảnh) + ảnh đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
+    ("fused_icons_somU", "XML+OCR+Icon", "Cây UI + OCR gộp + icon ngoài cây (dò được) + ảnh đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
+    ("xml_ocr_somU", "XML+OCR", "Cây UI + OCR gộp (như Flash) + ảnh đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
     ("compact_somU", "Gọn+SốKN", "List gọn + ảnh thật chỉ đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
     ("shot768", "Ảnh", "Ảnh thật + list gọn (Flash hiện tại)", "Có cây UI, có ảnh"),
     ("center2_shot", "NT2+Ảnh", "Nhãn + tâm (giữ loại/trạng thái) + ảnh thật", "Có cây UI, có ảnh"),
@@ -48,7 +51,7 @@ MODE_INFO = [  # (mode, short chip, label, group)
 ]
 TAG_INFO = {
     "orig": "Bài gốc (đích có chữ)", "hard": "Bài khó viết tay", "icon": "Icon", "unlabeled": "Không nhãn",
-    "spatial": "Vị trí", "relation": "Quan hệ", "toggle": "Công tắc", "dup_label": "Chữ trùng", "labeled": "Có nhãn",
+    "spatial": "Vị trí", "relation": "Quan hệ", "not_in_tree": "Không có trong cây", "toggle": "Công tắc", "dup_label": "Chữ trùng", "labeled": "Có nhãn",
 }
 
 
@@ -155,7 +158,8 @@ def main():
     keep = None if args.all_modes else (set(B.CORE_MODES) | {"wire_text", "center2", "somU_near",
                                                             "ocr_icons_som", "ocr2_shot", "ocr2_crops",
                                                             "compact_crops", "wire2_near", "wire_near",
-                                                            "wire_hybrid", "ocr_hybrid"}) - {"ocr_only", "ocr_clean", "ocr2_near"}
+                                                            "wire_hybrid", "ocr_hybrid", "xml_ocr_somU",
+                                                            "fused_icons_somU", "gapfill_somU"}) - {"ocr_only", "ocr_clean", "ocr2_near"}
     modes = [m for m in MODE_INFO if (keep is None or m[0] in keep) and any((c["id"], m[0]) in res for c in cases)]
 
     # images per screen
@@ -185,7 +189,7 @@ def main():
 
     # summary per mode and per tag
     summary = []
-    tags = ["orig", "hard", "icon", "unlabeled", "spatial", "relation"]
+    tags = ["orig", "hard", "icon", "unlabeled", "spatial", "relation", "not_in_tree"]
     for m, short, label, group in modes:
         X = [res[(c["id"], m)] for c in cases if (c["id"], m) in res]
         cov = sum(1 for c in cases if (c["id"], m) in res and covered(m, c))
