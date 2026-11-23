@@ -154,12 +154,13 @@ def main():
         pb = [pe["bounds"][0] / c["w"], pe["bounds"][1] / c["h"], pe["bounds"][2] / c["w"], pe["bounds"][3] / c["h"]] if pe else None
         res[(r["step"], r["mode"])] = dict(ok=ok, idx=idx, picked=lab, pb=pb, wall=r["wall"],
                                            tok=r["in_tok"] + r.get("s1_in", 0), ocr=r.get("ocr_ms", 0) / 1000)
-    # retired from the page (still runnable): ocr_only, ocr_clean, ocr2_near (no-image OCR lists)
+    # retired from the page (still runnable): ocr_only, ocr_clean, ocr2_near (no-image OCR lists),
+    # xml_ocr_somU, fused_icons_somU (full OCR fusion adds noise; gapfill_somU merges only what the tree lacks)
     keep = None if args.all_modes else (set(B.CORE_MODES) | {"wire_text", "center2", "somU_near",
                                                             "ocr_icons_som", "ocr2_shot", "ocr2_crops",
                                                             "compact_crops", "wire2_near", "wire_near",
                                                             "wire_hybrid", "ocr_hybrid", "xml_ocr_somU",
-                                                            "fused_icons_somU", "gapfill_somU"}) - {"ocr_only", "ocr_clean", "ocr2_near"}
+                                                            "gapfill_somU"}) - {"ocr_only", "ocr_clean", "ocr2_near"}
     modes = [m for m in MODE_INFO if (keep is None or m[0] in keep) and any((c["id"], m[0]) in res for c in cases)]
 
     # images per screen
