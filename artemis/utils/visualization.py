@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import difflib
 import io
 import os
 import re
@@ -377,6 +378,238 @@ _ICON_MAX_AREA_FRACTION = 0.05
 _INPUT_MAX_AREA_FRACTION = 0.15
 _ICON_MIN_SIDE_PX = 12
 _MAX_ICON_LINES = 40
+#: A touchable node drawn after (on top of) other content and covering at least
+#: this share of the screen is a layer: bottom sheet, dialog, full-screen panel.
+_OVERLAY_MIN_AREA_FRACTION = 0.30
+#: Labeled nodes of the screen below that must lie under the layer before it
+#: counts as covering anything (one stray label is not a covered screen).
+_OVERLAY_MIN_COVERED_LABELS = 2
+#: A node at least this much inside the layer is hidden by it.
+_OVERLAY_HIDDEN_FRACTION = 0.8
+#: An unlabeled control this flat (share of screen height) and at least twice as
+#: wide as tall is a strip of a control cut off by an edge or a pinned bar.
+_CUT_OFF_MAX_HEIGHT_FRACTION = 0.025
+_CUT_OFF_EXEMPT_CLASSES = ("SeekBar", "Slider", "ProgressBar", "RatingBar")
+#: OCR lines added to fill gaps of the tree, at most.
+_MAX_GAP_OCR_LINES = 15
+_GAP_OCR_MIN_SCORE = 0.5
+_GAP_OCR_MARGIN_PX = 4
+
+
+def _node_label(node: dict[str, Any]) -> str:
+    return str(node.get("text") or node.get("content-desc") or node.get("hint") or "").strip()
+
+
+def find_overlay_hidden(
+    nodes: list[dict[str, Any]], width: int, height: int
+) -> tuple[set[int], list[tuple[int, int, int, int]]]:
+    """Nodes of the flat (pre-order) list that a later layer hides.
+
+    A layer is a touchable node covering at least ``_OVERLAY_MIN_AREA_FRACTION``
+    of the screen that comes after (is drawn on top of) at least
+    ``_OVERLAY_MIN_COVERED_LABELS`` labeled nodes lying inside it, and has labeled
+    content of its own. In pre-order an earlier node inside a later one cannot be
+    its descendant, so it belongs to the screen below. Returns the positions of
+    the hidden nodes and the layers' bounds. App-agnostic: only geometry, order
+    and the touchable flag are used.
+    """
+    screen = max(1, width * height)
+    boxes = [parse_bounds(n.get("bounds")) if isinstance(n, dict) else None for n in nodes]
+    hidden: set[int] = set()
+    layers: list[tuple[int, int, int, int]] = []
+
+    def inside_share(inner, outer) -> float:
+        il, it, ir, ib = inner
+        ol, ot, orr, ob = outer
+        iw, ih = min(ir, orr) - max(il, ol), min(ib, ob) - max(it, ot)
+        if iw <= 0 or ih <= 0:
+            return 0.0
+        return iw * ih / max(1, (ir - il) * (ib - it))
+
+    for pos, node in enumerate(nodes):
+        box = boxes[pos]
+        if not box or not isinstance(node, dict):
+            continue
+        if not (_is_truthy(node.get("clickable")) or _is_truthy(node.get("long-clickable"))):
+            continue
+        l, t, r, b = box
+        if (r - l) * (b - t) < screen * _OVERLAY_MIN_AREA_FRACTION:
+            continue
+        # Only the same app's own screen below: another window (keyboard, system
+        # UI, a heads-up from another app) may be listed earlier yet drawn on top.
+        package = node.get("package")
+        below = [
+            i for i in range(pos)
+            if boxes[i]
+            and nodes[i].get("package") == package
+            and inside_share(boxes[i], box) >= _OVERLAY_HIDDEN_FRACTION
+            # An earlier node enclosing the layer is its ancestor, not covered by it.
+            and inside_share(box, boxes[i]) < 0.95
+        ]
+        covered_labels = sum(1 for i in below if _node_label(nodes[i]))
+        if covered_labels < _OVERLAY_MIN_COVERED_LABELS:
+            continue
+        own_content = any(
+            boxes[j] and _node_label(nodes[j]) and inside_share(boxes[j], box) >= _OVERLAY_HIDDEN_FRACTION
+            for j in range(pos + 1, len(nodes))
+        )
+        if not own_content:
+            continue
+        hidden.update(below)
+        layers.append(box)
+    return hidden, layers
+
+
+def _ocr_box(res: dict[str, Any]) -> tuple[int, int, int, int] | None:
+    pts = res.get("position") or []
+    if len(pts) < 2:
+        return None
+    xs, ys = [int(p["x"]) for p in pts], [int(p["y"]) for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _text_key(text: str) -> str:
+    from artemis.utils.screen_diff import unaccent
+
+    return re.sub(r"[^0-9a-z]", "", unaccent(str(text or "")).lower())
+
+
+def verified_overlay_hidden(
+    nodes: list[dict[str, Any]],
+    ocr_results: list[dict[str, Any]],
+    width: int,
+    height: int,
+) -> set[int]:
+    """Positions of labeled nodes a layer on top really covers, checked against pixels.
+
+    The tree's order alone is not reliable (some dumps list a page's own list
+    container after its rows), so a candidate from :func:`find_overlay_hidden` is
+    hidden only when OCR does not read its label where the tree puts it. When a
+    sizable share of the candidates is still readable on screen, the "layer" is
+    not covering anything and nothing is hidden. Without OCR nothing is hidden.
+    """
+    candidates, _layers = find_overlay_hidden(nodes, width, height)
+    if not candidates or not ocr_results:
+        return set()
+    lines = [(box, _text_key(r.get("text"))) for r in ocr_results if (box := _ocr_box(r))]
+
+    def readable(node: dict[str, Any]) -> bool:
+        box = parse_bounds(node.get("bounds"))
+        key = _text_key(_node_label(node))
+        if not box or len(key) < 2:
+            return True  # cannot be checked: treat as visible (never hide on doubt)
+        l, t, r, b = box
+        for (ol, ot, orr, ob), okey in lines:
+            if ol >= r or orr <= l or ot >= b or ob <= t or not okey:
+                continue
+            if key in okey or okey in key:
+                return True
+            if difflib.SequenceMatcher(None, key, okey).ratio() >= 0.6:
+                return True
+        return False
+
+    labeled = [i for i in candidates if _node_label(nodes[i])]
+    if len(labeled) < _OVERLAY_MIN_COVERED_LABELS:
+        return set()
+    covered = [i for i in labeled if not readable(nodes[i])]
+    if len(covered) < _OVERLAY_MIN_COVERED_LABELS or len(covered) < 0.7 * len(labeled):
+        return set()
+    # The layer is confirmed: what cannot be read (icons, one-character labels)
+    # under it is covered too. Labels still readable on screen stay listed.
+    uncheckable = {
+        i for i in candidates
+        if len(_text_key(_node_label(nodes[i]))) < 2
+    }
+    return set(covered) | uncheckable
+
+
+def _required_markers(nodes: list[dict[str, Any]], width: int) -> tuple[set[int], set[int]]:
+    """Labels marked required by an asterisk (the universal UI convention).
+
+    Returns ``(required, stars)`` as sets of ``id(node)``: a label ending in "*"
+    is required; a standalone "*" node is folded into the nearest label on its
+    row just to its left (it then disappears from the list).
+    """
+    required: set[int] = set()
+    stars: set[int] = set()
+    labeled = [(n, parse_bounds(n.get("bounds"))) for n in nodes if _node_label(n)]
+    for n, box in labeled:
+        label = _node_label(n)
+        if label == "*" and box:
+            l, t, r, b = box
+            best, best_gap = None, width * 0.06
+            for m, mb in labeled:
+                if m is n or not mb or _node_label(m) == "*":
+                    continue
+                overlap = min(b, mb[3]) - max(t, mb[1])
+                gap = l - mb[2]
+                if overlap > 0.5 * min(b - t, mb[3] - mb[1]) and -2 <= gap < best_gap:
+                    best, best_gap = m, gap
+            if best is not None:
+                required.add(id(best))
+                stars.add(id(n))
+        elif label.endswith("*") and len(label) > 1:
+            required.add(id(n))
+    return required, stars
+
+
+def _is_cut_off_strip(element: dict[str, Any], height: int) -> bool:
+    """An unlabeled control showing only a flat strip (rest hidden past an edge or bar)."""
+    if any(k in str(element.get("class") or "") for k in _CUT_OFF_EXEMPT_CLASSES):
+        return False
+    left, top, right, bottom = element["bounds"]
+    h, w = bottom - top, right - left
+    return h < height * _CUT_OFF_MAX_HEIGHT_FRACTION and w >= 2 * h
+
+
+def gap_fill_ocr(
+    ocr_results: list[dict[str, Any]],
+    elements: list[dict[str, Any]],
+    width: int,
+    height: int,
+    normalize_bounds: Any = None,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Compact ``[n] ocr "text" l,t,r,b`` lines for OCR text outside every listed element.
+
+    Fills only the gaps of the accessibility tree (a floating button the tree does
+    not declare); text already covered by a listed element is left out, so the
+    list stays as the tree wrote it. ``ocr_results`` use the local OCR shape
+    (``text``, ``score``, ``position`` corner points in screen pixels).
+    """
+    if normalize_bounds is None:
+        def normalize_bounds(left, top, right, bottom):
+            return (f"{int(max(0, min(1000, left * 1000 / width)))},{int(max(0, min(1000, top * 1000 / height)))},"
+                    f"{int(max(0, min(1000, right * 1000 / width)))},{int(max(0, min(1000, bottom * 1000 / height)))}")
+    taken = [el["bounds"] for el in elements if el.get("bounds")]
+    m = _GAP_OCR_MARGIN_PX
+    idx = max((int(el.get("index") or 0) for el in elements), default=0) + 1
+    lines: list[str] = []
+    found: list[dict[str, Any]] = []
+    for res in ocr_results or []:
+        if len(found) >= _MAX_GAP_OCR_LINES:
+            break
+        text = str(res.get("text") or "").strip()
+        if len(text) < 2 or float(res.get("score") or 0) < _GAP_OCR_MIN_SCORE:
+            continue
+        pts = res.get("position") or []
+        if len(pts) < 2:
+            continue
+        xs, ys = [int(p["x"]) for p in pts], [int(p["y"]) for p in pts]
+        left, top, right, bottom = max(0, min(xs)), max(0, min(ys)), min(width, max(xs)), min(height, max(ys))
+        if right <= left or bottom <= top or bottom <= height * _STATUS_BAR_FRACTION:
+            continue
+        if any(left < r + m and right > l - m and top < b + m and bottom > t - m for l, t, r, b in taken):
+            continue
+        cx, cy = get_center_coordinates(left, top, right, bottom)
+        quoted = '"' + text.replace('"', "'") + '"'
+        lines.append(f"[{idx}] ocr {quoted} {normalize_bounds(left, top, right, bottom)}")
+        found.append({
+            "index": idx, "center": [cx, cy], "text": text, "bounds": [left, top, right, bottom],
+            "class": None, "resource_id": None, "is_ocr": True, "ocr_virtual": True,
+        })
+        taken.append((left, top, right, bottom))
+        idx += 1
+    return lines, found
 
 
 def _is_status_bar_node(node: dict[str, Any], height: int, bounds: tuple[int, int, int, int] | None) -> bool:
@@ -403,6 +636,7 @@ def format_minimal_list_with_elements(
     width: int = 1080,
     height: int = 2400,
     compact: bool = False,
+    hidden: set[int] | None = None,
 ) -> tuple[str, list[dict[str, Any]], list[str]]:
     """Formats fused XML hierarchy into a minimal list with sequence numbers,
 
@@ -414,6 +648,11 @@ def format_minimal_list_with_elements(
     prints ``checked``/``enabled`` only when they carry information (a checkable
     control, a disabled one), shortens the overlap warning, and appends unlabeled
     clickable controls (``[n] (icon) l,t,r,b``) so they can be addressed by index.
+
+    ``hidden`` (compact only): positions in ``fused_xml`` (after the status-bar
+    filter is NOT applied: positions refer to the list as passed in) of nodes a
+    layer on top verifiably covers (see :func:`verified_overlay_hidden`); they are
+    left out and summarized in one line.
     """
     lines = []
     elements = []
@@ -438,11 +677,19 @@ def format_minimal_list_with_elements(
     def quote(value: str) -> str:
         return '"' + value.replace('"', "'").replace("\n", " ") + '"'
 
+    # A bottom sheet / dialog drawn over the screen: what it verifiably covers
+    # cannot be tapped, so the compact list leaves it out and says so in one line.
+    overlay_hidden = 0
+    if compact and hidden:
+        hidden_pos = {i for i in hidden if 0 <= i < len(fused_xml)}
+        overlay_hidden = len(hidden_pos)
+        fused_xml = [n for i, n in enumerate(fused_xml) if i not in hidden_pos]
     if compact:
         fused_xml = [
             n for n in fused_xml
             if not _is_status_bar_node(n, height, parse_bounds(n.get("bounds")))
         ]
+    required_ids, star_ids = _required_markers(fused_xml, width) if compact else (set(), set())
 
     def is_duplicate(text_val: str, cx: int, cy: int) -> bool:
         text_clean = text_val.strip()
@@ -454,6 +701,8 @@ def format_minimal_list_with_elements(
         return False
 
     for node in fused_xml:
+        if id(node) in star_ids:
+            continue  # folded into its label as "(required)"
         text = node.get("text") or node.get("content-desc") or ""
         bounds_str = node.get("bounds")
         bounds = parse_bounds(bounds_str)
@@ -536,6 +785,8 @@ def format_minimal_list_with_elements(
                     line += " enabled:false"
                 if error:
                     line += f" error:{quote(error)}"
+                if id(node) in required_ids:
+                    line += " (required)"
             else:
                 line = f"[{idx}] {kind}: '{shown}' | Bounds: {norm_bounds}"
             # Explicit XML state for stateful controls: an ON and an OFF
@@ -592,6 +843,10 @@ def format_minimal_list_with_elements(
         lines.extend(icon_lines)
         elements.extend(icon_elements)
         labels.extend(str(el["index"]) for el in icon_elements)
+        if overlay_hidden:
+            lines.append(
+                f"(a layer on top covers the screen below: {overlay_hidden} elements under it are not listed)"
+            )
     return "\n".join(lines), elements, labels
 
 
@@ -682,6 +937,9 @@ def _unlabeled_controls(
         if _covered_by_later_layer(fused_xml, pos, element["bounds"]):
             element["occluded"] = True
             line += " (may be occluded)"
+        if _is_cut_off_strip(element, height):
+            element["cut_off"] = True
+            line += " (cut off: only a thin strip is visible; scroll to see it whole)"
         element["index"] = idx
         lines.append(line)
         found.append(element)

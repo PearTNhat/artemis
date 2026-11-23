@@ -83,6 +83,20 @@ async def _local_ocr(ctx: ArtemisContext, screenshot_bytes: bytes, xml_hierarchy
         return []
 
 
+async def _gap_ocr(ctx: ArtemisContext, screenshot_bytes: bytes, xml_hierarchy) -> list:
+    """Local OCR for gap filling under an overlay, unless the Flash OCR mode is 'off'."""
+    from artemis.utils.local_ocr import local_ocr_settings, recognize_screenshot
+
+    try:
+        cfg = local_ocr_settings(ctx)
+        if getattr(cfg, "mode", "off") == "off":
+            return []
+        return await asyncio.to_thread(recognize_screenshot, screenshot_bytes, xml_hierarchy, cfg)
+    except Exception as e:
+        logger.warning(f"Gap OCR skipped for this observation: {e}")
+        return []
+
+
 async def _capture(controller: Any) -> Any:
     """Screen data without the driver's built-in settle delay when supported."""
     try:
@@ -167,9 +181,32 @@ async def observe(
             else xml_hierarchy
         )
         fused_xml = fuse_ocr_with_xml(source, ocr_results, xml_first=xml_first)
+        compact = getattr(ctx, "flash_compact_list", False) is True
+        # A layer on top (bottom sheet, dialog) in the compact list: check with OCR
+        # which nodes of the screen below it really covers, leave those out, and
+        # add the layer's text the tree does not declare (pinned buttons).
+        hidden: set[int] = set()
+        gap_results: list = []
+        if compact and not ocr_results and isinstance(fused_xml, list):
+            from artemis.utils.visualization import find_overlay_hidden, verified_overlay_hidden
+
+            candidates, _layers = find_overlay_hidden(fused_xml, width, height)
+            if candidates:
+                ocr_started = time.monotonic()
+                gap_results = await _gap_ocr(ctx, screenshot_bytes, xml_hierarchy)
+                hidden = verified_overlay_hidden(fused_xml, gap_results, width, height)
+                timings["ocr"] = round(time.monotonic() - ocr_started, 3)
         minimal_list_str, elements, _ = format_minimal_list_with_elements(
-            fused_xml, width, height, compact=getattr(ctx, "flash_compact_list", False) is True
+            fused_xml, width, height, compact=compact, hidden=hidden or None
         )
+        if hidden and gap_results:
+            from artemis.utils.visualization import gap_fill_ocr
+
+            gap_lines, gap_elements = gap_fill_ocr(gap_results, elements, width, height)
+            if gap_lines:
+                minimal_list_str += "\n" + "\n".join(gap_lines)
+                elements.extend(gap_elements)
+            ocr_results = gap_results
         timings["list"] = round(time.monotonic() - phase_start, 3)
     except Exception as e:
         logger.error(f"Failed to fetch or fuse UI hierarchy: {e}")

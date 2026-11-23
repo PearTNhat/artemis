@@ -823,19 +823,6 @@ class FlashModelImageConfig(BaseModel):
         le=95,
         description="JPEG quality of the shrunk screenshot.",
     )
-    skip_unchanged: bool = Field(
-        default=False,
-        description=(
-            "Experimental: leave the screenshot out of a turn whose element list matches the"
-            " previous turn's (Jaccard of list lines >= skip_similarity) after that turn sent"
-            " one. Saves image tokens on same-screen steps; only for models that call"
-            " ask_explorer when the list is not enough (Qwen 4B guesses instead)."
-        ),
-    )
-    skip_similarity: float = Field(default=0.8, ge=0.0, le=1.0,
-                                   description="Element-list similarity needed to skip the screenshot.")
-    max_consecutive_skips: int = Field(default=2, ge=1,
-                                       description="Send the screenshot again after this many skipped turns.")
     model_config = {"extra": "allow"}
 
 
