@@ -15,6 +15,8 @@ sys.path.insert(0, HERE)
 import bench as B  # noqa: E402
 
 MODE_INFO = [  # (mode, short chip, label, group)
+    ("gapfill_somU2", "XML+lấp trống+Số2", "Cây UI + chỉ thêm OCR/icon ở chỗ cây thiếu + ảnh đánh số v2 (1 icon 1 số, số nhỏ đặt ngoài khung)", "Có cây UI, có ảnh"),
+    ("compact_somU2", "Gọn+Số2", "List gọn + ảnh đánh số v2 (1 icon 1 số, số nhỏ đặt ngoài khung)", "Có cây UI, có ảnh"),
     ("gapfill_somU", "XML+lấp trống", "Cây UI giữ nguyên + chỉ thêm OCR/icon ở chỗ cây thiếu (ngoài mọi phần tử, ngoài vùng ảnh) + ảnh đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
     ("fused_icons_somU", "XML+OCR+Icon", "Cây UI + OCR gộp + icon ngoài cây (dò được) + ảnh đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
     ("xml_ocr_somU", "XML+OCR", "Cây UI + OCR gộp (như Flash) + ảnh đánh số phần tử không nhãn", "Có cây UI, có ảnh"),
@@ -160,7 +162,7 @@ def main():
                                                             "ocr_icons_som", "ocr2_shot", "ocr2_crops",
                                                             "compact_crops", "wire2_near", "wire_near",
                                                             "wire_hybrid", "ocr_hybrid", "xml_ocr_somU",
-                                                            "gapfill_somU"}) - {"ocr_only", "ocr_clean", "ocr2_near"}
+                                                            "gapfill_somU", "gapfill_somU2", "compact_somU2"}) - {"ocr_only", "ocr_clean", "ocr2_near"}
     modes = [m for m in MODE_INFO if (keep is None or m[0] in keep) and any((c["id"], m[0]) in res for c in cases)]
 
     # images per screen

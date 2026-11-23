@@ -36,6 +36,7 @@ Modes (all answer {"index": N} over the Flash element list):
                 pixels, text redrawn; + compact list with near hints
   ocr_hybrid    no tree: OCR text redrawn + detected icons as REAL pixels, all tagged; + ocr2_near list
   xml_ocr_somU  tree fused with OCR (as Flash does) + near hints + screenshot marking unlabeled elements
+  compact_somU2 / gapfill_somU2  same lists, marks v2: one index per icon, small tags placed outside the box
   gapfill_somU  tree list unchanged + ONLY OCR lines / detected icons outside every tree element and
                 outside pictures (what the app left out of the tree) + unlabeled-only marked screenshot
   fused_icons_somU  same + detected icons that lie outside every tree element and outside pictures,
@@ -74,21 +75,22 @@ sys.path.insert(0, REPO)
 
 ALL_MODES = ["shot768", "2stage", "list_full", "list_compact", "list_center", "list_label",
              "center_som", "center_shot", "center2", "center2_shot", "compact_somU",
-             "center2_somU", "wire_text", "center2_near", "somU_near", "wire_near", "wire2_near", "wire_hybrid", "xml_ocr_somU", "fused_icons_somU", "gapfill_somU",
+             "center2_somU", "wire_text", "center2_near", "somU_near", "wire_near", "wire2_near", "wire_hybrid", "xml_ocr_somU", "fused_icons_somU", "gapfill_somU", "compact_somU2", "gapfill_somU2",
              "compact_crops", "ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "xml_ocr", "center_ocr",
              "ocr_icons", "ocr_icons_som"]
 # Default set: the ones worth running. The others stay runnable with --modes (and their old
 # results stay in results/*.jsonl) but proved useless: wireframe, 2-stage, no-image lists,
 # OCR fusion, and the old label+center that dropped role/state hints.
-CORE_MODES = ["shot768", "compact_somU", "center2_shot", "wire_near", "wire_hybrid", "center2_near", "ocr2_somU"]
-OCR_MODES = ("gapfill_somU", "xml_ocr_somU", "fused_icons_somU", "ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
+CORE_MODES = ["shot768", "compact_somU", "gapfill_somU2", "center2_shot", "wire_hybrid", "center2_near", "ocr2_somU"]
+OCR_MODES = ("gapfill_somU", "gapfill_somU2", "xml_ocr_somU", "fused_icons_somU", "ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "xml_ocr", "center_ocr", "ocr_icons", "ocr_icons_som")
 NO_TREE_MODES = ("ocr_only", "ocr_clean", "ocr2_near", "ocr2_somU", "ocr2_shot", "ocr2_crops", "ocr_hybrid", "ocr_shot", "ocr_icons", "ocr_icons_som")  # graded against the tree
 IMAGE_MODES = {"shot768": "shot", "ocr_shot": "shot",
                "center_som": "som", "ocr_icons_som": "som", "center_shot": "shot", "center2_shot": "shot",
                "compact_somU": "somU", "center2_somU": "somU", "wire_text": "wiretext", "somU_near": "somU",
                "wire_near": "wiretext", "ocr2_somU": "somU", "ocr2_shot": "shot", "ocr2_crops": "crops",
                "compact_crops": "crops", "wire2_near": "wire2", "wire_hybrid": "hybrid", "ocr_hybrid": "ocrhybrid",
-               "xml_ocr_somU": "somU", "fused_icons_somU": "somU", "gapfill_somU": "somU"}
+               "xml_ocr_somU": "somU", "fused_icons_somU": "somU", "gapfill_somU": "somU",
+               "compact_somU2": "somU2", "gapfill_somU2": "somU2"}
 DESCRIBE = ("Describe this Android screen in at most 60 words: app/screen name, main sections, "
             "and any icon-only buttons with their position and look.")
 norm = lambda t: " ".join((t or "").lower().split())
@@ -611,6 +613,49 @@ def compact_to_center(text):
     return "\n".join(one(l) for l in text.splitlines())
 
 
+def som_image_v2(path, els, max_side=768):
+    """Set-of-marks v2: one index per icon (boxes overlapping > 60% of the smaller one are marked
+    once), small tags (~1.4% of the screen width) placed OUTSIDE the box (above, left, below, right),
+    never on top of another tag; only when no outside spot is free does the tag go inside."""
+    from PIL import Image, ImageDraw, ImageFont
+    im = Image.open(path).convert("RGB")
+    W, H = im.size
+    d = ImageDraw.Draw(im)
+    fs = max(12, W // 55)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", fs)
+    except OSError:
+        font = ImageFont.load_default()
+    area = lambda b: max(1, (b[2] - b[0]) * (b[3] - b[1]))
+    marks = []
+    for e in sorted(els, key=lambda e: area(e["bounds"])):  # small first: the icon itself wins
+        b = e["bounds"]
+        if any((min(b[2], m[2]) - max(b[0], m[0])) > 0 and (min(b[3], m[3]) - max(b[1], m[1])) > 0 and
+               (min(b[2], m[2]) - max(b[0], m[0])) * (min(b[3], m[3]) - max(b[1], m[1])) > 0.6 * min(area(b), area(m))
+               for m in [x["bounds"] for x in marks]):
+            continue
+        marks.append(e)
+    lw = max(2, W // 500)
+    for e in marks:
+        d.rectangle(e["bounds"], outline=(230, 20, 20), width=lw)
+    placed = []
+
+    def free(r):
+        return r[0] >= 0 and r[1] >= 0 and r[2] <= W and r[3] <= H and not any(
+            r[0] < q[2] and q[0] < r[2] and r[1] < q[3] and q[1] < r[3] for q in placed)
+    for e in marks:
+        x1, y1, x2, y2 = e["bounds"]
+        lab = str(e["index"])
+        tw, th = int(d.textlength(lab, font=font)) + 6, fs + 4
+        spots = [(x1, y1 - th), (x1 - tw, y1), (x1, y2), (x2, y1), (x1, y1)]  # above, left, below, right, inside
+        r = next(((sx, sy, sx + tw, sy + th) for sx, sy in spots if free((sx, sy, sx + tw, sy + th))),
+                 (x1, y1, x1 + tw, y1 + th))
+        placed.append(r)
+        d.rectangle(r, fill=(230, 20, 20), outline=(255, 255, 255), width=1)
+        d.text((r[0] + 3, r[1] + 1), lab, fill=(255, 255, 255), font=font)
+    return b64_jpeg(im, max_side, 80)
+
+
 def listing(mode, s):
     import copy
     from artemis.utils.visualization import format_minimal_list_with_elements
@@ -629,6 +674,8 @@ def listing(mode, s):
         for b in detect_icons(s)["boxes"]:
             els.append(dict(index=len(els) + 1, text="", bounds=b, center=[(b[0] + b[2]) // 2, (b[1] + b[3]) // 2]))
         return center_text(els, s["w"], s["h"]), els
+    if mode in ("compact_somU2", "gapfill_somU2"):
+        return listing({"compact_somU2": "compact_somU", "gapfill_somU2": "gapfill_somU"}[mode], s)
     if mode == "gapfill_somU":
         # keep the tree list as is; add ONLY what the tree lacks: OCR lines and detected icons that lie
         # outside every tree element, outside picture regions and below the status bar
@@ -718,7 +765,7 @@ def decide_prompt(text, instr, desc=None, ocr=False, mode=""):
         what += ". The image shows the screen; each detected icon (graphic without text) has its box and [index] drawn in red"
     elif mode in ("center_som", "ocr_icons_som"):
         what += ". The image shows the screen with each element's box and [index] drawn in red"
-    elif mode in ("compact_somU", "center2_somU"):
+    elif mode in ("compact_somU", "center2_somU", "compact_somU2", "gapfill_somU2"):
         what += ". The image shows the screen; elements without a text label have their box and [index] drawn in red"
     elif mode in ("wire_text", "wire_near", "wire2_near"):
         what += (". The image is a black/white wireframe of the screen: each element's box with its [index] "
@@ -978,7 +1025,7 @@ def run(args):
                     extra = {}
                     if mode in OCR_MODES:
                         extra["ocr_ms"] = ocr_lines(s, mode in ("xml_ocr", "center_ocr", "xml_ocr_somU", "fused_icons_somU"))["ms"]
-                    if mode in ("fused_icons_somU", "gapfill_somU"):
+                    if mode in ("fused_icons_somU", "gapfill_somU", "gapfill_somU2"):
                         extra["ocr_ms"] += detect_icons_v2(s)["ms"]
                     if mode in ("ocr_icons", "ocr_icons_som"):
                         extra["ocr_ms"] += detect_icons(s)["ms"]
@@ -997,6 +1044,7 @@ def run(args):
                                else som_image(s["img"], [e for e in els if not e.get("text")]) if kind == "somU"
                                else wire_text_image(s) if kind == "wiretext"
                                else crop_sheet(s["img"], [e for e in els if not e.get("text")]) if kind == "crops"
+                               else som_image_v2(s["img"], [e for e in els if not e.get("text")]) if kind == "somU2"
                                else wire_text_image_v2(s) if kind == "wire2"
                                else wire_text_image_v2(s, paste_real=True) if kind == "hybrid"
                                else ocr_hybrid_image(s, els) if kind == "ocrhybrid" else None)
