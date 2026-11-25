@@ -140,3 +140,83 @@ def test_asterisk_marks_the_label_required_and_disappears():
     assert text.count('"*"') == 1
     full, _, _ = format_minimal_list_with_elements(nodes, W, H, compact=False)
     assert "(required)" not in full
+
+
+def _band_png(fill_bottom: bool) -> bytes:
+    import io
+
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (W, H), "white")
+    if fill_bottom:
+        ImageDraw.Draw(img).rounded_rectangle((60, 1800, 940, 1900), 40, fill=(40, 160, 80))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_bottom_band_below_the_list_is_found_when_something_is_drawn():
+    from artemis.utils.visualization import find_unlisted_bottom_band
+
+    elements = [{"index": 1, "text": "Total", "bounds": [40, 1600, 300, 1650]}]
+    assert find_unlisted_bottom_band(elements, W, H, _band_png(True)) == (1650, 1940)
+
+
+def test_blank_or_short_bottom_band_is_skipped():
+    from artemis.utils.visualization import find_unlisted_bottom_band
+
+    elements = [{"index": 1, "text": "Total", "bounds": [40, 1600, 300, 1650]}]
+    assert find_unlisted_bottom_band(elements, W, H, _band_png(False)) is None  # blank background
+    low = [{"index": 1, "text": "Pay", "bounds": [40, 1880, 900, 1930]}]
+    assert find_unlisted_bottom_band(low, W, H, _band_png(True)) is None  # list reaches the bottom
+    assert find_unlisted_bottom_band([], W, H, _band_png(True)) is None
+
+
+def test_gap_fill_joins_words_split_by_the_detector():
+    results = [
+        _ocr("Place", 494, 1800, 638, 1846),
+        _ocr("Order", 640, 1802, 791, 1846),
+        _ocr("Total", 40, 1700, 160, 1740),
+    ]
+    lines, added = gap_fill_ocr(results, [], W, H)
+    assert [a["text"] for a in added] == ["Total", "Place Order"]
+    assert added[1]["bounds"] == [494, 1800, 791, 1846]
+
+
+# --- XML-first OCR merge (merge_ocr_into_list) -----------------------------------------
+
+
+def _merge_case():
+    from artemis.utils.visualization import merge_ocr_into_list
+
+    nodes = [
+        node((40, 300, 600, 380), "Subtotal"),
+        node((40, 400, 600, 480), "Delivery fee"),
+        node((800, 600, 900, 680), clickable=True, cls="android.widget.Button"),  # unlabeled button
+    ]
+    text, elements, _ = format_minimal_list_with_elements(nodes, W, H, compact=True)
+    ocr = [
+        _ocr("Subtota1", 45, 310, 300, 370),  # misread of a listed text, same place: XML wins
+        _ocr("Delivery fee", 40, 440, 400, 520),  # same wording, bounds off: XML wins
+        _ocr("Next", 820, 620, 880, 660),  # inside the unlabeled button: becomes its label
+        _ocr("Place", 380, 1810, 520, 1870),  # pinned button without a node: added, words joined
+        _ocr("Order", 525, 1812, 680, 1870),
+        _ocr("*****", 100, 1000, 300, 1030),  # rating stars: ignored
+    ]
+    return merge_ocr_into_list(text, elements, ocr, W, H), elements
+
+
+def test_merge_keeps_xml_text_and_drops_ocr_repeats():
+    (text, stats), _ = _merge_case()
+    assert "Subtota1" not in text and text.count("Delivery fee") == 1
+    assert stats["duplicate"] == 2
+
+
+def test_merge_labels_unlabeled_controls_and_adds_missing_text():
+    (text, stats), elements = _merge_case()
+    button_line = next(l for l in text.splitlines() if "(button)" in l)
+    assert 'ocr "Next"' in button_line
+    assert any(e.get("ocr_label") and e["text"] == "Next" for e in elements)
+    assert text.splitlines()[-1].endswith('ocr "Place Order" 380,905,680,935')
+    assert stats == {**stats, "labeled": 1, "added": 1}
+    assert "*" not in text

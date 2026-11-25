@@ -78,21 +78,27 @@ async def _local_ocr(ctx: ArtemisContext, screenshot_bytes: bytes, xml_hierarchy
         cfg = local_ocr_settings(ctx)
         if not should_run_ocr(cfg, xml_hierarchy):
             return []
-        return await asyncio.to_thread(recognize_screenshot, screenshot_bytes, xml_hierarchy, cfg)
+        from artemis.utils.local_ocr import read_unread
+
+        reads = await asyncio.to_thread(recognize_screenshot, screenshot_bytes, xml_hierarchy, cfg)
+        # Full-screen fusion paths (Pro, verbose list) need every line's text.
+        return await asyncio.to_thread(read_unread, screenshot_bytes, reads, cfg)
     except Exception as e:
         logger.warning(f"Local OCR skipped for this observation: {e}")
         return []
 
 
-async def _gap_ocr(ctx: ArtemisContext, screenshot_bytes: bytes, xml_hierarchy) -> list:
-    """Local OCR for gap filling under an overlay, unless the Flash OCR mode is 'off'."""
+async def _gap_ocr(
+    ctx: ArtemisContext, screenshot_bytes: bytes, xml_hierarchy, region: tuple[int, int] | None = None
+) -> list:
+    """Local OCR for gap filling (under an overlay, or one band), unless the Flash OCR mode is 'off'."""
     from artemis.utils.local_ocr import local_ocr_settings, recognize_screenshot
 
     try:
         cfg = local_ocr_settings(ctx)
         if getattr(cfg, "mode", "off") == "off":
             return []
-        return await asyncio.to_thread(recognize_screenshot, screenshot_bytes, xml_hierarchy, cfg)
+        return await asyncio.to_thread(recognize_screenshot, screenshot_bytes, xml_hierarchy, cfg, region)
     except Exception as e:
         logger.warning(f"Gap OCR skipped for this observation: {e}")
         return []
@@ -107,6 +113,101 @@ async def _capture(controller: Any) -> Any:
     if accepts:
         return await controller.get_screen_data(skip_settling=True)
     return await controller.get_screen_data()
+
+
+async def _flash_ocr_list(
+    ctx: ArtemisContext,
+    screenshot_bytes: bytes,
+    xml_hierarchy: list,
+    width: int,
+    height: int,
+    timings: dict[str, float],
+    persist: bool,
+) -> tuple[str, list[dict[str, Any]], list]:
+    """Flash compact list: the accessibility tree first, local OCR only for what it lacks.
+
+    1. Full-screen OCR when the Flash OCR mode asks for it ('always', or 'auto'
+       on a poor tree). Transient looks (``persist=False``) skip it.
+    2. A layer on top (sheet, dialog): OCR confirms which nodes below it are
+       really covered; those are left out of the list.
+    3. Without a full read, the bottom band below the last listed element is
+       read when it holds pixels (a pinned button the tree does not declare).
+    4. :func:`merge_ocr_into_list` merges what was read: XML text always wins,
+       OCR labels unlabeled controls and adds text that no element covers.
+    """
+    from artemis.utils.local_ocr import local_ocr_settings, should_run_ocr
+    from artemis.utils.visualization import (
+        find_overlay_hidden,
+        find_unlisted_bottom_band,
+        merge_ocr_into_list,
+        verified_overlay_hidden,
+    )
+
+    reads: list = []
+    started = time.monotonic()
+    try:
+        full = persist and should_run_ocr(local_ocr_settings(ctx), xml_hierarchy)
+    except Exception:  # pylint: disable=broad-exception-caught
+        full = False
+    if full:
+        reads = await _gap_ocr(ctx, screenshot_bytes, xml_hierarchy)
+        timings["ocr_full_lines"] = len(reads)
+
+    hidden: set[int] = set()
+    candidates, _layers = find_overlay_hidden(xml_hierarchy, width, height)
+    if candidates:
+        if not reads:
+            reads = await _gap_ocr(ctx, screenshot_bytes, xml_hierarchy)
+        if any(r.get("unread") for r in reads):
+            # VietOCR mode: read only the lines on the nodes the layer may hide.
+            from artemis.utils.local_ocr import read_unread
+            from artemis.utils.visualization import parse_bounds
+
+            spots = [b for i in candidates if (b := parse_bounds(xml_hierarchy[i].get("bounds")))]
+            await asyncio.to_thread(read_unread, screenshot_bytes, reads, local_ocr_settings(ctx), spots)
+        hidden = verified_overlay_hidden(xml_hierarchy, reads, width, height)
+        timings["ocr_overlay_hidden"] = len(hidden)
+    if reads:
+        timings["ocr"] = round(time.monotonic() - started, 3)
+
+    list_started = time.monotonic()
+    text, elements, _ = format_minimal_list_with_elements(
+        xml_hierarchy, width, height, compact=True, hidden=hidden or None
+    )
+    list_s = time.monotonic() - list_started
+
+    if not reads and persist:
+        band = find_unlisted_bottom_band(elements, width, height, screenshot_bytes)
+        if band:
+            band_started = time.monotonic()
+            reads = await _gap_ocr(ctx, screenshot_bytes, xml_hierarchy, region=band)
+            timings["ocr"] = round(time.monotonic() - band_started, 3)
+            timings["ocr_band_top"] = int(band[0])
+            timings["ocr_band_bottom"] = int(band[1])
+
+    if reads:
+        merge_started = time.monotonic()
+        if any(r.get("unread") for r in reads):
+            # VietOCR mode: only lines the XML does not cover get read (CPU-bound: off the loop).
+            from artemis.utils.viet_ocr import make_reader
+
+            reader = make_reader(screenshot_bytes, local_ocr_settings(ctx))
+            text, stats = await asyncio.to_thread(merge_ocr_into_list, text, elements, reads, width, height, reader)
+            timings["ocr_read_s"] = round(time.monotonic() - merge_started, 3)
+            timings["ocr_read_lines"] = stats["read"]
+        else:
+            text, stats = merge_ocr_into_list(text, elements, reads, width, height)
+        timings["ocr_added"] = stats["added"]
+        timings["ocr_labeled"] = stats["labeled"]
+        timings["ocr_dropped_dup"] = stats["duplicate"]
+        logger.info(
+            f"OCR merge ({'full' if full else 'overlay' if candidates else 'band'}, "
+            f"{timings.get('ocr', 0):.2f}s): {len(reads)} lines read, {stats['duplicate']} already in XML, "
+            f"{stats['read']} read by VietOCR ({timings.get('ocr_read_s', 0):.2f}s), "
+            f"labeled {stats['labeled_texts']}, added {stats['added_texts']}"
+        )
+    timings["list_s_without_ocr"] = round(list_s, 3)
+    return text, elements, reads
 
 
 async def observe(
@@ -179,46 +280,33 @@ async def observe(
             ctx.device.device_height = height
 
         scrollable = has_large_scrollable(xml_hierarchy, width, height)
-        xml_first = False
-        if not ocr_results:
-            phase_start = time.monotonic()
-            ocr_results = await _local_ocr(ctx, screenshot_bytes, xml_hierarchy)
-            timings["ocr"] = round(time.monotonic() - phase_start, 3)
-            xml_first = bool(ocr_results)
-        phase_start = time.monotonic()
-        # Fuse into copies: the raw hierarchy is what gets persisted and diffed.
-        source = (
-            [dict(n) if isinstance(n, dict) else n for n in (xml_hierarchy or [])]
-            if ocr_results
-            else xml_hierarchy
-        )
-        fused_xml = fuse_ocr_with_xml(source, ocr_results, xml_first=xml_first)
         compact = getattr(ctx, "flash_compact_list", False) is True
-        # A layer on top (bottom sheet, dialog) in the compact list: check with OCR
-        # which nodes of the screen below it really covers, leave those out, and
-        # add the layer's text the tree does not declare (pinned buttons).
-        hidden: set[int] = set()
-        gap_results: list = []
-        if compact and not ocr_results and isinstance(fused_xml, list):
-            from artemis.utils.visualization import find_overlay_hidden, verified_overlay_hidden
-
-            candidates, _layers = find_overlay_hidden(fused_xml, width, height)
-            if candidates:
-                ocr_started = time.monotonic()
-                gap_results = await _gap_ocr(ctx, screenshot_bytes, xml_hierarchy)
-                hidden = verified_overlay_hidden(fused_xml, gap_results, width, height)
-                timings["ocr"] = round(time.monotonic() - ocr_started, 3)
-        minimal_list_str, elements, _ = format_minimal_list_with_elements(
-            fused_xml, width, height, compact=compact, hidden=hidden or None
-        )
-        if hidden and gap_results:
-            from artemis.utils.visualization import gap_fill_ocr
-
-            gap_lines, gap_elements = gap_fill_ocr(gap_results, elements, width, height)
-            if gap_lines:
-                minimal_list_str += "\n" + "\n".join(gap_lines)
-                elements.extend(gap_elements)
-            ocr_results = gap_results
+        if compact and not ocr_results and isinstance(xml_hierarchy, list):
+            # Flash: XML-first fusion. The list is built from the accessibility
+            # tree, then local OCR fills what the tree lacks (see _flash_ocr_list).
+            minimal_list_str, elements, ocr_results = await _flash_ocr_list(
+                ctx, screenshot_bytes, xml_hierarchy, width, height, timings, persist
+            )
+            # "list" keeps meaning list building only; OCR time is under "ocr".
+            phase_start = time.monotonic() - timings.pop("list_s_without_ocr", 0.0)
+        else:
+            xml_first = False
+            if not ocr_results:
+                phase_start = time.monotonic()
+                ocr_results = await _local_ocr(ctx, screenshot_bytes, xml_hierarchy)
+                timings["ocr"] = round(time.monotonic() - phase_start, 3)
+                xml_first = bool(ocr_results)
+            phase_start = time.monotonic()
+            # Fuse into copies: the raw hierarchy is what gets persisted and diffed.
+            source = (
+                [dict(n) if isinstance(n, dict) else n for n in (xml_hierarchy or [])]
+                if ocr_results
+                else xml_hierarchy
+            )
+            fused_xml = fuse_ocr_with_xml(source, ocr_results, xml_first=xml_first)
+            minimal_list_str, elements, _ = format_minimal_list_with_elements(
+                fused_xml, width, height, compact=compact
+            )
         if compact and getattr(ctx, "flash_relation_hints", False) is True and elements:
             from artemis.utils.visualization import add_relation_hints
 

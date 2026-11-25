@@ -86,6 +86,32 @@ _POINT_TARGET_ACTIONS: frozenset[str] = frozenset({"click", "long_press", "input
 
 
 
+def commitment_block_enabled() -> bool:
+    """``ARTEMIS_BLOCK_COMMITMENT_TAPS``: refuse every tap on a commitment control (test runs)."""
+    import os
+
+    return os.environ.get("ARTEMIS_BLOCK_COMMITMENT_TAPS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def is_commitment_text(text: str) -> bool:
+    """Commitment wording, also when OCR dropped the Vietnamese diacritics ("Dat don")."""
+    import unicodedata
+
+    from artemis.utils.screen_diff import COMMITMENT_PATTERN
+
+    if COMMITMENT_PATTERN.search(text or ""):
+        return True
+    plain = unicodedata.normalize("NFKD", (text or "").replace("đ", "d").replace("Đ", "D"))
+    plain = "".join(c for c in plain if not unicodedata.combining(c))
+    return bool(COMMITMENT_PATTERN_ASCII.search(plain))
+
+
+COMMITMENT_PATTERN_ASCII = re.compile(
+    r"\b(place\s*order|dat\s+(?:don|hang)|pay\s+now|thanh\s+toan|confirm\s+purchase|xac\s+nhan\s+mua)\b",
+    re.IGNORECASE,
+)
+
+
 def _timings(obs: Any) -> dict[str, float]:
     """Phase timings of an observation, empty when absent (debug turn log only)."""
     value = getattr(obs, "timings", None)
@@ -401,6 +427,14 @@ class McpActionExecutor:
                             await self._guard_morphed_commitment(
                                 session, target_coordinates, state, index_elements
                             )
+                if commitment_block_enabled():
+                    block_points: list[Any] = []
+                    if raw_name in _POINT_TARGET_ACTIONS and wire_args.get("target"):
+                        block_points = [wire_args.get("target")]
+                    elif raw_name == "click_sequence":
+                        block_points = list(wire_args.get("sequence") or [])
+                    if block_points:
+                        await self._guard_commitment_block(session, block_points, state, index_elements)
                 extension = raw_name not in (REQUIRED_ACTIONS | OPTIONAL_ACTIONS)
 
                 action_started = time.monotonic()
@@ -1081,6 +1115,69 @@ class McpActionExecutor:
                 if best is None or area < best[0]:
                     best = (area, label)
         return best[1] if best else ""
+
+    async def _guard_commitment_block(
+        self,
+        session: Any,
+        points: list[Any],
+        state: Any,
+        index_elements: list[dict[str, Any]] | None,
+    ) -> None:
+        """Hard block (``ARTEMIS_BLOCK_COMMITMENT_TAPS``): no tap may land on a commitment control.
+
+        For test runs on real accounts. Each point is checked against the element
+        list the model decided on, the live hierarchy, and local OCR of the live
+        screenshot around the point (a pinned button often has no node). Fails
+        closed: when the live screen cannot be read, the tap is refused.
+        """
+        width, height = self._screen_size()
+        seen = self._index_elements(state, index_elements)
+        try:
+            live = await session.ui_hierarchy(timeout=2.0)
+            shot_b64 = await session.screenshot_b64(timeout=5.0)
+        except Exception as err:  # pylint: disable=broad-exception-caught
+            raise _ArgError(
+                f"Commitment block: the live screen could not be read ({err}); tap refused."
+            ) from err
+        import base64
+
+        from artemis.utils.local_ocr import local_ocr_settings, read_unread, recognize_screenshot
+        from artemis.utils.visualization import _merge_ocr_words, _ocr_box
+
+        shot = base64.b64decode(shot_b64) if shot_b64 else b""
+        for point in points:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            for source, label in (("listed", self._label_at(seen, point)), ("live", self._label_at(live, point))):
+                if label and is_commitment_text(label):
+                    raise _ArgError(
+                        f"Commitment block: the control at {list(point)} is '{label}' ({source} element)."
+                        " Commitment actions (placing an order, paying) are disabled for this run;"
+                        " stop here and report the task status instead."
+                    )
+            if not shot:
+                raise _ArgError("Commitment block: no screenshot to check the tap point; tap refused.")
+            px, py = point[0] * width / 1000.0, point[1] * height / 1000.0
+            band = (max(0, int(py - height * 0.06)), min(height, int(py + height * 0.06)))
+            mx, my = width * 0.03, height * 0.015
+            try:
+                cfg = local_ocr_settings(self.ctx)
+                lines = await asyncio.to_thread(recognize_screenshot, shot, live, cfg, band)
+                # VietOCR mode only located the lines: read the ones at the tap point.
+                spot = [(int(px - mx), int(py - my), int(px + mx), int(py + my))]
+                lines = await asyncio.to_thread(read_unread, shot, lines, cfg, spot)
+            except Exception as err:  # pylint: disable=broad-exception-caught
+                raise _ArgError(f"Commitment block: OCR check failed ({err}); tap refused.") from err
+            for res in _merge_ocr_words(lines):
+                box = _ocr_box(res)
+                text = str(res.get("text") or "")
+                if box and box[0] - mx <= px <= box[2] + mx and box[1] - my <= py <= box[3] + my:
+                    if is_commitment_text(text):
+                        raise _ArgError(
+                            f"Commitment block: the screen shows '{text}' at {list(point)}."
+                            " Commitment actions (placing an order, paying) are disabled for this run;"
+                            " stop here and report the task status instead."
+                        )
 
     async def _guard_morphed_commitment(
         self,

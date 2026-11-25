@@ -797,6 +797,23 @@ class FlashOcrConfig(BaseModel):
         default=None,
         description="Character dictionary for rec_model_path (one character per line).",
     )
+    recognizer: Literal["paddle", "vietocr"] = Field(
+        default="paddle",
+        description=(
+            "Text recognizer. 'paddle': PaddleOCR Latin v5 reads every located line"
+            " (fast, drops Vietnamese tone marks). 'vietocr': VietOCR (ONNX) reads only"
+            " the lines a consumer needs (Flash: those the XML does not cover) with"
+            " Vietnamese tone marks; weaker on digits. Falls back to 'paddle' when the"
+            " VietOCR model is missing."
+        ),
+    )
+    vi_model_dir: str | None = Field(
+        default=None,
+        description=(
+            "Folder with encoder.onnx, decoder.onnx, vocab.json (scripts/export_vietocr_onnx.py)."
+            " Unset = <ARTEMIS app dir>/models/ocr/vietocr-vgg_seq2seq."
+        ),
+    )
     model_config = {"extra": "allow"}
 
 

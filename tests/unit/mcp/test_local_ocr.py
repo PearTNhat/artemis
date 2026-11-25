@@ -174,6 +174,20 @@ def test_recognize_screenshot_maps_past_status_bar_and_caches(monkeypatch):
     assert len(engine.calls) == 1  # same frame: served from the cache
 
 
+def test_recognize_screenshot_region_reads_only_that_band(monkeypatch):
+    local_ocr._cache.clear()
+    engine = _FakeEngine([[[[10, 5], [90, 5], [90, 25], [10, 25]], "Pay", 0.97]])
+    monkeypatch.setattr(local_ocr, "_get_engine", lambda cfg: engine)
+    img = _jpeg(200, 400)
+
+    out = local_ocr.recognize_screenshot(img, [], FlashOcrConfig(mode="auto"), region=(300, 380))
+    assert engine.calls == [(80, 200, 3)]  # only the band
+    assert out[0]["position"][0] == {"x": 10, "y": 305}  # screen coordinates
+    local_ocr.recognize_screenshot(img, [], FlashOcrConfig(mode="auto"))
+    assert len(engine.calls) == 2  # the whole frame is not served from the band's cache entry
+    assert local_ocr.recognize_screenshot(img, [], FlashOcrConfig(mode="auto"), region=(380, 300)) == []
+
+
 def test_recognize_screenshot_returns_empty_when_engine_unavailable(monkeypatch):
     monkeypatch.setattr(local_ocr, "_get_engine", lambda cfg: None)
     assert local_ocr.recognize_screenshot(_jpeg(), [], FlashOcrConfig(mode="always")) == []
@@ -257,3 +271,33 @@ async def test_observe_survives_ocr_errors(monkeypatch):
                                        persist=False)
     assert obs.ok and obs.hierarchy_ok
     assert "Text: 'A'" in obs.elements_text
+
+
+@pytest.mark.asyncio
+async def test_flash_observe_merges_ocr_xml_first(monkeypatch):
+    reads = [
+        _ocr("Checkout", 40, 300, 400, 380),  # repeats the XML label: dropped
+        _ocr("Place Order", 300, 2200, 780, 2290),  # pinned button without a node: added
+    ]
+    monkeypatch.setattr(local_ocr, "recognize_screenshot", lambda *a, **k: reads)
+    raw = [_node("Checkout", "[40,300][600,380]")] + [
+        _node(f"Item {i}", f"[0,{400 + i * 100}][1080,{490 + i * 100}]") for i in range(1, 8)
+    ]
+    ctx = _ctx("always")
+    ctx.flash_compact_list = True
+    obs, _ = await observation.observe(ctx, _controller(raw), settle_ms=0, persist=True)
+    assert obs.elements_text.count("Checkout") == 1
+    assert 'ocr "Place Order"' in obs.elements_text
+    assert obs.timings["ocr_added"] == 1 and obs.timings["ocr_dropped_dup"] == 1
+
+
+@pytest.mark.asyncio
+async def test_flash_transient_look_skips_full_ocr(monkeypatch):
+    called = MagicMock(return_value=[])
+    monkeypatch.setattr(local_ocr, "recognize_screenshot", called)
+    ctx = _ctx("always")
+    ctx.flash_compact_list = True
+    rich = [_node(f"Item {i}", f"[0,{i * 100}][1080,{i * 100 + 90}]") for i in range(1, 8)]
+    obs, _ = await observation.observe(ctx, _controller(rich), settle_ms=0, persist=False)
+    assert obs.ok
+    called.assert_not_called()

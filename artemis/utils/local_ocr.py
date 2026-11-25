@@ -22,7 +22,10 @@ the indexed element list consume them unchanged.
 Measured on 30 trace screenshots (KE_HOACH_TOI_UU_ARTEMIS.md section 1.6): ~0.5 s
 per screen on a laptop CPU with ``use_cls=False`` and 4 intra-op threads.
 Vietnamese tone marks outside the Latin dictionary (hook above, dot below) are
-not recognised by this model; swap ``rec_model_path`` for a Vietnamese model.
+not recognised by this model. With ``ocr.recognizer="vietocr"`` this module only
+locates the lines (results carry ``"unread": True`` and an empty text) and
+:func:`read_unread` has VietOCR (``artemis/utils/viet_ocr.py``) read the ones a
+consumer needs; the PaddleOCR recognizer is the fallback when that model is missing.
 
 Everything degrades to "no OCR" (an empty list, one warning) when the optional
 runtime or the model is unavailable; OCR never fails an observation.
@@ -46,6 +49,7 @@ logger = get_logger(__name__)
 __all__ = [
     "count_app_labels",
     "local_ocr_settings",
+    "read_unread",
     "recognize_screenshot",
     "should_run_ocr",
 ]
@@ -242,16 +246,24 @@ def _status_bar_height(nodes: Any, height: int) -> int:
     return best
 
 
-def recognize_screenshot(image_bytes: bytes, nodes: Any, cfg: Any) -> list[dict[str, Any]]:
+def recognize_screenshot(
+    image_bytes: bytes, nodes: Any, cfg: Any, region: tuple[int, int] | None = None
+) -> list[dict[str, Any]]:
     """OCR of one screenshot (status bar excluded), in screen pixel coordinates.
 
     Blocking (CPU-bound): call it through ``asyncio.to_thread``. The last few
     results are cached by image hash, so the transient guard looks that follow
     an observation of the same frame cost nothing.
+
+    ``region`` = ``(top, bottom)`` in screen pixels limits recognition to that
+    horizontal band (faster than the whole screen); positions stay screen-based.
     """
     if not image_bytes:
         return []
-    digest = hashlib.sha256(image_bytes).hexdigest()
+    detect_only = _vietocr_on(cfg)
+    digest = hashlib.sha256(image_bytes).hexdigest() + (":det" if detect_only else "")
+    if region:
+        digest += f":{int(region[0])}-{int(region[1])}"
     with _cache_lock:
         if digest in _cache:
             return _cache[digest]
@@ -267,15 +279,32 @@ def recognize_screenshot(image_bytes: bytes, nodes: Any, cfg: Any) -> list[dict[
     try:
         img = Image.open(BytesIO(image_bytes)).convert("RGB")
         offset = _status_bar_height(nodes, img.height)
-        if 0 < offset < img.height:
-            img = img.crop((0, offset, img.width, img.height))
-        result, _ = engine(np.asarray(img)[:, :, ::-1])  # RapidOCR expects BGR
+        bottom = img.height
+        if region:
+            offset = max(offset, int(region[0]))
+            bottom = min(img.height, int(region[1]))
+            if bottom <= offset:
+                return []
+        if 0 < offset < img.height or bottom < img.height:
+            img = img.crop((0, offset, img.width, bottom))
+        bgr = np.asarray(img)[:, :, ::-1]  # RapidOCR expects BGR
+        if detect_only:  # VietOCR reads later, only the lines a consumer needs
+            boxes, _ = engine(bgr, use_rec=False)
+            result = [(box, "", 1.0) for box in boxes or []]
+        else:
+            result, _ = engine(bgr)
     except Exception as e:
         logger.warning(f"Local OCR failed on this frame: {e}")
         return []
 
     out: list[dict[str, Any]] = []
     for box, text, score in result or []:
+        if detect_only:
+            out.append({
+                "text": "", "score": 1.0, "unread": True,
+                "position": [{"x": int(p[0]), "y": int(p[1]) + offset} for p in box],
+            })
+            continue
         text = str(text or "").strip()
         if not text:
             continue
@@ -286,9 +315,69 @@ def recognize_screenshot(image_bytes: bytes, nodes: Any, cfg: Any) -> list[dict[
                 "position": [{"x": int(p[0]), "y": int(p[1]) + offset} for p in box],
             }
         )
-    logger.info(f"Local OCR: {len(out)} text lines in {(time.perf_counter() - started) * 1000:.0f} ms.")
+    logger.info(
+        f"Local OCR{' (detect only)' if detect_only else ''}: {len(out)} text lines "
+        f"in {(time.perf_counter() - started) * 1000:.0f} ms."
+    )
     with _cache_lock:
         _cache[digest] = out
         while len(_cache) > _CACHE_SIZE:
             _cache.pop(next(iter(_cache)))
     return out
+
+
+def _vietocr_on(cfg: Any) -> bool:
+    if getattr(cfg, "recognizer", "paddle") != "vietocr":
+        return False
+    try:
+        from artemis.utils.viet_ocr import available
+
+        return available(cfg)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.debug(f"VietOCR unavailable: {e}")
+        return False
+
+
+def _box_of(res: dict[str, Any]) -> tuple[int, int, int, int] | None:
+    pts = res.get("position") or []
+    if not pts:
+        return None
+    xs, ys = [int(p["x"]) for p in pts], [int(p["y"]) for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def read_unread(
+    image_bytes: bytes,
+    results: list[dict[str, Any]],
+    cfg: Any,
+    within: list[tuple[int, int, int, int]] | None = None,
+) -> list[dict[str, Any]]:
+    """Fills the text of located-but-unread lines in place (VietOCR); returns ``results``.
+
+    ``within`` limits reading to lines that intersect one of these screen boxes.
+    Blocking (CPU-bound): call it through ``asyncio.to_thread``.
+    """
+    todo = []
+    for res in results or []:
+        if not res.get("unread"):
+            continue
+        box = _box_of(res)
+        if box is None:
+            continue
+        if within is not None and not any(
+            box[0] < w[2] and box[2] > w[0] and box[1] < w[3] and box[3] > w[1] for w in within
+        ):
+            continue
+        todo.append((res, box))
+    if not todo:
+        return results
+    from artemis.utils.viet_ocr import read_lines
+
+    texts = read_lines(image_bytes, [b for _, b in todo], cfg)
+    if texts is None:
+        return results
+    with _cache_lock:  # results may be the cached list: fill it once for every reader
+        for (res, _), text in zip(todo, texts):
+            res["text"] = text
+            res.pop("unread", None)
+    return results

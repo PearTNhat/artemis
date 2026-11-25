@@ -176,7 +176,7 @@ FLASH_FULL = frozenset({"manage_app", "wait_for_delay", "click_sequence", "click
 def test_flash_full_set_keeps_both_segments():
     out = _render_flash(FLASH_FULL)
     assert "**App Launching**" in out
-    assert "**Timed Waiting & Transitions**" in out
+    assert "**Loading & Transitions**" in out
     assert "{%" not in out
 
 
@@ -190,6 +190,12 @@ def test_flash_without_manage_app_drops_app_launching():
 
 def test_flash_without_wait_for_delay_drops_timed_waiting():
     out = _render_flash(FLASH_FULL - {"wait_for_delay"})
-    assert "**Timed Waiting & Transitions**" not in out
+    assert "**Loading & Transitions**" not in out
     assert not _tool_refs(out, "wait_for_delay")
     assert "**State Drift & Progression Tolerance**" in out
+
+
+def test_flash_goal_comes_last_so_the_prefix_is_shared_across_tasks():
+    out = _render_flash(FLASH_FULL)
+    assert out.rstrip().endswith("**test goal**")
+    assert out.count("test goal") == 1

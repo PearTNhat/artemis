@@ -20,6 +20,9 @@ from typing import Any
 
 from artemis.utils.coordinates import parse_swipe_parameters
 from PIL import Image, ImageDraw, ImageFont
+from third_party.mobile_use.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def draw_bounding_boxes(
@@ -394,6 +397,12 @@ _CUT_OFF_EXEMPT_CLASSES = ("SeekBar", "Slider", "ProgressBar", "RatingBar")
 _MAX_GAP_OCR_LINES = 15
 _GAP_OCR_MIN_SCORE = 0.5
 _GAP_OCR_MARGIN_PX = 4
+#: Bottom band below every listed element: at least this share of the screen
+#: tall (a pinned action bar), ending above the gesture / navigation area.
+_BOTTOM_BAND_MIN_FRACTION = 0.04
+_BOTTOM_BAND_NAV_FRACTION = 0.03
+#: Grey-level standard deviation under which the band is a blank background.
+_BOTTOM_BAND_MIN_STDDEV = 6.0
 
 
 def _node_label(node: dict[str, Any]) -> str:
@@ -616,6 +625,77 @@ def _is_cut_off_strip(element: dict[str, Any], height: int) -> bool:
     return h < height * _CUT_OFF_MAX_HEIGHT_FRACTION and w >= 2 * h
 
 
+def find_unlisted_bottom_band(
+    elements: list[dict[str, Any]],
+    width: int,
+    height: int,
+    image_bytes: bytes | None = None,
+) -> tuple[int, int] | None:
+    """The bottom strip of the screen below every listed element, when it holds pixels.
+
+    A bar pinned to the bottom (the primary action button of a form, cart or
+    checkout) is often drawn without its own accessibility node, so the list
+    ends above it. Returns ``(top, bottom)`` in screen pixels when the gap from
+    the lowest listed element to the navigation area is tall enough to hold such
+    a bar and is not a blank background; ``None`` otherwise. App-agnostic: only
+    geometry and pixel variance are used.
+    """
+    boxes = [el["bounds"] for el in elements if el.get("bounds")]
+    if not boxes or not width or not height:
+        return None
+    top = max(b for _l, _t, _r, b in boxes)
+    bottom = int(height * (1 - _BOTTOM_BAND_NAV_FRACTION))
+    if bottom - top < height * _BOTTOM_BAND_MIN_FRACTION:
+        return None
+    if image_bytes:
+        try:
+            from PIL import ImageStat
+
+            img = Image.open(io.BytesIO(image_bytes)).convert("L")
+            sy = img.height / height
+            band = img.crop((0, int(top * sy), img.width, int(bottom * sy)))
+            band.thumbnail((256, 256))
+            if ImageStat.Stat(band).stddev[0] < _BOTTOM_BAND_MIN_STDDEV:
+                return None  # flat background: nothing drawn there
+        except Exception:
+            pass
+    return top, bottom
+
+
+def _merge_ocr_words(ocr_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Joins OCR boxes of one text line that the detector split into words.
+
+    Two boxes merge when they overlap vertically by more than half the shorter
+    box and the horizontal gap is under one line height ("Place" + "Order").
+    """
+    boxes = []
+    for res in ocr_results or []:
+        box = _ocr_box(res)
+        if box:
+            boxes.append([*box, str(res.get("text") or "").strip(), float(res.get("score", 1.0) or 0), bool(res.get("unread"))])
+    boxes.sort(key=lambda x: (x[1], x[0]))
+    merged: list[list[Any]] = []
+    for b in boxes:
+        for m in merged:
+            line_h = min(b[3] - b[1], m[3] - m[1])
+            v_overlap = min(b[3], m[3]) - max(b[1], m[1])
+            gap = b[0] - m[2]
+            if line_h > 0 and v_overlap > line_h / 2 and -line_h / 2 <= gap < line_h:
+                m[0], m[1] = min(m[0], b[0]), min(m[1], b[1])
+                m[2], m[3] = max(m[2], b[2]), max(m[3], b[3])
+                m[4] = f"{m[4]} {b[4]}".strip()
+                m[5] = min(m[5], b[5])
+                m[6] = m[6] or b[6]
+                break
+        else:
+            merged.append(b)
+    return [
+        {"text": t, "score": sc, "position": [{"x": l, "y": tp}, {"x": r, "y": tp}, {"x": r, "y": bt}, {"x": l, "y": bt}],
+         **({"unread": True} if unread else {})}
+        for l, tp, r, bt, t, sc, unread in merged
+    ]
+
+
 def gap_fill_ocr(
     ocr_results: list[dict[str, Any]],
     elements: list[dict[str, Any]],
@@ -639,7 +719,7 @@ def gap_fill_ocr(
     idx = max((int(el.get("index") or 0) for el in elements), default=0) + 1
     lines: list[str] = []
     found: list[dict[str, Any]] = []
-    for res in ocr_results or []:
+    for res in _merge_ocr_words(ocr_results):
         if len(found) >= _MAX_GAP_OCR_LINES:
             break
         text = str(res.get("text") or "").strip()
@@ -664,6 +744,154 @@ def gap_fill_ocr(
         taken.append((left, top, right, bottom))
         idx += 1
     return lines, found
+
+
+#: A labelled element larger than this share of the screen (a card or panel
+#: whose label is only a summary) does not swallow the OCR text inside it;
+#: that text is then checked by wording instead.
+_OCR_MERGE_MAX_OWNER_AREA = 0.25
+#: OCR text repeating a labelled element's wording within this share of the
+#: screen height of it is the same text read twice (bounds of node and pixels differ).
+_OCR_MERGE_NEAR_FRACTION = 0.03
+_MAX_OCR_LABEL_CHARS = 60
+_MAX_OCR_MERGE_LINES = 25
+
+
+def _same_wording(a: str, b: str) -> bool:
+    ka, kb = _text_key(a), _text_key(b)
+    if len(ka) < 2 or len(kb) < 2:
+        return False
+    if ka in kb or kb in ka:
+        return True
+    return difflib.SequenceMatcher(None, ka, kb).ratio() >= 0.8
+
+
+def merge_ocr_into_list(
+    list_text: str,
+    elements: list[dict[str, Any]],
+    ocr_results: list[dict[str, Any]],
+    width: int,
+    height: int,
+    refine: Any = None,
+) -> tuple[str, dict[str, Any]]:
+    """XML-first fusion of local OCR into the compact element list (in place on ``elements``).
+
+    For each OCR line (words of one line joined first):
+    1. It overlaps a labelled element (not a large panel) -> the XML text wins, dropped.
+    2. Its wording repeats a labelled element close by -> same text, dropped.
+    3. Its center lies in an unlabelled control (``(button)``, ``(icon)``) -> it
+       becomes that control's label: ``[n] (button) ocr "Place Order" ...``.
+    4. Otherwise it is text no element covers -> ``[n] ocr "..."`` element.
+    Low-confidence lines, one-character lines and the status bar are ignored.
+    ``refine(lines) -> texts`` (optional) reads the lines that survive the
+    position check of rule 1, before the wording checks: located-but-unread
+    lines (``"unread"``, VietOCR mode) are read only here, so text the tree
+    already covers is never recognised. ``lines`` are ``{"text", "box"}`` dicts
+    in screen pixels. Unread lines without ``refine`` are dropped.
+    Returns the new list text and counts for the debug log.
+    """
+    stats: dict[str, Any] = {
+        "duplicate": 0, "labeled": 0, "added": 0, "read": 0, "labeled_texts": [], "added_texts": [],
+    }
+    if not ocr_results or not width or not height:
+        return list_text, stats
+    screen_area = float(width * height)
+    m = _GAP_OCR_MARGIN_PX
+    near = height * _OCR_MERGE_NEAR_FRACTION
+    labeled = [el for el in elements if el.get("bounds") and str(el.get("text") or "").strip() and not el.get("is_icon")]
+    icons = [el for el in elements if el.get("bounds") and el.get("is_icon")]
+    icon_texts: dict[int, list[str]] = {}
+    new_lines: list[str] = []
+    idx = max((int(el.get("index") or 0) for el in elements), default=0) + 1
+
+    def overlaps(a, b, margin=0.0) -> bool:
+        return a[0] < b[2] + margin and a[2] > b[0] - margin and a[1] < b[3] + margin and a[3] > b[1] - margin
+
+    small_owners = [
+        el["bounds"] for el in labeled
+        if (el["bounds"][2] - el["bounds"][0]) * (el["bounds"][3] - el["bounds"][1]) <= screen_area * _OCR_MERGE_MAX_OWNER_AREA
+    ]
+    rows: list[list[Any]] = []  # [text, box, covered_by_xml, unread]
+    for res in _merge_ocr_words(ocr_results):
+        text = str(res.get("text") or "").strip()
+        box = _ocr_box(res)
+        if not box or float(res.get("score") or 0) < _GAP_OCR_MIN_SCORE:
+            continue
+        left, top, right, bottom = max(0, box[0]), max(0, box[1]), min(width, box[2]), min(height, box[3])
+        if right <= left or bottom <= top or bottom <= height * _STATUS_BAR_FRACTION:
+            continue
+        box = (left, top, right, bottom)
+        rows.append([text, box, any(overlaps(box, b, m) for b in small_owners), bool(res.get("unread"))])
+
+    if refine is not None:
+        todo = [r for r in rows if not r[2] and (r[3] or not r[0])]
+        if todo:
+            try:
+                texts = refine([{"text": r[0], "box": r[1]} for r in todo])
+                for r, new in zip(todo, texts or []):
+                    r[0] = str(new or "").strip()
+                    stats["read"] += 1
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.debug(f"OCR read step failed, unread lines dropped: {e}")
+
+    for text, box, covered, unread in rows:
+        left, top, right, bottom = box
+        if sum(ch.isalnum() for ch in text) < 2 and not (covered and unread):
+            continue  # rating stars, separators, a lone glyph, a line left unread
+        # 1-2. Already in the tree: the accessibility text is exact, OCR is not.
+        duplicate = covered or any(
+            overlaps(box, el["bounds"], near) and _same_wording(text, str(el.get("text"))) for el in labeled
+        )
+        if duplicate:
+            stats["duplicate"] += 1
+            continue
+        # 3. Inside an unlabelled control: OCR names it (smallest control wins).
+        cx, cy = (left + right) / 2, (top + bottom) / 2
+        owners = [el for el in icons if el["bounds"][0] <= cx <= el["bounds"][2] and el["bounds"][1] <= cy <= el["bounds"][3]]
+        if owners:
+            owner = min(owners, key=lambda e: (e["bounds"][2] - e["bounds"][0]) * (e["bounds"][3] - e["bounds"][1]))
+            icon_texts.setdefault(int(owner["index"]), []).append(text)
+            continue
+        # 4. Text no element covers (a pinned button without a node, canvas text).
+        if any(overlaps(box, el["bounds"], m) for el in icons):
+            stats["duplicate"] += 1  # partly on a control whose label it is not: skip, never guess
+            continue
+        if stats["added"] >= _MAX_OCR_MERGE_LINES:
+            continue
+        ccx, ccy = get_center_coordinates(left, top, right, bottom)
+        quoted = '"' + text.replace('"', "'") + '"'
+        new_lines.append(
+            f"[{idx}] ocr {quoted} "
+            f"{int(left * 1000 / width)},{int(top * 1000 / height)},{int(right * 1000 / width)},{int(bottom * 1000 / height)}"
+        )
+        elements.append({
+            "index": idx, "center": [ccx, ccy], "text": text, "bounds": [left, top, right, bottom],
+            "class": None, "resource_id": None, "is_ocr": True, "ocr_virtual": True,
+        })
+        labeled.append(elements[-1])  # a repeat of the same text further on is a duplicate
+        stats["added"] += 1
+        stats["added_texts"].append(text[:40])
+        idx += 1
+
+    if icon_texts:
+        by_index = {int(el["index"]): el for el in icons}
+        out = []
+        for line in list_text.splitlines():
+            mt = re.match(r"\[(\d+)\] \((\w+)\) ", line)
+            if mt and int(mt.group(1)) in icon_texts:
+                label = " ".join(icon_texts[int(mt.group(1))])[:_MAX_OCR_LABEL_CHARS]
+                quoted = '"' + label.replace('"', "'") + '"'
+                line = f"{line[:mt.end()]}ocr {quoted} {line[mt.end():]}"
+                el = by_index[int(mt.group(1))]
+                el["text"] = label
+                el["ocr_label"] = True
+                stats["labeled"] += 1
+                stats["labeled_texts"].append(label[:40])
+            out.append(line)
+        list_text = "\n".join(out)
+    if new_lines:
+        list_text = (list_text + "\n" if list_text else "") + "\n".join(new_lines)
+    return list_text, stats
 
 
 def _is_status_bar_node(node: dict[str, Any], height: int, bounds: tuple[int, int, int, int] | None) -> bool:

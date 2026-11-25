@@ -40,6 +40,15 @@ def _no_live_ipc(monkeypatch, request):
     monkeypatch.setattr("artemis.data_engine.engine.read_ipc_port", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_commitment_block_from_env(monkeypatch):
+    """A test-run safety switch in the developer's .env must not change unit tests.
+
+    Tests of the commitment block set ARTEMIS_BLOCK_COMMITMENT_TAPS themselves.
+    """
+    monkeypatch.delenv("ARTEMIS_BLOCK_COMMITMENT_TAPS", raising=False)
+
+
 @pytest.fixture
 def mock_driver():
     """Provide an isolated mock mobile driver."""

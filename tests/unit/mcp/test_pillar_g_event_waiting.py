@@ -920,3 +920,67 @@ async def test_first_action_of_a_turn_skips_the_live_check():
         index_elements=_button("Review address"),
     )
     session.ui_hierarchy.assert_not_called()
+
+
+# --- Hard commitment block (ARTEMIS_BLOCK_COMMITMENT_TAPS) ------------------------------
+
+
+def _block_executor(monkeypatch, live_elements, ocr_lines):
+    import base64
+
+    from artemis.utils import local_ocr
+
+    monkeypatch.setenv("ARTEMIS_BLOCK_COMMITMENT_TAPS", "true")
+    monkeypatch.setattr(local_ocr, "recognize_screenshot", lambda *a, **k: ocr_lines)
+    executor, session = _morph_executor(live_elements)
+    session.screenshot_b64 = AsyncMock(return_value=base64.b64encode(b"img").decode())
+    return executor, session
+
+
+def _ocr_line(text, l, t, r, b):
+    return {"text": text, "score": 0.99,
+            "position": [{"x": l, "y": t}, {"x": r, "y": t}, {"x": r, "y": b}, {"x": l, "y": b}]}
+
+
+@pytest.mark.asyncio
+async def test_block_refuses_index_tap_on_a_visible_commitment(monkeypatch):
+    executor, session = _block_executor(monkeypatch, _button("Place Order"), [])
+    res = await executor.execute("click", {"target": 1}, "c1", _indexed_state(), index_elements=_button("Place Order"))
+    assert res.status == "error" and "Commitment block" in res.text_summary
+    session.call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_block_refuses_coordinate_tap_on_a_button_only_ocr_sees(monkeypatch):
+    # The pinned button has no node; OCR splits it into two words.
+    ocr = [_ocr_line("Place", 380, 1810, 520, 1870), _ocr_line("Order", 525, 1812, 680, 1870)]
+    executor, session = _block_executor(monkeypatch, [], ocr)
+    res = await executor.execute(
+        "click", {"target": [500, 920], "target_description": "Review address"}, "c1", _indexed_state(),
+        index_elements=[],
+    )
+    assert res.status == "error" and "Place Order" in res.text_summary
+    session.call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_block_matches_ocr_without_vietnamese_diacritics(monkeypatch):
+    executor, session = _block_executor(monkeypatch, [], [_ocr_line("Dat don", 380, 1810, 680, 1870)])
+    res = await executor.execute(
+        "click", {"target": [500, 920], "target_description": "bottom button"}, "c1", _indexed_state(),
+        index_elements=[],
+    )
+    assert res.status == "error"
+    session.call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_block_allows_ordinary_taps_and_is_off_by_default(monkeypatch):
+    executor, session = _block_executor(monkeypatch, _button("Review address"), [_ocr_line("Review address", 300, 1810, 700, 1870)])
+    res = await executor.execute("click", {"target": 1}, "c1", _indexed_state(), index_elements=_button("Review address"))
+    assert res.status == "success"
+
+    monkeypatch.delenv("ARTEMIS_BLOCK_COMMITMENT_TAPS")
+    executor, session = _morph_executor(_button("Place Order"))
+    res = await executor.execute("click", {"target": 1}, "c1", _indexed_state(), index_elements=_button("Place Order"))
+    assert res.status == "success"

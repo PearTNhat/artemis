@@ -146,6 +146,20 @@
         "jpeg_quality": 75
       },
       "element_list": "compact", // UI list: 'compact' (lean, lists unlabeled icons) | 'full'
+      // 🔤 Local OCR (ONNX, on the host), merged XML-first into the element list:
+      // XML text always wins; OCR names unlabeled controls and adds text no element covers
+      // (a pinned bottom button, canvas/WebView text). 'always' reads every screen (~0.8 s);
+      // 'auto' reads the whole screen only when the tree is poor, otherwise just the band under a
+      // sheet/dialog or below the last listed element.
+      "ocr": {
+        "mode": "always", // 'off' | 'auto' | 'always'
+        "min_xml_labels": 5,
+        "threads": 4,
+        // 'vietocr': RapidOCR only locates text, VietOCR reads just the lines the XML lacks (Vietnamese
+        // tone marks; may misspell / misread digits, bounds are right). ~0.65 s/screen. 'paddle' = Latin model.
+        // Model: scripts/export_vietocr_onnx.py -> <app dir>/models/ocr/vietocr-vgg_seq2seq (missing -> paddle)
+        "recognizer": "vietocr"
+      },
       // 🧠 Step Summarizer: Asynchronous visual context compressor
       // Summarizes intermediate steps in background without blocking the runner,
       // replacing images only after strictly objective, high-density summaries are ready.
