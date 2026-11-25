@@ -38,13 +38,19 @@ from typing import Annotated, Any
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ImageContent, TextContent
 
+from artemis.clients.screen_client_factory import DeviceOfflineError
 from artemis.mcp.action_manifest import validate_actuator
 from artemis.mcp.action_specs import (
     exception_prefix,
     make_wire_handler,
     wire_dialects,
 )
-from artemis.mcp.action_types import ActionCode, ActionResult, ObserveResult
+from artemis.mcp.action_types import (
+    ActionCode,
+    ActionResult,
+    DEVICE_OFFLINE_PREFIX,
+    ObserveResult,
+)
 from artemis.mcp.actuators.base import Actuator
 from artemis.mcp.observation import observe as observe_impl
 from artemis.mcp.screen_effect import ScreenEffectTracker, pre_wait_result
@@ -65,7 +71,11 @@ def _wrap(res: ActionResult) -> CallToolResult:
 
 def _wrap_exception(action: str, exc: Exception) -> CallToolResult:
     return _wrap(
-        ActionResult.failure(action, f"{exception_prefix(action)}: {exc}", detail=repr(exc))
+        ActionResult.failure(
+            action,
+            f"{exception_prefix(action)}: {exc}",
+            detail=repr(exc),
+        )
     )
 
 
@@ -184,6 +194,18 @@ def build_action_server(actuator: Actuator, name: str = "artemis_actions") -> Fa
                     )
                 return CallToolResult(
                     content=content,
+                    structuredContent=obs.model_dump(mode="json"),
+                    isError=False,
+                )
+            except DeviceOfflineError as e:
+                obs = ObserveResult(
+                    ok=False,
+                    code=ActionCode.DEVICE_ERROR,
+                    message=f"{DEVICE_OFFLINE_PREFIX} {e}",
+                    hierarchy_ok=False,
+                )
+                return CallToolResult(
+                    content=[TextContent(type="text", text=obs.message)],
                     structuredContent=obs.model_dump(mode="json"),
                     isError=False,
                 )

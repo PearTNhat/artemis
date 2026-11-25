@@ -100,6 +100,15 @@ DESCRIBE = ("Describe this Android screen in at most 60 words: app/screen name, 
 norm = lambda t: " ".join((t or "").lower().split())
 
 
+# Stored answers were given against the list as it was then: keep "*" lines as
+# their own entries (the Flash list folds them into "(required)" since 2026-11-23,
+# which shifts indices on screens that have them).
+import artemis.utils.visualization as _vis  # noqa: E402
+
+if "mark_required" in _vis.format_minimal_list_with_elements.__code__.co_varnames:
+    _format_list = _vis.format_minimal_list_with_elements
+    _vis.format_minimal_list_with_elements = lambda *a, **k: _format_list(*a, **{"mark_required": False, **k})
+
 # ------------------------------------------------------------------ dataset
 def load_cases(limit=None):
     cases = []

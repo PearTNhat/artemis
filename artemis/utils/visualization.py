@@ -553,6 +553,60 @@ def _required_markers(nodes: list[dict[str, Any]], width: int) -> tuple[set[int]
     return required, stars
 
 
+def _relation_hint(e: dict[str, Any], labeled: list[dict[str, Any]], width: int, height: int) -> str:
+    """Structural relation of an unlabeled element to nearby text (no pixel numbers):
+    contains "X" > same row as "X", left/right of it > above/below "X" > screen zone."""
+    x1, y1, x2, y2 = e["bounds"]
+    cx, cy = e["center"]
+    zone_v = "top bar" if cy < 0.12 * height else "bottom bar" if cy > 0.88 * height else ""
+    zone_h = "left" if cx < width / 3 else "right" if cx > 2 * width / 3 else "center"
+    zone = f"{zone_v}, {zone_h}" if zone_v else ""
+
+    def name(t):
+        return '"' + str(t["text"])[:35].replace('"', "'").replace("\n", " ") + '"'
+
+    def join(rel):
+        return f"{rel}; {zone}" if zone else rel
+
+    inside = [t for t in labeled if x1 <= t["center"][0] <= x2 and y1 <= t["center"][1] <= y2]
+    if inside:
+        return join("contains " + name(min(inside, key=lambda t: t["bounds"][1])))
+    row = [t for t in labeled
+           if min(y2, t["bounds"][3]) - max(y1, t["bounds"][1]) > 0.5 * min(y2 - y1, t["bounds"][3] - t["bounds"][1])]
+    if row:
+        t = min(row, key=lambda t: abs(t["center"][0] - cx))
+        return join(f"same row as {name(t)}, {'right' if cx > t['center'][0] else 'left'} of it")
+    reach = 1.2 * (x2 - x1)
+    below = [t for t in labeled if t["bounds"][1] >= y2 - 5 and t["bounds"][1] - y2 < 0.12 * height
+             and t["bounds"][0] - reach <= cx <= t["bounds"][2] + reach]
+    if below:
+        return join("above " + name(min(below, key=lambda t: (t["bounds"][1], abs(t["center"][0] - cx)))))
+    above = [t for t in labeled if t["bounds"][3] <= y1 + 5 and y1 - t["bounds"][3] < 0.12 * height
+             and t["bounds"][0] - reach <= cx <= t["bounds"][2] + reach]
+    if above:
+        return join("below " + name(min(above, key=lambda t: (-t["bounds"][3], abs(t["center"][0] - cx)))))
+    return zone
+
+
+def add_relation_hints(text: str, elements: list[dict[str, Any]], width: int, height: int) -> str:
+    """Appends ``[relation]`` to unlabeled lines of a compact list (text-only turns)."""
+    labeled = [e for e in elements if str(e.get("text") or "").strip() and e.get("bounds") and e.get("center")]
+    hints = {}
+    for e in elements:
+        if str(e.get("text") or "").strip() or not e.get("bounds") or not e.get("center"):
+            continue
+        hint = _relation_hint(e, labeled, width, height)
+        if hint:
+            hints[e.get("index")] = hint
+    out = []
+    for line in text.splitlines():
+        m = re.match(r"\[(\d+)\]", line)
+        if m and int(m.group(1)) in hints:
+            line += f" [{hints[int(m.group(1))]}]"
+        out.append(line)
+    return "\n".join(out)
+
+
 def _is_cut_off_strip(element: dict[str, Any], height: int) -> bool:
     """An unlabeled control showing only a flat strip (rest hidden past an edge or bar)."""
     if any(k in str(element.get("class") or "") for k in _CUT_OFF_EXEMPT_CLASSES):
@@ -637,6 +691,7 @@ def format_minimal_list_with_elements(
     height: int = 2400,
     compact: bool = False,
     hidden: set[int] | None = None,
+    mark_required: bool = True,
 ) -> tuple[str, list[dict[str, Any]], list[str]]:
     """Formats fused XML hierarchy into a minimal list with sequence numbers,
 
@@ -689,7 +744,9 @@ def format_minimal_list_with_elements(
             n for n in fused_xml
             if not _is_status_bar_node(n, height, parse_bounds(n.get("bounds")))
         ]
-    required_ids, star_ids = _required_markers(fused_xml, width) if compact else (set(), set())
+    required_ids, star_ids = (
+        _required_markers(fused_xml, width) if compact and mark_required else (set(), set())
+    )
 
     def is_duplicate(text_val: str, cx: int, cy: int) -> bool:
         text_clean = text_val.strip()

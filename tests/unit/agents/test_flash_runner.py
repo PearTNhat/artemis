@@ -682,3 +682,69 @@ async def test_process_tool_calls_aborts_on_failure(mock_context):
     assert len(skipped) == 1
     assert "Burst was aborted due to previous action failure" in skipped[0].content
 
+
+@pytest.mark.asyncio
+async def test_flash_runner_stops_immediately_when_device_disconnects_at_start(mock_context):
+    from artemis.clients.screen_client_factory import DeviceOfflineError
+
+    mock_context.device.device_id = "dev-123"
+    with patch("artemis.controllers.unified_controller.get_driver"):
+        runner = FlashRunner(mock_context, goal="Open Settings")
+
+    runner._init_llm = Mock()
+    runner._invoke_model = AsyncMock()
+    state = SimpleNamespace(indexed_elements=[], indexed_points=[], latest_screenshot=None)
+
+    with patch(
+        "artemis.agents.flash.runner.capture_screenshot_and_parse_ui",
+        new_callable=AsyncMock,
+        side_effect=DeviceOfflineError("dev-123", "offline"),
+    ):
+        result = await runner.run(state)
+
+    assert result["status"] == "failed"
+    assert "dev-123" in result["explanation"]
+    runner._invoke_model.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_flash_runner_stops_immediately_when_device_disconnects_mid_action(mock_context):
+    mock_context.device.device_id = "dev-123"
+    with patch("artemis.controllers.unified_controller.get_driver"):
+        runner = FlashRunner(mock_context, goal="Open Settings")
+
+    runner._init_llm = Mock()
+    runner._invoke_model = AsyncMock(
+        return_value=SimpleNamespace(
+            content="",
+            tool_calls=[{"name": "click", "args": {"target": [500, 500]}, "id": "tc-1"}],
+            response_metadata={},
+            usage_metadata=None,
+        )
+    )
+    runner.executor = Mock()
+    runner.executor.action_tool_names = frozenset(["click"])
+    runner.executor.execute = AsyncMock(
+        return_value=ToolExecutionResult(
+            tool_call_id="tc-1",
+            tool_name="click",
+            status="error",
+            text_summary="Device dev-123 is not available (adb reports state 'offline').",
+            metadata={"code": "DEVICE_ERROR", "device_offline": True},
+        )
+    )
+    state = SimpleNamespace(
+        indexed_elements=[], indexed_points=[], latest_screenshot=None, screen_scrollable=None
+    )
+
+    with patch(
+        "artemis.agents.flash.runner.capture_screenshot_and_parse_ui",
+        new_callable=AsyncMock,
+        return_value=("shot.png", b"IMG", "1. Settings"),
+    ):
+        result = await runner.run(state)
+
+    assert result["status"] == "failed"
+    assert "offline" in result["explanation"]
+    assert runner._invoke_model.call_count == 1
+

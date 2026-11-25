@@ -141,6 +141,37 @@ select, input[type="search"] { font: inherit; font-size: .85rem; padding: 4px 8p
   </header>
 
   <section>
+    <h2>Báo cáo tóm tắt</h2>
+    <div class="panel findings">
+      <ul>
+        <li><b>Hiện tại:</b> mỗi bước gửi cho AI <b>ảnh chụp màn hình + list</b>: danh sách phần tử lấy từ cây XML (bounding box, nhãn, loại, trạng thái). AI chọn số thứ tự, code tự bấm vào tâm phần tử.</li>
+      </ul>
+    </div>
+    <h3>Những cách đã thử nhưng không tốt</h3>
+    <div class="panel findings">
+      <ul>
+        <li><b>Chỉ dùng OCR thì không đủ (40/56):</b> OCR không đọc được icon không có chữ (bỏ sót 30/76). Bộ dò icon bằng OpenCV chỉ tìm ra khung chứ không biết icon là gì, và nhận nhầm ảnh món ăn hay banner thành icon (~60% khung là sai). OCR còn làm mất dấu tiếng Việt ("sạc" thành "sc") và đọc cả chữ trong ảnh, banner (~35% dòng là thừa).</li>
+        <li><b>Gộp toàn bộ OCR vào list XML còn tệ hơn</b> (45/56 so với 51/56): chữ thừa làm AI chọn nhầm, và mỗi bước chậm thêm ~0.7 s.</li>
+        <li><b>Wireframe, hoặc wireframe có chèn ảnh icon, + list:</b> kém chính xác hơn list + ảnh thật (47–49 so với 49–51/56). Tốc độ <b>ngang nhau</b> (~2.2–2.3 s mỗi lần chọn), vì model tính token ảnh theo kích thước ảnh chứ không theo nội dung (~1.000 token mỗi ảnh).</li>
+        <li><b>Nén ảnh:</b> trên Ollama không giúp gì, vì ảnh luôn tính ~1.000 token. Chỉ có ích trên server tính token theo pixel (llama.cpp) hoặc với Gemini <code>media_resolution=low</code>.</li>
+        <li><b>Bỏ ảnh, chỉ gửi chữ:</b> chỉ đúng khi phần tử có nhãn. Thử trên máy thật với Gemini: tổng thời gian không giảm, vì AI phải xin ảnh 5–9 lần mỗi tác vụ, và <b>3/3 lần báo xong sai</b> do không thấy chữ đỏ báo lỗi hay nút đổi trạng thái. Model 4B gần như không biết tự xin ảnh mà cứ đoán. <b>Chưa đạt yêu cầu.</b></li>
+        <li><b>Bản thân XML cũng có lỗi:</b> XML có thể <b>thiếu nút nổi</b> (ví dụ nút "Confirm address" của Grab) và có thể <b>lẫn cả phần tử của màn hình phía sau</b> bottom sheet hay dialog. AI vì vậy bấm nhầm, có lần mất 15–20 lượt ở một bước.</li>
+      </ul>
+    </div>
+    <h3>Hướng đang làm: kết hợp ảnh + XML + OCR, mỗi thứ dùng đúng chỗ</h3>
+    <div class="panel findings">
+      <ul>
+        <li><b>Ảnh thật:</b> luôn gửi, để AI thấy màu, lỗi đỏ, icon và trạng thái màn hình.</li>
+        <li><b>List từ XML:</b> nguồn chính để chọn phần tử, có nhãn, loại và trạng thái.</li>
+        <li><b>OCR chỉ để bù chỗ XML thiếu,</b> không gộp toàn bộ: OCR chỉ chạy khi phát hiện lớp đè (bottom sheet hay dialog) và chỉ thêm những chữ nằm ngoài các phần tử XML đã có. Đồng thời ẩn các phần tử XML bị lớp đè che, có kiểm tra bằng OCR để không ẩn nhầm.</li>
+        <li><b>Đánh dấu ô bắt buộc (*)</b> và ghi chú nút bị che một phần (cần cuộn để xem hết).</li>
+        <li><b>Kết quả thử trên máy thật</b> (Gemini Flash-Lite, đặt món Grab tới bước trước khi bấm đặt hàng, không bấm): <b>từ 38–43 lượt / 272–293 s xuống 21–29 lượt / 152–201 s</b>, không còn bấm nhầm nút thanh toán.</li>
+        <li><b>Bước tiếp theo:</b> chặn AI báo xong sai; tự dừng khi mất kết nối điện thoại hoặc hết quota API; giảm ~20k token lịch sử gửi mỗi lượt. Đây mới là phần làm chậm chính, còn ảnh chỉ chiếm ~5% số token mỗi lượt.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
     <h2>Quy ước &amp; Giải thích thuật ngữ</h2>
     <div class="panel glossary-box">
       <div class="glossary-formula">

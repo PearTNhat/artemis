@@ -38,9 +38,12 @@ from artemis.agents.explorer.tiers import SUBMIT_TOOL
 from artemis.constants import SAFETY_SETTINGS_BLOCK_NONE
 from artemis.data_engine.trace import TraceSpan
 from artemis.llm.reliability import (
+    Failure,
+    FailureCategory,
     LLMExhaustedError,
     LLMPermanentError,
     classify_failure,
+    is_daily_quota_message,
     retry_policy_for,
 )
 from artemis.services.llm import _record_llm_event, _record_llm_retry
@@ -59,6 +62,15 @@ async def _generate_content_with_reliability(operation, *, label: str = "Explore
     failures raise ``LLMPermanentError``; exhausted retries raise
     ``LLMExhaustedError`` according to the shared category policy.
     """
+    from artemis.llm.google.key_pool import get_key_pool
+
+    pool = get_key_pool()
+    if pool.all_keys_permanently_blocked():
+        raise LLMPermanentError(
+            f"{label} aborted: all Gemini API key(s) are locked for this session.",
+            failure=Failure(FailureCategory.RATE_LIMIT, retryable=False, should_fallback=True),
+        )
+
     attempt = 0
     while True:
         try:
@@ -67,6 +79,14 @@ async def _generate_content_with_reliability(operation, *, label: str = "Explore
             attempt += 1
             failure = classify_failure(call_err)
             if not failure.retryable:
+                if pool.has_keys() and (
+                    failure.category is FailureCategory.AUTHENTICATION
+                    or is_daily_quota_message(str(call_err))
+                ):
+                    pool.rotate_key(
+                        reason=f"{failure.category.value}: {str(call_err)[:100]}",
+                        permanent=True,
+                    )
                 logger.error(f"{label} permanently failed [{failure.category.value}]: {call_err}")
                 _record_llm_event(
                     "llm_gave_up",

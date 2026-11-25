@@ -27,6 +27,8 @@ import threading
 import time
 from typing import Any
 
+from artemis.llm.reliability import is_daily_quota_message
+
 logger = logging.getLogger("artemis.llm.google.key_pool")
 
 
@@ -42,6 +44,13 @@ class GeminiKeyPool:
         self._permanent_bad_keys: set[str] = set()
         self._current_index: int = 0
         self._initialized: bool = False
+        self._ensure_initialized()
+
+    @property
+    def keys(self) -> list[str]:
+        self._ensure_initialized()
+        with self._lock:
+            return list(self._keys)
 
     def _ensure_initialized(self) -> None:
         if self._initialized:
@@ -66,6 +75,21 @@ class GeminiKeyPool:
                 raw = os.environ.get("GEMINI_API_KEYS", os.environ.get("GEMINI_API_KEY", ""))
 
             # 3. Read directly from .env files as fallback
+            if not raw:
+                try:
+                    from artemis.config.paths import get_env_file
+                    env_file = get_env_file()
+                    if env_file.exists():
+                        for line in env_file.read_text(encoding="utf-8").splitlines():
+                            line = line.strip()
+                            if line.startswith("GEMINI_API_KEYS="):
+                                raw = line.split("=", 1)[1].strip().strip('"').strip("'")
+                                break
+                            elif line.startswith("GEMINI_API_KEY=") and not raw:
+                                raw = line.split("=", 1)[1].strip().strip('"').strip("'")
+                except Exception:
+                    pass
+
             if not raw:
                 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
                 for p in [os.path.join(repo_root, ".env"), os.path.join(repo_root, "artemis", ".env")]:
@@ -103,10 +127,31 @@ class GeminiKeyPool:
         with self._lock:
             return list(self._keys)
 
+    def has_keys(self) -> bool:
+        self._ensure_initialized()
+        with self._lock:
+            return bool(self._keys)
+
     def has_multiple_keys(self) -> bool:
         self._ensure_initialized()
         with self._lock:
             return len(self._keys) > 1
+
+    def is_permanently_blocked(self, key: str | None) -> bool:
+        """True if ``key`` was locked for this session (daily quota / auth failure)."""
+        if not key:
+            return False
+        self._ensure_initialized()
+        with self._lock:
+            return key in self._permanent_bad_keys
+
+    def all_keys_permanently_blocked(self) -> bool:
+        """True when keys are configured and every one of them is session-locked."""
+        self._ensure_initialized()
+        with self._lock:
+            return bool(self._keys) and all(
+                k in self._permanent_bad_keys for k in self._keys
+            )
 
     @staticmethod
     def mask_key(key: str | None) -> str:
@@ -165,6 +210,9 @@ class GeminiKeyPool:
     ) -> str | None:
         """Marks current_key as failed (temp or permanent) and hot-swaps to the next available key."""
         self._ensure_initialized()
+        if is_daily_quota_message(reason):
+            permanent = True
+
         with self._lock:
             now = time.time()
             target_key = current_key
@@ -179,7 +227,8 @@ class GeminiKeyPool:
             if target_key:
                 if permanent:
                     self._permanent_bad_keys.add(target_key)
-                    status_text = "Đã khóa vĩnh viễn"
+                    self._disabled_keys.pop(target_key, None)
+                    status_text = "Đã khóa vĩnh viễn trong phiên"
                 else:
                     self._disabled_keys[target_key] = now
                     status_text = f"Đã tạm khóa {self.COOLDOWN_SECONDS:.0f}s"

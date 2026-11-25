@@ -847,3 +847,19 @@ class TestRunTuningSummary:
         summary = run_tuning_for_profile("pro", checker=checker, explorer=explorer)
         assert summary["verification_level"] == verification_level_for_checker(checker)
         assert summary["explorer_mode"] == explorer.resolve(profile="pro")
+
+
+class TestVideoRecordingEnvOverride:
+    """Single-switch ``ARTEMIS_VIDEO_RECORDING_ENABLED`` controls video recording and tools."""
+
+    @pytest.mark.parametrize("raw_val,expected", [("false", False), ("0", False), ("true", True)])
+    def test_video_recording_env_overrides_config_and_builder(self, monkeypatch, raw_val, expected):
+        from artemis.sdk.builders.agent_config_builder import AgentConfigBuilder
+
+        monkeypatch.setenv("ARTEMIS_VIDEO_RECORDING_ENABLED", raw_val)
+        monkeypatch.delenv("ARTEMIS_WITH_VIDEO_RECORDING_TOOLS", raising=False)
+
+        cfg = load_agent_config()
+        assert cfg.video_analyzer.enabled is expected
+        assert cfg.pro.video_analyzer.enabled is expected
+        assert AgentConfigBuilder().build().video_recording_tools_enabled is expected

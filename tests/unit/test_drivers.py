@@ -233,3 +233,36 @@ async def test_input_text_append_mode_does_not_clear_via_helper():
     client.clear_text.reset_mock()
     assert await driver.input_text("hello world", clear_existing=True) is True
     client.clear_text.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_android_driver_raises_device_offline_on_disconnect(monkeypatch):
+    from artemis.clients.screen_client_factory import DeviceOfflineError
+    from artemis.drivers.android import adb_driver as adb_driver_mod
+
+    mock_adb_client = MagicMock()
+    mock_device = MagicMock()
+    mock_device.screenshot.side_effect = RuntimeError("device 'emulator-5554' not found")
+    mock_device.shell.side_effect = RuntimeError("device offline")
+    mock_adb_client.device.return_value = mock_device
+
+    mock_ui_client = MagicMock()
+    mock_ui_client.get_screen_data.side_effect = DeviceOfflineError("emulator-5554", "offline")
+
+    driver = AndroidAdbDriver(
+        device_id="emulator-5554",
+        adb_client=mock_adb_client,
+        ui_adb_client=mock_ui_client,
+    )
+
+    # Propagates DeviceOfflineError from ui_adb_client instead of falling back to 1x1 PNG
+    with pytest.raises(DeviceOfflineError, match="offline"):
+        await driver.get_screen_data(skip_settling=True)
+
+    # Also detects disconnect on direct ADB screenshot/tap when state != "device"
+    driver._ui_adb_client = None
+    monkeypatch.setattr(adb_driver_mod, "device_state", lambda _serial: "offline")
+    with pytest.raises(DeviceOfflineError, match="offline"):
+        await driver.get_screen_data(skip_settling=True)
+    with pytest.raises(DeviceOfflineError, match="offline"):
+        await driver.tap(100, 100)

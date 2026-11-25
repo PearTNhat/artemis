@@ -154,6 +154,22 @@ class Agent(AgentBase):
         logger.info("Starting background pre-warming of Gemini API connection pools...")
         try:
             key = api_key
+            if not key:
+                from artemis.llm.google.key_pool import get_key_pool
+
+                pool = get_key_pool()
+                if pool.has_keys():
+                    key = pool.get_active_key()
+                    if not key:
+                        logger.warning(
+                            "Skipping LLM pre-warming: all Gemini API key(s) are locked for this session."
+                        )
+                        publish_startup_progress(
+                            "model_ready",
+                            "Gemini API key(s) exhausted for this session",
+                            session_id=self._session_id,
+                        )
+                        return
             if not key and settings.GOOGLE_API_KEY:
                 key = settings.GOOGLE_API_KEY.get_secret_value()
 
@@ -169,12 +185,12 @@ class Agent(AgentBase):
             # 1. Pre-warm Native SDK client
             client = genai.Client(api_key=key)
 
-            # 2. Pre-warm LangChain client
-            chat = ChatGoogleGenerativeAI(model="gemini-3.8-flash", google_api_key=key)
+            # 2. Pre-warm LangChain client (use flash-lite to preserve higher quota)
+            chat = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=key, max_retries=0)
 
             # Fire both calls concurrently in the background
             await asyncio.gather(
-                client.aio.models.count_tokens(model="gemini-3.8-flash", contents="ping"),
+                client.aio.models.count_tokens(model="gemini-3.5-flash-lite", contents="ping"),
                 chat.ainvoke("ping"),
                 return_exceptions=True,
             )

@@ -23,10 +23,12 @@ import base64
 import json
 from pathlib import Path
 
+from artemis.clients.screen_client_factory import DeviceOfflineError
 from artemis.context import ArtemisContext
 from artemis.graph.state import State
 from artemis.mcp.action_names import to_canonical_call
 from artemis.mcp.action_session import ActionSession
+from artemis.mcp.action_types import is_device_offline_result
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -92,7 +94,13 @@ async def exec_action(
 
     try:
         res = await session.call(tool_name, wire_args)
+    except DeviceOfflineError:
+        raise
     except Exception as e:
         return False, f"MCP call failed: {e}"
+
+    if is_device_offline_result(res):
+        device_id = getattr(getattr(ctx, "device", None), "device_id", None) or "unknown"
+        raise DeviceOfflineError(device_id, None, message=res.message)
 
     return (True, "") if res.ok else (False, res.message)

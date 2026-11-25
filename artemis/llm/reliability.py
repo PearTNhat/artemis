@@ -75,11 +75,24 @@ def extract_status_code(error: BaseException) -> int | None:
 
 
 _RATE_LIMIT_MARKERS = ("rate limit", "quota", "resource_exhausted")
+_DAILY_QUOTA_MARKERS = (
+    "per day",
+    "perday",
+    "daily",
+    "generaterequestsperday",
+    "requests_per_day",
+)
 _UNAVAILABLE_MARKERS = ("unavailable", "overloaded", "high demand", "service unavailable")
 _AUTH_MARKERS = ("unauthorized", "forbidden", "api key", "credential")
 # "deadline exceeded"/"deadline_exceeded" cover google-genai SDK timeouts that
 # surface without an HTTP status code attached.
 _TIMEOUT_MARKERS = ("timed out", "timeout", "deadline exceeded", "deadline_exceeded")
+
+
+def is_daily_quota_message(message: str) -> bool:
+    """Return True when a rate-limit / quota error indicates an exhausted daily limit."""
+    lowered = (message or "").lower()
+    return any(marker in lowered for marker in _DAILY_QUOTA_MARKERS)
 
 
 def classify_failure(error: BaseException) -> Failure:
@@ -91,6 +104,10 @@ def classify_failure(error: BaseException) -> Failure:
     message = str(error).lower()
 
     if code == 429 or any(marker in message for marker in _RATE_LIMIT_MARKERS):
+        if is_daily_quota_message(message):
+            # Daily quota cannot recover within a task retry window; fail fast
+            # (or hand over to a configured fallback) without retrying or pausing.
+            return Failure(FailureCategory.RATE_LIMIT, False, True)
         return Failure(FailureCategory.RATE_LIMIT, True, True)
     if code in {500, 502, 503, 504} or any(marker in message for marker in _UNAVAILABLE_MARKERS):
         return Failure(FailureCategory.PROVIDER_UNAVAILABLE, True, True)

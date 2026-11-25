@@ -45,11 +45,13 @@ from artemis.data_engine.trace import CURRENT_TRACE_ID, DataEngineCallbackHandle
 from artemis.llm.google import is_google_chat_model, is_google_provider
 from artemis.llm.reliability import (
     CircuitBreaker,
+    Failure,
     FailureCategory,
     LLMCallError,
     LLMExhaustedError,
     LLMPermanentError,
     classify_failure,
+    is_daily_quota_message,
     retry_policy_for,
 )
 from artemis.llm.router import ModelEndpoint, ModelFactory, ModelProvider
@@ -404,6 +406,110 @@ async def _wait_for_breaker(key: str) -> None:
             break
 
 
+def _ensure_active_google_key(provider: str | None, model_wrapper: Any) -> None:
+    """Block calls when all Gemini keys are session-locked, or swap away from a locked key."""
+    if not is_google_provider(provider) or model_wrapper is None:
+        return
+    from artemis.llm.google.key_pool import get_key_pool
+
+    pool = get_key_pool()
+    if not pool.has_keys():
+        return
+
+    target_model = getattr(model_wrapper, "base_model", model_wrapper)
+    gm = pool.find_google_model(target_model)
+    current_k = (
+        gm.google_api_key.get_secret_value() if gm and gm.google_api_key else None
+    )
+    if not pool.all_keys_permanently_blocked() and not (
+        current_k and pool.is_permanently_blocked(current_k)
+    ):
+        return
+
+    next_k = pool.get_active_key()
+    if next_k and next_k != current_k and gm is not None:
+        pool.update_model_key(target_model, next_k)
+        llm_logger.info(
+            "🔄 [Session Key Check] Switched away from locked Gemini key to %s.",
+            pool.mask_key(next_k),
+        )
+        return
+
+    msg = "All configured Gemini API key(s) are locked for this session (daily quota or auth error)."
+    llm_logger.warning(msg)
+    _record_llm_event(
+        "llm_gave_up",
+        {
+            "error": msg,
+            "category": FailureCategory.RATE_LIMIT.value,
+            "retryable": False,
+        },
+        status="failed",
+    )
+    raise LLMPermanentError(
+        msg,
+        failure=Failure(FailureCategory.RATE_LIMIT, retryable=False, should_fallback=True),
+    )
+
+
+def _try_rotate_google_key(
+    provider: str | None,
+    model_wrapper: Any,
+    error: Exception,
+    failure: Failure,
+) -> bool:
+    """Lock/rotate a Google API key on rate limit, daily quota, or auth failure.
+
+    Returns True when another active key was hot-swapped onto ``model_wrapper``
+    and the caller should retry immediately. Even with a single key, daily quota
+    and auth failures lock that key in the pool for the rest of the session.
+    """
+    if not is_google_provider(provider) or model_wrapper is None:
+        return False
+
+    from artemis.llm.google.key_pool import get_key_pool
+
+    pool = get_key_pool()
+    err_str = str(error).lower()
+    is_rate_limit = failure.category == FailureCategory.RATE_LIMIT
+    is_daily_limit = is_daily_quota_message(err_str)
+    is_auth_or_perm = (
+        failure.category == FailureCategory.AUTHENTICATION
+        or "free tier" in err_str
+        or "api key not valid" in err_str
+        or "permission_denied" in err_str
+    )
+    if not (is_rate_limit or is_auth_or_perm or is_daily_limit):
+        return False
+
+    # With a single key, only lock permanent failures (daily quota / auth);
+    # temporary RPM limits simply fall through to the retry/backoff policy.
+    if not pool.has_multiple_keys() and not (is_daily_limit or is_auth_or_perm):
+        return False
+
+    target_model = getattr(model_wrapper, "base_model", model_wrapper)
+    gm = pool.find_google_model(target_model)
+    current_k = (
+        gm.google_api_key.get_secret_value() if gm and gm.google_api_key else None
+    )
+    if not pool.has_keys() and not current_k:
+        return False
+
+    next_k = pool.rotate_key(
+        current_key=current_k,
+        reason=f"{failure.category.value}: {str(error)[:100]}",
+        permanent=(is_auth_or_perm or is_daily_limit),
+    )
+    if next_k:
+        pool.update_model_key(target_model, next_k)
+        llm_logger.warning(
+            f"🔄 [Auto Key Switch] Hot-swapped Gemini key to {pool.mask_key(next_k)}. "
+            "Retrying device action immediately without pause."
+        )
+        return True
+    return False
+
+
 async def _run_with_recovery[T](
     call_once: Callable[[], Awaitable[T]],
     *,
@@ -417,8 +523,9 @@ async def _run_with_recovery[T](
 
     - Retryable categories back off per policy; each retry is recorded for UI
       transparency via _record_llm_retry.
-    - Non-retryable categories (auth, bad request) raise LLMPermanentError
-      immediately: retrying cannot help and pausing would hang the task.
+    - Non-retryable categories (auth, bad request, daily quota) raise
+      LLMPermanentError immediately: retrying cannot help and pausing would
+      hang the task.
     - When retryable attempts are exhausted: if a fallback model is waiting
       (with_fallback), raise LLMExhaustedError so it takes over immediately;
       otherwise pause the task (bounded by settings.LLM_PAUSE_TIMEOUT_SECONDS)
@@ -432,6 +539,7 @@ async def _run_with_recovery[T](
         pause_file: Path | None = None
         try:
             while True:
+                _ensure_active_google_key(provider, model_wrapper)
                 if endpoint_key:
                     await _wait_for_breaker(endpoint_key)
                 try:
@@ -447,41 +555,9 @@ async def _run_with_recovery[T](
                     if failure.category is FailureCategory.CANCELLED:
                         raise
 
-                    # Check for Gemini key rotation on rate limit (429) or invalid/unbilled key (401/403)
-                    if is_google_provider(provider) and model_wrapper is not None:
-                        from artemis.llm.google.key_pool import get_key_pool
-
-                        pool = get_key_pool()
-                        if pool.has_multiple_keys():
-                            err_str = str(e).lower()
-                            is_rate_limit = failure.category == FailureCategory.RATE_LIMIT
-                            is_auth_or_perm = (
-                                failure.category == FailureCategory.AUTHENTICATION
-                                or "free tier" in err_str
-                                or "api key not valid" in err_str
-                                or "permission_denied" in err_str
-                            )
-                            if is_rate_limit or is_auth_or_perm:
-                                target_model = getattr(model_wrapper, "base_model", model_wrapper)
-                                gm = pool.find_google_model(target_model)
-                                current_k = (
-                                    gm.google_api_key.get_secret_value()
-                                    if gm and gm.google_api_key
-                                    else None
-                                )
-                                next_k = pool.rotate_key(
-                                    current_key=current_k,
-                                    reason=f"{failure.category.value}: {str(e)[:100]}",
-                                    permanent=is_auth_or_perm,
-                                )
-                                if next_k:
-                                    pool.update_model_key(target_model, next_k)
-                                    llm_logger.warning(
-                                        f"🔄 [Auto Key Switch] Hot-swapped Gemini key to {pool.mask_key(next_k)}. "
-                                        "Retrying device action immediately without pause."
-                                    )
-                                    attempts.pop(failure.category, None)
-                                    continue
+                    if _try_rotate_google_key(provider, model_wrapper, e, failure):
+                        attempts.pop(failure.category, None)
+                        continue
 
                     if endpoint_key:
                         _ENDPOINT_BREAKER.record_failure(endpoint_key, failure)
@@ -956,7 +1032,8 @@ def get_google_llm(
         include_thoughts=include_thoughts,
         enable_grounding=enable_grounding,
     )
-    return ModelFactory.create_model(ep)
+    raw = ModelFactory.create_model(ep)
+    return RobustChatModelWrapper(raw, endpoint=ep)
 
 
 def get_model_by_spec(spec: str | None, temperature: float = 0.0) -> BaseChatModel:

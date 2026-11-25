@@ -33,10 +33,12 @@ from artemis.agents.explorer.constants import (
     ASK_EXPLORER_QUERY_DESCRIPTION,
     ASK_EXPLORER_TOOL_NAME,
 )
+from artemis.clients.screen_client_factory import DeviceOfflineError
 from artemis.context import ArtemisContext
 from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.core.tool_declaration import ToolDeclaration
 from artemis.mcp.action_specs import tool_declaration
+from artemis.mcp.action_types import is_device_offline_result
 from artemis.mcp.observation import observe
 from artemis.graph.state import State
 from artemis.utils.notes import (
@@ -176,6 +178,9 @@ async def capture_screenshot_and_parse_ui(
     ``State`` write-back (indexed points/elements) the agents rely on.
     """
     obs, screenshot_bytes = await observe(ctx, controller, settle_ms=0 if skip_settling else 400)
+    if is_device_offline_result(obs):
+        device_id = getattr(getattr(ctx, "device", None), "device_id", None) or "unknown"
+        raise DeviceOfflineError(device_id, None, message=obs.message)
     if not obs.ok:
         return None, None, None
 

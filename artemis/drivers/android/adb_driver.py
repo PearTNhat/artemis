@@ -21,7 +21,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal
 
-from adbutils import AdbClient, AdbDevice
+from adbutils import AdbClient, AdbDevice, AdbError
+from artemis.clients.screen_client_factory import DeviceOfflineError, device_state
 from artemis.config.paths import get_temp_dir
 from artemis.drivers.base import BaseDeviceDriver, KeyCode, ScreenData, SwipeDirection
 from artemis.toolchain import find_ffmpeg, find_scrcpy
@@ -109,6 +110,29 @@ class AndroidAdbDriver(BaseDeviceDriver):
             self._device = self._adb_client.device(serial=self._device_id)
         return self._device
 
+    def _raise_if_device_offline(self, exc: BaseException) -> None:
+        """Raise DeviceOfflineError when an ADB/UI failure is caused by disconnect."""
+        if isinstance(exc, DeviceOfflineError):
+            raise exc
+        msg = str(exc).lower()
+        looks_disconnected = isinstance(exc, AdbError) or any(
+            marker in msg
+            for marker in (
+                "offline",
+                "unauthorized",
+                "not found",
+                "no devices",
+                "closed",
+                "broken pipe",
+                "connection reset",
+            )
+        )
+        if not looks_disconnected:
+            return
+        state = device_state(self._device_id)
+        if state != "device":
+            raise DeviceOfflineError(self._device_id, state) from exc
+
     async def connect(self) -> None:
         """Verify device availability."""
         try:
@@ -160,6 +184,8 @@ class AndroidAdbDriver(BaseDeviceDriver):
                         ui_elements = [raw_elements]
                     elif isinstance(raw_elements, list):
                         ui_elements = raw_elements
+            except DeviceOfflineError:
+                raise
             except Exception as e:
                 logger.debug(f"Direct ui_adb_client.get_screen_data error: {e}")
 
@@ -172,8 +198,11 @@ class AndroidAdbDriver(BaseDeviceDriver):
                     screenshot_bytes = buf.getvalue()
                     self._width, self._height = pil_img.size
                     screenshot_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+            except DeviceOfflineError:
+                raise
             except Exception as e:
                 logger.warning(f"Device screenshot capture failed on {self._device_id}: {e}")
+                await asyncio.to_thread(self._raise_if_device_offline, e)
 
         if not screenshot_base64 or not isinstance(screenshot_base64, str):
             # Fallback for headless testing environments
@@ -194,6 +223,8 @@ class AndroidAdbDriver(BaseDeviceDriver):
                 elif hasattr(self._ui_adb_client, "get_ui_elements"):
                     res = self._ui_adb_client.get_ui_elements()
                     ui_elements = await res if asyncio.iscoroutine(res) else res
+            except DeviceOfflineError:
+                raise
             except Exception as e:
                 logger.debug(f"UI hierarchy extraction failed: {e}")
 
@@ -280,8 +311,11 @@ class AndroidAdbDriver(BaseDeviceDriver):
             logger.info(f"[ADB] {cmd}")
             await asyncio.to_thread(self.device.shell, cmd)
             return True
+        except DeviceOfflineError:
+            raise
         except Exception as e:
             logger.error(f"Tap failed at ({x}, {y}): {e}")
+            await asyncio.to_thread(self._raise_if_device_offline, e)
             return False
 
     async def long_press(self, x: int, y: int, duration_ms: int = 1000) -> bool:
@@ -300,8 +334,11 @@ class AndroidAdbDriver(BaseDeviceDriver):
             logger.info(f"[ADB] {cmd}")
             await asyncio.to_thread(self.device.shell, cmd)
             return True
+        except DeviceOfflineError:
+            raise
         except Exception as e:
             logger.error(f"Swipe failed from ({start_x},{start_y}) to ({end_x},{end_y}): {e}")
+            await asyncio.to_thread(self._raise_if_device_offline, e)
             return False
 
     async def swipe_direction(
@@ -557,8 +594,11 @@ class AndroidAdbDriver(BaseDeviceDriver):
                     await asyncio.to_thread(self.device.shell, f"input text {escaped}")
             await asyncio.sleep(0.35)
             return await self._verify_focused_text(norm_text)
+        except DeviceOfflineError:
+            raise
         except Exception as e:
             logger.error(f"Input text failed for '{text}': {e}")
+            await asyncio.to_thread(self._raise_if_device_offline, e)
             return False
 
     async def press_key(self, key: KeyCode | str | int) -> bool:
@@ -570,8 +610,11 @@ class AndroidAdbDriver(BaseDeviceDriver):
 
             await asyncio.to_thread(self.device.shell, f"input keyevent {keycode_val}")
             return True
+        except DeviceOfflineError:
+            raise
         except Exception as e:
             logger.error(f"Press key failed for '{key}': {e}")
+            await asyncio.to_thread(self._raise_if_device_offline, e)
             return False
 
     async def launch_app(self, package_name: str) -> bool:

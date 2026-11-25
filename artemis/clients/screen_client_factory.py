@@ -65,9 +65,12 @@ class DeviceOfflineError(RuntimeError):
     burn UIAutomator2's own multi-attempt connect timeout.
     """
 
-    def __init__(self, device_id: str, state: str | None):
+    def __init__(self, device_id: str, state: str | None, message: str | None = None):
         self.device_id = device_id
         self.state = state
+        if message is not None:
+            super().__init__(message)
+            return
         detail = f"adb reports state '{state}'" if state else "adb does not list it"
         super().__init__(
             f"Device {device_id} is not available ({detail}). Reconnect the device or "
@@ -250,7 +253,13 @@ class FallbackScreenClient:
                 self._set_active("helper", "helper recovered" if self._last_failure else None)
                 self._last_failure = None
                 return result
-        result = getattr(self.uiautomator, name)(*args, **kwargs)
+        try:
+            result = getattr(self.uiautomator, name)(*args, **kwargs)
+        except DeviceOfflineError:
+            raise
+        except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+            self._ensure_device_online()
+            raise
         self._set_active("uiautomator", self._last_failure)
         return result
 
@@ -271,7 +280,13 @@ class FallbackScreenClient:
             else:
                 self._set_active("helper")
                 return
-        self.uiautomator.connect()
+        try:
+            self.uiautomator.connect()
+        except DeviceOfflineError:
+            raise
+        except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+            self._ensure_device_online()
+            raise
         self._set_active("uiautomator", self._last_failure)
 
     def disconnect(self) -> None:

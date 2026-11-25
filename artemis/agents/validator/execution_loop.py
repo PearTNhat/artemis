@@ -49,6 +49,7 @@ from artemis.agents.validator.incidents import (
     KIND_SAFETY_NET,
     open_incident,
 )
+from artemis.clients.screen_client_factory import DeviceOfflineError
 from artemis.data_engine.trace import CURRENT_TRACE_ID
 from artemis.graph.state import State
 from artemis.utils.coordinates import normalize_action_dict
@@ -136,6 +137,8 @@ async def _attempt_local_execution(
     for attempt in range(max_local_retries):
         try:
             exec_success, exec_error = await node._exec_action(session, action_item)
+        except DeviceOfflineError:
+            raise
         except Exception as e:
             exec_success = False
             exec_error = str(e)

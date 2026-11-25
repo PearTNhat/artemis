@@ -26,10 +26,11 @@ import inspect
 import time
 from typing import Any
 
+from artemis.clients.screen_client_factory import DeviceOfflineError
 from artemis.config import get_temp_dir
 from artemis.context import ArtemisContext
 from artemis.controllers.unified_controller import UnifiedMobileController
-from artemis.mcp.action_types import ActionCode, ObserveResult
+from artemis.mcp.action_types import ActionCode, DEVICE_OFFLINE_PREFIX, ObserveResult
 from artemis.utils.ocr_xml_fusion import fuse_ocr_with_xml
 from artemis.utils.visualization import format_minimal_list_with_elements
 from third_party.mobile_use.utils.logger import get_logger
@@ -140,6 +141,17 @@ async def observe(
         device_data = await _capture(controller)
         timings["capture"] = round(time.monotonic() - phase_start, 3)
         screenshot_bytes = base64.b64decode(device_data.base64)
+    except DeviceOfflineError as e:
+        logger.error(f"Device disconnected during screen observation: {e}")
+        return (
+            ObserveResult(
+                ok=False,
+                code=ActionCode.DEVICE_ERROR,
+                message=f"{DEVICE_OFFLINE_PREFIX} {e}",
+                hierarchy_ok=False,
+            ),
+            None,
+        )
     except Exception as e:
         logger.error(f"Failed to capture screen state: {e}")
         return (
@@ -207,6 +219,10 @@ async def observe(
                 minimal_list_str += "\n" + "\n".join(gap_lines)
                 elements.extend(gap_elements)
             ocr_results = gap_results
+        if compact and getattr(ctx, "flash_relation_hints", False) is True and elements:
+            from artemis.utils.visualization import add_relation_hints
+
+            minimal_list_str = add_relation_hints(minimal_list_str, elements, width, height)
         timings["list"] = round(time.monotonic() - phase_start, 3)
     except Exception as e:
         logger.error(f"Failed to fetch or fuse UI hierarchy: {e}")

@@ -823,6 +823,20 @@ class FlashModelImageConfig(BaseModel):
         le=95,
         description="JPEG quality of the shrunk screenshot.",
     )
+    send: Literal["always", "on_demand"] = Field(
+        default="always",
+        description=(
+            "'always': every turn carries the screenshot. 'on_demand' (experimental, for"
+            " models that ask when unsure): turns go as text (element list with relation"
+            " hints and OCR gap filling); the screenshot is attached on the first turn,"
+            " after a failed / no-effect action or a notice, when the pixels changed but the"
+            " list did not (error highlight, toast), when the model calls look_at_screen,"
+            " before a completion report is accepted, and after text_max_consecutive turns."
+        ),
+    )
+    text_max_consecutive: int = Field(
+        default=4, ge=1, description="'on_demand': attach the screenshot after this many text-only turns."
+    )
     model_config = {"extra": "allow"}
 
 
@@ -1117,9 +1131,9 @@ class AgentGlobalConfig(BaseModel):
         if out_env is not None:
             data.setdefault("outputter", {})["enabled"] = out_env
 
-        vid_rec_env = _parse_bool("ARTEMIS_VIDEO_RECORDING_ENABLED") or _parse_bool(
-            "ARTEMIS_WITH_VIDEO_RECORDING_TOOLS"
-        )
+        vid_rec_env = _parse_bool("ARTEMIS_VIDEO_RECORDING_ENABLED")
+        if vid_rec_env is None:
+            vid_rec_env = _parse_bool("ARTEMIS_WITH_VIDEO_RECORDING_TOOLS")
         if vid_rec_env is not None:
             data.setdefault("video_analyzer", {})["enabled"] = vid_rec_env
             data.setdefault("pro", {}).setdefault("video_analyzer", {})["enabled"] = vid_rec_env

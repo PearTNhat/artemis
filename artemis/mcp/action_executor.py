@@ -40,6 +40,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from artemis.clients.screen_client_factory import DeviceOfflineError
 from artemis.core.tool_failure import ToolFailure, is_tool_failure
 from artemis.context import ArtemisContext
 from artemis.controllers.unified_controller import UnifiedMobileController
@@ -47,7 +48,7 @@ from artemis.data_engine.trace import TraceSpan
 from artemis.mcp.action_manifest import OPTIONAL_ACTIONS, REQUIRED_ACTIONS
 from artemis.mcp.action_specs import exception_prefix
 from artemis.mcp.action_session import ActionSession, get_action_session
-from artemis.mcp.action_types import ActionCode, ActionResult
+from artemis.mcp.action_types import ActionCode, ActionResult, is_device_offline_result
 from artemis.mcp.actuators.adb import AdbActuator
 from artemis.utils.image_hash import dhash_hex, hamming_distance_hex
 from artemis.agents.validator.tool_declarations import (
@@ -297,6 +298,7 @@ class McpActionExecutor:
         action_s: float | None = None
         observe_s: float | None = None
         observe_detail: list[dict[str, Any]] = []
+        device_offline = False
         with span:
             try:
                 session = await self._session_or_start()
@@ -421,12 +423,24 @@ class McpActionExecutor:
                 action_s = time.monotonic() - action_started
                 if res.ok:
                     self._note_interaction(raw_name, target_coordinates)
+                if is_device_offline_result(res):
+                    device_offline = True
 
                 if (res.ok or self._observe_despite_failure(raw_name, res)) and not skip_observe:
                     observe_started = time.monotonic()
                     settle_ms = self._determine_settle_ms(raw_name, args, target_semantics)
                     obs = await session.observe(settle_ms=settle_ms)
                     observe_detail.append({"why": "post", **_timings(obs)})
+                    if is_device_offline_result(obs):
+                        device_offline = True
+                        if res.ok:
+                            res = ActionResult.failure(
+                                raw_name,
+                                obs.message,
+                                code=ActionCode.DEVICE_ERROR,
+                                detail=obs.message,
+                            )
+                            message = obs.message
                     if obs.ok:
                         # Auto-detect skeleton / loading (<=1 text element in content area below top bar)
                         if obs.hierarchy_ok and len(obs.elements) > 3 and (raw_name in ("manage_app", "press_key") or settle_ms >= 1000):
@@ -549,6 +563,8 @@ class McpActionExecutor:
                 res = ActionResult.failure(raw_name, str(e), code=ActionCode.INVALID_ARGS)
                 message = str(e)
             except Exception as e:
+                if isinstance(e, DeviceOfflineError):
+                    device_offline = True
                 message = f"{exception_prefix(raw_name)}: {e}"
                 res = ActionResult.failure(raw_name, message, detail=repr(e))
 
@@ -586,6 +602,7 @@ class McpActionExecutor:
                 "target_coordinates": target_coordinates,
                 "timed_out": getattr(res, "timed_out", False),
                 "no_effect": getattr(res, "no_effect", False),
+                "device_offline": device_offline or is_device_offline_result(res),
                 # Wall time of the device action itself and of the post-action
                 # observation (settle + screenshot + UI hierarchy), in seconds.
                 "action_s": round(action_s, 3) if action_s is not None else None,

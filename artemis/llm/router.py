@@ -259,13 +259,19 @@ class ModelFactory:
             from artemis.llm.google.key_pool import get_key_pool
 
             pool = get_key_pool()
-            api_key = (
-                endpoint.api_key
-                or pool.get_active_key()
-                or (settings.GOOGLE_API_KEY.get_secret_value() if settings.GOOGLE_API_KEY else None)
-                or os.environ.get("GOOGLE_API_KEY")
-                or os.environ.get("GEMINI_API_KEY")
-            )
+            if endpoint.api_key:
+                api_key = endpoint.api_key
+            elif pool.has_keys():
+                # Keep the pool's locked state authoritative: if every key is
+                # locked for the session, do not fall back to settings/env; keep
+                # the configured key so _run_with_recovery rejects before calling.
+                api_key = pool.get_active_key() or pool.keys[0]
+            else:
+                api_key = (
+                    (settings.GOOGLE_API_KEY.get_secret_value() if settings.GOOGLE_API_KEY else None)
+                    or os.environ.get("GOOGLE_API_KEY")
+                    or os.environ.get("GEMINI_API_KEY")
+                )
             # Gemini 1.x/2.x only understand thinking_budget.
             thinking_level = (
                 endpoint.thinking_level if supports_thinking_level(endpoint.model_name) else None
@@ -277,6 +283,7 @@ class ModelFactory:
                 "max_output_tokens": endpoint.max_tokens,
                 "api_key": api_key,
                 "timeout": endpoint.timeout_seconds,
+                "max_retries": 1,
                 "thinking_budget": endpoint.thinking_budget,
                 "thinking_level": thinking_level,
                 "include_thoughts": endpoint.include_thoughts,

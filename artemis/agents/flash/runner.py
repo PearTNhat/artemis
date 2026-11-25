@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import re
+from typing import Any
 import uuid
 
 from jinja2 import Template
@@ -54,6 +55,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
+from artemis.core.tool_declaration import ToolDeclaration
 from artemis.agents.flash.summarizer import VisualStepSummarizer, build_focus_context
 from artemis.agents.operator.prompts import REASONING_REMINDER, UserGuidance, render_user_guidance
 from artemis.agents.validator.tool_declarations import (
@@ -69,6 +71,7 @@ from artemis.agents.validator.tool_declarations import (
     capture_screenshot_and_parse_ui,
     prune_intermediate_screenshots,
 )
+from artemis.clients.screen_client_factory import DeviceOfflineError
 from artemis.config import (
     MemoryRuntimeConfig,
     MemoryTranscriptConfig,
@@ -85,6 +88,7 @@ from artemis.graph.perception import _check_injected_instruction_file
 from artemis.graph.state import State
 from artemis.llm.structured import ParseFailure, parse_structured
 from artemis.mcp.action_executor import McpActionExecutor
+from artemis.mcp.action_types import is_device_offline_result
 from artemis.mcp.screen_effect import NO_EFFECT_MARKER
 from artemis.mcp.observation import observe
 from artemis.memory.transcript import PRO_UI_LIST_MARKER, TranscriptLedger, mark_ephemeral
@@ -223,6 +227,55 @@ def _gemini_image_resolution(ctx: ArtemisContext) -> str | None:
 
 
 
+TEXT_ONLY_NOTE = (
+    "--- No screenshot this turn (text mode): act from the element list. If the list is not "
+    "enough (an unlabeled icon you cannot place, colors or a highlighted error, picture "
+    "content, a control missing from the list), call look_at_screen to get the screenshot "
+    "next turn. ---"
+)
+
+LOOK_AT_SCREEN_TOOL = ToolDeclaration(
+    name="look_at_screen",
+    description=(
+        "Get the current screenshot in the next observation, when the element list alone "
+        "is not enough to decide. Ends the turn; no device action."
+    ),
+    parameters={"type": "object", "properties": {}},
+)
+
+
+def _list_signature(xml_list: str | None) -> set[str]:
+    """Element-list lines with indices and numbers removed."""
+    if not xml_list or "Not available" in xml_list:
+        return set()
+    return {re.sub(r"\d+", "#", ln.strip()) for ln in xml_list.splitlines() if ln.strip()}
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    return len(a & b) / len(a | b) if (a or b) else 1.0
+
+
+def _pixels_changed(before: bytes, after: bytes) -> bool:
+    """64x64 grayscale comparison (status bar masked), as in wait_for_screen_change."""
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        from artemis.utils.screen_diff import compare_screen_pixels, mask_noise
+
+        a = Image.open(BytesIO(before))
+        b = Image.open(BytesIO(after))
+        if a.size != b.size:
+            return True
+        a = mask_noise(a.convert("L"), None, a.width, a.height)
+        b = mask_noise(b.convert("L"), None, b.width, b.height)
+        changed, _cells = compare_screen_pixels(a, b, width=a.width, height=a.height)
+        return changed
+    except Exception:
+        return True
+
+
 class FlashRunner:
     """Reactive, ultra-fast agent execution loop supporting all VLM providers."""
 
@@ -259,6 +312,14 @@ class FlashRunner:
         # format the element list in the compact form; Pro never sets the flag.
         try:
             ctx.flash_compact_list = self.compact_list
+        except (AttributeError, TypeError, ValueError):
+            pass
+        # 'on_demand': text-first turns, screenshot only when needed (see _send_image).
+        self.image_on_demand = (
+            getattr(getattr(self, "model_image_cfg", None), "send", "always") == "on_demand"
+        )
+        try:
+            ctx.flash_relation_hints = self.image_on_demand and self.compact_list
         except (AttributeError, TypeError, ValueError):
             pass
         self.controller = UnifiedMobileController(ctx)
@@ -322,6 +383,8 @@ class FlashRunner:
             from artemis.tools.video_tool import VIDEO_ANALYZER_TOOL
 
             tools.append(VIDEO_ANALYZER_TOOL)
+        if getattr(self, "image_on_demand", False):
+            tools.append(LOOK_AT_SCREEN_TOOL)
         tools.append(REPORT_TASK_STATUS_TOOL)
         # With an actuator installed, drop declarations for device actions the
         # backend does not implement (and append its extension tools); without
@@ -492,6 +555,9 @@ class FlashRunner:
         blocks: list[dict] = [
             {"type": "text", "text": obs_header}
         ]
+        if img_bytes and not self._send_image(turns, img_bytes, xml_list, bool(notices)):
+            img_bytes = None
+            blocks.append({"type": "text", "text": TEXT_ONLY_NOTE})
         if img_bytes:
             # Only the model's copy shrinks; OCR, guards and traces keep the original.
             image_cfg = getattr(self, "model_image_cfg", None)
@@ -522,6 +588,48 @@ class FlashRunner:
         if ephemeral:
             mark_ephemeral(tail, ephemeral)
         return tail
+
+    def _send_image(self, turn: int, img_bytes: bytes, xml_list: str | None, has_notices: bool) -> bool:
+        """'on_demand' mode: whether this turn's tail carries the screenshot.
+
+        Always for 'always'. Otherwise the screenshot goes on the first turn, when
+        asked for (look_at_screen, a deferred completion), after a notice (failed or
+        no-effect action, timeout handover), when the pixels changed although the
+        element list did not (an error highlight, toast or spinner only the image
+        shows), and after ``text_max_consecutive`` text-only turns. A re-asked turn
+        keeps its first decision.
+        """
+        if not getattr(self, "image_on_demand", False):
+            self._text_only_turn = False
+            return True
+        decided = getattr(self, "_image_decision", None)
+        if decided and decided[0] == turn:
+            return decided[1]
+        cfg = getattr(self, "model_image_cfg", None)
+        sig = _list_signature(xml_list)
+        prev_sig = getattr(self, "_prev_list_sig", None)
+        prev_bytes = getattr(self, "_prev_obs_bytes", None)
+        text_turns = getattr(self, "_text_turns", 0)
+        reason = ""
+        if prev_bytes is None:
+            reason = "first"
+        elif getattr(self, "_force_image", False):
+            reason = "requested"
+        elif has_notices:
+            reason = "notice"
+        elif text_turns >= getattr(cfg, "text_max_consecutive", 4):
+            reason = "cap"
+        elif prev_sig is not None and _jaccard(sig, prev_sig) >= 0.9 and _pixels_changed(prev_bytes, img_bytes):
+            reason = "pixel-only change"
+        send = bool(reason)
+        self._force_image = False
+        self._text_turns = 0 if send else text_turns + 1
+        self._prev_list_sig = sig
+        self._prev_obs_bytes = img_bytes
+        self._text_only_turn = not send
+        self._image_decision = (turn, send)
+        logger.info(f"Flash on_demand: turn {turn} {'image (' + reason + ')' if send else 'text only'}")
+        return send
 
     def _extract_response_text(self, response) -> str:
         """Extracts the natural-language thought text from the model response."""
@@ -757,6 +865,17 @@ class FlashRunner:
         except Exception as err:
             logger.debug(f"Could not re-base the executor's screen baseline: {err}")
 
+    def _raise_if_device_offline(self, *, obs: Any = None, exec_result: Any = None) -> None:
+        """Fail fast when observation or execution reports that the device disconnected."""
+        device_id = getattr(getattr(self.ctx, "device", None), "device_id", None) or "unknown"
+        if obs is not None and is_device_offline_result(obs):
+            raise DeviceOfflineError(device_id, None, message=getattr(obs, "message", None))
+        meta = getattr(exec_result, "metadata", None)
+        if isinstance(meta, dict) and meta.get("device_offline") is True:
+            raise DeviceOfflineError(
+                device_id, None, message=getattr(exec_result, "text_summary", None)
+            )
+
     async def _capture_post_screenshot(
         self, exec_result, name: str, action_names, state: State | None = None
     ):
@@ -774,9 +893,12 @@ class FlashRunner:
             return post_img_bytes
         try:
             obs, screenshot_bytes = await observe(self.ctx, self.controller, settle_ms=0)
+        except DeviceOfflineError:
+            raise
         except Exception as shot_err:
             logger.warning(f"Failed to capture fallback screenshot in FlashRunner: {shot_err}")
             return post_img_bytes
+        self._raise_if_device_offline(obs=obs)
         if not obs.ok:
             logger.warning(f"Failed to capture fallback screenshot in FlashRunner: {obs.message}")
             return post_img_bytes
@@ -974,6 +1096,7 @@ class FlashRunner:
                 name, args, tc_id, state, index_elements=index_elements, skip_observe=skip_observe,
                 verify_live_target=verify_live_target,
             )
+            self._raise_if_device_offline(exec_result=exec_result)
 
             post_img_bytes = None
             if not skip_observe:
@@ -1055,6 +1178,8 @@ class FlashRunner:
                 )
             )
 
+        except DeviceOfflineError:
+            raise
         except Exception as e:
             logger.error(f"Error executing tool {name}: {e}")
             rec = getattr(self, "_turn_rec", None)
@@ -1153,6 +1278,7 @@ class FlashRunner:
                 )
                 try:
                     obs, shot_bytes = await observe(self.ctx, self.controller, settle_ms=0)
+                    self._raise_if_device_offline(obs=obs)
                     if obs.ok:
                         pre_screenshot_bytes = shot_bytes
                         self._rebase_screen_baseline(obs, shot_bytes)
@@ -1164,6 +1290,8 @@ class FlashRunner:
                                 state.indexed_elements = obs.elements
                             if obs.screenshot_path:
                                 state.latest_screenshot = obs.screenshot_path
+                except DeviceOfflineError:
+                    raise
                 except Exception as shot_err:
                     logger.warning(f"Failed to observe screen after aborting burst: {shot_err}")
 
@@ -1223,6 +1351,7 @@ class FlashRunner:
                 )
                 try:
                     obs, shot_bytes = await observe(self.ctx, self.controller, settle_ms=0)
+                    self._raise_if_device_offline(obs=obs)
                     if obs.ok:
                         pre_screenshot_bytes = shot_bytes
                         self._rebase_screen_baseline(obs, shot_bytes)
@@ -1234,6 +1363,8 @@ class FlashRunner:
                                 state.indexed_elements = obs.elements
                             if obs.screenshot_path:
                                 state.latest_screenshot = obs.screenshot_path
+                except DeviceOfflineError:
+                    raise
                 except Exception as shot_err:
                     logger.warning(f"Failed to observe screen after aborting burst: {shot_err}")
 
@@ -1269,6 +1400,41 @@ class FlashRunner:
             is_wait_tool = name in ("wait_for_text", "wait_for_screen_change", "wait_until_gone")
             skip_observe = self.fast_burst and (not is_last) and (name in action_names) and (not is_wait_tool)
             logger.info(f"Executing Flash tool: {name}({args}) [skip_observe={skip_observe}]")
+
+            defer_completion = (
+                name == "report_task_status"
+                and getattr(self, "image_on_demand", False)
+                and getattr(self, "_text_only_turn", False)
+                and str(args.get("status", "")).lower() == "completed"
+            )
+            if name == "look_at_screen" or defer_completion:
+                # Text mode: the next observation carries the screenshot. A completion
+                # report from a turn that saw no screenshot is checked on it first.
+                self._force_image = True
+                content = (
+                    "The next observation includes the screenshot."
+                    if name == "look_at_screen"
+                    else "Completion not accepted yet: this turn had no screenshot. The next observation "
+                    "includes it; verify the goal on it, then report again."
+                )
+                messages.append(
+                    ToolMessage(
+                        tool_call_id=tc_id,
+                        name=name,
+                        content=content,
+                        status="success" if name == "look_at_screen" else "error",
+                    )
+                )
+                for rem_tc in tool_calls[idx + 1:]:
+                    messages.append(
+                        ToolMessage(
+                            tool_call_id=rem_tc.get("id") or str(uuid.uuid4()),
+                            name=rem_tc.get("name", "").split(":")[-1],
+                            content="Action skipped: the turn ended to show the screenshot.",
+                            status="error",
+                        )
+                    )
+                return None, pre_screenshot_bytes, xml_list, action_sequence
 
             if name == "report_task_status":
                 probed = await self._probe_unseen_content(
@@ -1372,6 +1538,7 @@ class FlashRunner:
                 if skip_observe:
                     try:
                         obs, shot_bytes = await observe(self.ctx, self.controller, settle_ms=0)
+                        self._raise_if_device_offline(obs=obs)
                         if obs.ok:
                             pre_screenshot_bytes = shot_bytes
                             self._rebase_screen_baseline(obs, shot_bytes)
@@ -1383,6 +1550,8 @@ class FlashRunner:
                                     state.indexed_elements = obs.elements
                                 if obs.screenshot_path:
                                     state.latest_screenshot = obs.screenshot_path
+                    except DeviceOfflineError:
+                        raise
                     except Exception as shot_err:
                         logger.warning(f"Failed to capture fallback screen after failed burst action: {shot_err}")
 
@@ -1648,6 +1817,23 @@ class FlashRunner:
         tools_declaration = self._get_tools()
         report_only_tools = [t for t in tools_declaration if t.name == "report_task_status"]
 
+        try:
+            return await self._run_reactive_loop(
+                state, llm, tools_declaration, report_only_tools, limit
+            )
+        except DeviceOfflineError as offline_err:
+            logger.error(f"FlashRunner stopping due to device disconnect: {offline_err}")
+            await self._flush_history_jobs()
+            return {"status": "failed", "explanation": str(offline_err)}
+
+    async def _run_reactive_loop(
+        self,
+        state: State,
+        llm: Any,
+        tools_declaration: list,
+        report_only_tools: list,
+        limit: int | None,
+    ) -> dict:
         ledger, img_bytes, xml_list = await self._prepare_conversation(state, tools_declaration)
 
         turns = 0

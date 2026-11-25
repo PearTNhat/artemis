@@ -92,3 +92,17 @@ def test_classifier_recognizes_genai_deadline_exceeded_shapes():
         failure = classify_failure(RuntimeError(message))
         assert failure.category is FailureCategory.TIMEOUT
         assert failure.retryable
+
+
+def test_classifier_marks_daily_quota_as_non_retryable():
+    daily = classify_failure(
+        RuntimeError("429 RESOURCE_EXHAUSTED: GenerateRequestsPerDayPerProjectPerModel-FreeTier limit exceeded")
+    )
+    assert daily.category is FailureCategory.RATE_LIMIT
+    assert not daily.retryable
+    assert daily.should_fallback
+
+    # Transient per-minute rate limits (including arbitrary numbers like 77s) stay retryable.
+    rpm = classify_failure(RuntimeError("429 rate limit exceeded, retry after 77s"))
+    assert rpm.category is FailureCategory.RATE_LIMIT
+    assert rpm.retryable

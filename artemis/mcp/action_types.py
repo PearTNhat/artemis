@@ -25,7 +25,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-__all__ = ["ActionCode", "ActionResult", "ObserveResult"]
+__all__ = ["ActionCode", "ActionResult", "ObserveResult", "is_device_offline_result"]
 
 
 class ActionCode(str, Enum):
@@ -92,3 +92,19 @@ class ObserveResult(BaseModel):
     timings: dict[str, float] | None = None
     """Wall time per phase in seconds (settle, capture, ocr, list, persist), for
     the debug turn log; never shown to the model."""
+
+
+DEVICE_OFFLINE_PREFIX = "DeviceOfflineError:"
+
+
+def is_device_offline_result(result: Any) -> bool:
+    """True when an ActionResult or ObserveResult was produced by DeviceOfflineError."""
+    if isinstance(result, ActionResult):
+        return bool(result.detail and result.detail.startswith("DeviceOfflineError"))
+    if isinstance(result, ObserveResult):
+        return (
+            result.code is ActionCode.DEVICE_ERROR
+            and isinstance(result.message, str)
+            and result.message.startswith(DEVICE_OFFLINE_PREFIX)
+        )
+    return False

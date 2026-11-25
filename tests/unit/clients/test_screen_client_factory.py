@@ -225,3 +225,18 @@ def test_disconnect_stops_the_uiautomator_server_it_started(composite):
     client.connect()
     client.disconnect()
     u2.disconnect.assert_called_once_with(stop_server=True)
+
+
+def test_uiautomator_failure_raises_device_offline_when_phone_disconnects(composite):
+    client, helper, u2, _, clock = composite
+    helper.get_hierarchy.side_effect = RuntimeError("tunnel gone")
+    u2.get_hierarchy.return_value = "<from-u2/>"
+    assert client.get_hierarchy() == "<from-u2/>"
+
+    # Inside the helper retry window, u2 handles calls directly; if the device
+    # disconnects mid-task, DeviceOfflineError must surface instead of RuntimeError.
+    clock["now"] = 5.0
+    clock["state"] = "offline"
+    u2.get_screen_data.side_effect = RuntimeError("u2 socket closed")
+    with pytest.raises(DeviceOfflineError, match="offline"):
+        client.get_screen_data()

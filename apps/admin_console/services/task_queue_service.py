@@ -510,6 +510,13 @@ class TaskQueueService:
 
         test_name = f"web_{int(time.time())}_{run_key[:8]}"
         env = os.environ.copy()
+        from artemis.config import settings
+        if getattr(settings, "GEMINI_API_KEYS", None) and "GEMINI_API_KEYS" not in env:
+            env["GEMINI_API_KEYS"] = settings.GEMINI_API_KEYS.get_secret_value()
+        if getattr(settings, "GEMINI_API_KEY", None) and "GEMINI_API_KEY" not in env:
+            env["GEMINI_API_KEY"] = settings.GEMINI_API_KEY.get_secret_value()
+        if getattr(settings, "GOOGLE_API_KEY", None) and "GOOGLE_API_KEY" not in env:
+            env["GOOGLE_API_KEY"] = settings.GOOGLE_API_KEY.get_secret_value()
         pythonpath_parts = [
             str(WORKSPACE_ROOT),
             str(WORKSPACE_ROOT / "apps" / "admin_console"),
