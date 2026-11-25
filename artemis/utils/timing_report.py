@@ -86,9 +86,13 @@ def build_timing_report(db_path: Path | str, session: str | None = None) -> dict
                 "target": _target(action),
                 "wall_s": round(max(0.0, ts - previous_ts), 2),
                 "llm_s": timing.get("llm_s"),
+                "silent_llm_s": timing.get("silent_llm_s"),
+                "silent_turns": int(timing.get("silent_turns") or 0),
+                "silent_prep_s": timing.get("silent_prep_s"),
                 "action_s": timing.get("action_s"),
                 "observe_s": timing.get("observe_s"),
                 "prep_s": timing.get("prep_s"),
+                "user_wait_s": timing.get("user_wait_s"),
                 "shared_model_call": bool(timing.get("shared_model_call")),
                 "llm_resumes": timing.get("llm_resumes") or 0,
                 "agy": timing.get("agy"),
@@ -105,17 +109,30 @@ def build_timing_report(db_path: Path | str, session: str | None = None) -> dict
     totals = {
         "wall_s": wall,
         "llm_s": total("llm_s"),
+        "silent_llm_s": total("silent_llm_s"),
+        "silent_turns": sum(int(s["silent_turns"] or 0) for s in steps),
         "action_s": total("action_s"),
         "observe_s": total("observe_s"),
-        "prep_s": total("prep_s"),
+        "prep_s": round(total("prep_s") + total("silent_prep_s"), 2),
+        "user_wait_s": total("user_wait_s"),
     }
-    measured = totals["llm_s"] + totals["action_s"] + totals["observe_s"] + totals["prep_s"]
+    measured = (
+        totals["llm_s"]
+        + totals["silent_llm_s"]
+        + totals["action_s"]
+        + totals["observe_s"]
+        + totals["prep_s"]
+        + totals["user_wait_s"]
+    )
     totals["other_s"] = round(max(0.0, wall - measured), 2)
     return {
         "session_id": sid,
         "goal": row["initial_goal"],
         "status": row["status"],
-        "has_timing": any(s["llm_s"] is not None or s["action_s"] is not None for s in steps),
+        "has_timing": any(
+            s["llm_s"] is not None or s["silent_llm_s"] is not None or s["action_s"] is not None
+            for s in steps
+        ),
         "steps": steps,
         "totals": totals,
         "agents": [
@@ -141,22 +158,25 @@ def format_timing_report(report: dict[str, Any]) -> str:
         f"Session {report['session_id']} [{report['status']}]",
         f"Goal: {str(report['goal']).splitlines()[0][:100]}",
         "",
-        f"{'#':>3} {'wall':>6} {'model':>6} {'action':>6} {'screen':>6} {'prep':>5}  {'tok in/out':>11}  action",
+        f"{'#':>3} {'wall':>6} {'model':>6} {'empty':>6} {'action':>6} {'screen':>6} {'prep':>5}  {'tok in/out':>11}  action",
     ]
     for s in report["steps"]:
         model = "(same)" if s["shared_model_call"] else _fmt(s["llm_s"])
+        empty = _fmt(s.get("silent_llm_s"))
         tokens = f"{s['prompt_tokens'] or '-'}/{s['completion_tokens'] or '-'}"
         note = ""
+        if s.get("silent_turns", 0) > 1:
+            note += f"  [{s['silent_turns']} empty turns]"
         if s["agy"]:
             agy = s["agy"]
             if agy.get("transport") == "acp":
-                note = f"  [agy acp {agy.get('model_calls')} calls, {agy.get('inline_images', 0)} inline image(s)]"
+                note += f"  [agy acp {agy.get('model_calls')} calls, {agy.get('inline_images', 0)} inline image(s)]"
             else:
-                note = f"  [agy {agy.get('model_calls')} calls, screenshot {'yes' if agy.get('opened_screenshot') else 'no'}]"
+                note += f"  [agy {agy.get('model_calls')} calls, screenshot {'yes' if agy.get('opened_screenshot') else 'no'}]"
         if s["llm_resumes"]:
             note += f"  [resumed {s['llm_resumes']}x]"
         lines.append(
-            f"{s['step']:>3} {s['wall_s']:>6.1f} {model:>6} {_fmt(s['action_s']):>6}"
+            f"{s['step']:>3} {s['wall_s']:>6.1f} {model:>6} {empty:>6} {_fmt(s['action_s']):>6}"
             f" {_fmt(s['observe_s']):>6} {_fmt(s['prep_s']):>5}  {tokens:>11}"
             f"  {s['action']}({s['target'][:40]}){note}"
         )
@@ -170,11 +190,18 @@ def format_timing_report(report: dict[str, Any]) -> str:
         "",
         f"Total wall time {t['wall_s']:.1f}s:",
         f"  model wait     {pct(t['llm_s'])}",
+    ]
+    if t.get("silent_llm_s"):
+        n_empty = int(t.get("silent_turns") or 0)
+        lines.append(f"  model (empty)  {pct(t['silent_llm_s'])} ({n_empty} turn{'s' if n_empty != 1 else ''})")
+    lines += [
         f"  device actions {pct(t['action_s'])}",
         f"  screen capture {pct(t['observe_s'])}",
         f"  prompt prep    {pct(t['prep_s'])}",
-        f"  other/unmeasured {pct(t['other_s'])}",
     ]
+    if t.get("user_wait_s"):
+        lines.append(f"  user wait      {pct(t['user_wait_s'])}")
+    lines.append(f"  other/unmeasured {pct(t['other_s'])}")
     if not report["has_timing"]:
         lines.append(
             "  (this session ran before per-step timing was recorded: only wall time is known)"

@@ -333,8 +333,11 @@ async def inject_instruction_endpoint(request: InjectInstructionRequest):
 class SubmitChoiceRequest(BaseModel):
     session_id: str | None = Field(default=None, description="Target session ID")
     choice_id: str = Field(description="Active pending choice ID")
-    type: Literal["option", "auto", "custom", "manual"]
+    type: Literal["option", "options", "auto", "custom", "manual"]
     option_id: str | None = Field(default=None, description="Selected option ID when type='option'")
+    option_ids: list[str] | None = Field(
+        default=None, description="Selected option IDs when type='options' (checkbox group)"
+    )
     text: str | None = Field(default=None, description="Custom instruction when type='custom'")
 
 
@@ -419,6 +422,21 @@ async def submit_task_choice(request: SubmitChoiceRequest):
         if not opt_id or opt_id not in valid_ids:
             raise HTTPException(status_code=400, detail="option_id không hợp lệ.")
         answer_payload["option_id"] = opt_id
+    elif request.type == "options":
+        if not pending.get("multi_select"):
+            raise HTTPException(status_code=400, detail="Câu hỏi này chỉ cho chọn một lựa chọn.")
+        valid_ids = {
+            str(o.get("id"))
+            for o in (pending.get("options") or [])
+            if isinstance(o, dict) and "kind" not in o
+        }
+        ids = list(dict.fromkeys(str(i).strip() for i in (request.option_ids or []) if str(i).strip()))
+        if not ids or any(i not in valid_ids for i in ids):
+            raise HTTPException(status_code=400, detail="option_ids không hợp lệ.")
+        max_sel = pending.get("max_select")
+        if isinstance(max_sel, int) and len(ids) > max_sel:
+            raise HTTPException(status_code=400, detail=f"Chỉ được chọn tối đa {max_sel} lựa chọn.")
+        answer_payload["option_ids"] = ids
 
     write_choice_answer(trace_dir, answer_payload)
     return {

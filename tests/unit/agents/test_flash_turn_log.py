@@ -118,3 +118,101 @@ def test_final_summary_wait_caps_the_shutdown_flush(monkeypatch):
     runner = FlashRunner(ctx, "goal")
     assert captured["flush_timeout_s"] == min(runner.memory_runtime_cfg.flush_timeout_s, runner.final_summary_wait_s)
     assert captured["flush_timeout_s"] <= 3.0
+
+
+def test_silent_turn_logged_and_carried_to_next_step(tmp_path, monkeypatch):
+    """Silent turns write to turns.jsonl and carry their llm/prep time to the next step."""
+    import asyncio
+    from types import SimpleNamespace
+    from langchain_core.messages import AIMessage
+
+    monkeypatch.setattr(turn_log, "is_ai_io_debug_enabled", lambda: True)
+
+    recorded_steps = []
+    engine = SimpleNamespace(
+        base_dir=tmp_path,
+        current_session_id="sess-1",
+        current_step_id=None,
+        allocate_step_id=lambda: setattr(engine, "current_step_id", len(recorded_steps) + 1),
+        record_step=lambda **kw: recorded_steps.append(kw) or f"step-{len(recorded_steps)}",
+    )
+    ctx = MagicMock()
+    ctx.data_engine = engine
+    ctx.step_memory = None
+    ctx.transcript_ledger = None
+    ctx.device = SimpleNamespace(device_width=1080, device_height=2400)
+
+    runner = FlashRunner.__new__(FlashRunner)
+    runner.ctx = ctx
+    runner.goal = "test"
+    runner.max_silent_turns = 5
+    runner.compact_list = True
+    runner.media_resolution = "low"
+    runner.model_image_cfg = SimpleNamespace(max_side=768)
+    runner.user_choice_enabled = False
+    runner.summarizer = None
+    runner.final_summary_wait_s = 1.0
+    runner._llm = SimpleNamespace(model="qwen3-vl:4b-32k")
+    runner.controller = MagicMock()
+    runner.executor = SimpleNamespace(action_tool_names=set())
+    runner.fast_burst = False
+
+    async def _prep(state, tools_decl):
+        ledger = MagicMock()
+        ledger.elapsed_label.return_value = "00:00"
+        ledger.render.return_value = []
+        ledger.last_turn_silent = False
+        return ledger, b"img", "[1] 'ok'"
+
+    responses = [
+        AIMessage(
+            content="thinking without tool",
+            usage_metadata={"input_tokens": 100, "output_tokens": 10, "total_tokens": 110},
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[{"id": "tc1", "name": "report_task_status", "args": {"status": "completed", "explanation": "done"}}],
+            usage_metadata={"input_tokens": 120, "output_tokens": 15, "total_tokens": 135},
+        ),
+    ]
+
+    async def _invoke(llm, tools, messages):
+        return responses.pop(0)
+
+    async def _no_injected(_label):
+        return None, None
+
+    async def _no_probe(*a, **kw):
+        return None
+
+    async def _noop():
+        return None
+
+    runner._prepare_conversation = _prep
+    runner._read_injected_instruction = _no_injected
+    runner._build_tail = lambda *a, **kw: "tail"
+    runner._invoke_model = _invoke
+    runner._probe_unseen_content = _no_probe
+    runner._flush_history_jobs = _noop
+    runner._record_llm_trace = lambda *a, **kw: None
+    runner._notify_history_jobs = lambda *a, **kw: None
+    runner._reset_user_choice_state = lambda: None
+    runner._init_user_choice_mode_file = lambda: None
+
+    state = SimpleNamespace(screen_scrollable=False, latest_screenshot=None)
+    result = asyncio.run(runner._run_reactive_loop(state, runner._llm, [], [], None))
+    assert result["status"] == "completed"
+
+    # Both turn 1 (silent) and turn 2 (report_task_status) must appear in turns.jsonl
+    lines = [json.loads(line) for line in (tmp_path / "turns.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [r["turn"] for r in lines] == [1, 2]
+    assert lines[0].get("silent") is True
+    assert lines[0]["actions"] == []
+    assert "silent" not in lines[1]
+
+    # The final step in SQLite must have both turn 2's llm_s and turn 1's silent_llm_s
+    assert len(recorded_steps) == 1
+    timing = recorded_steps[0]["extra_metadata"]["timing"]
+    assert timing["silent_turns"] == 1
+    assert timing["silent_llm_s"] >= 0.0
+    assert timing["llm_s"] >= 0.0

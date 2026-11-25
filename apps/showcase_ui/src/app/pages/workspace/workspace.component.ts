@@ -14,7 +14,9 @@
  * limitations under the License.
  */
 
-import { Component, ChangeDetectionStrategy, NgZone, DestroyRef, inject, computed, signal, ViewChild, ElementRef, OnInit, HostListener } from '@angular/core';
+import { Component, ChangeDetectionStrategy, NgZone, DestroyRef, inject, computed, effect, signal, ViewChild, ElementRef, OnInit, HostListener } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { ActivatedRoute, Router } from '@angular/router';
 
 import { FormsModule } from '@angular/forms';
 import { AgentStreamComponent } from '../../components/agent-stream/agent-stream.component';
@@ -22,6 +24,7 @@ import { ChatInterfaceComponent } from '../../components/chat-interface/chat-int
 import { FloatingVideoPlayerComponent } from '../../components/floating-video-player/floating-video-player.component';
 import { AgentService } from '../../services/agent.service';
 import { SystemService } from '../../services/system.service';
+import { buildSessionSlug, extractSessionIdFromSlug } from '../../utils/session-slug.util';
 
 @Component({
   selector: 'app-workspace',
@@ -41,6 +44,45 @@ export class WorkspaceComponent implements OnInit {
   public systemService = inject(SystemService);
   private zone = inject(NgZone);
   private destroyRef = inject(DestroyRef);
+  private route = inject(ActivatedRoute);
+  private router = inject(Router);
+  private hasSyncedInitialUrl = false;
+
+  constructor() {
+    effect(() => {
+      const curId = this.agentService.currentSessionId();
+      const newChat = this.agentService.newChatMode();
+
+      if (!curId) {
+        if (newChat && this.router.url.split('?')[0].startsWith('/workspace/')) {
+          this.router.navigate(['/workspace'], { replaceUrl: true });
+        }
+        return;
+      }
+      if (curId.startsWith('active-') || curId.startsWith('pending-')) {
+        return;
+      }
+
+      const currentUrlPath = this.router.url.split('?')[0].split('#')[0];
+      const currentParamSlug = currentUrlPath.startsWith('/workspace/')
+        ? decodeURIComponent(currentUrlPath.slice('/workspace/'.length))
+        : null;
+      const currentUrlSessionId = extractSessionIdFromSlug(currentParamSlug);
+
+      const targetSlug = buildSessionSlug(curId);
+      if (!targetSlug) return;
+
+      const targetPath = `/workspace/${targetSlug}`;
+      if (currentUrlPath === targetPath) {
+        this.hasSyncedInitialUrl = true;
+        return;
+      }
+
+      const shouldReplace = !this.hasSyncedInitialUrl || currentUrlSessionId === curId;
+      this.hasSyncedInitialUrl = true;
+      this.router.navigate(['/workspace', targetSlug], { replaceUrl: shouldReplace });
+    });
+  }
 
   // Default right panel width to 1/3 of the screen (or 450px as fallback)
   public rightPanelWidth = signal<number>(
@@ -97,6 +139,32 @@ export class WorkspaceComponent implements OnInit {
   @ViewChild('dockInput') public dockInputRef?: ElementRef<HTMLTextAreaElement>;
 
   ngOnInit(): void {
+    const syncFromUrl = (slugOrId: string | null) => {
+      const sid = extractSessionIdFromSlug(slugOrId);
+      if (sid && sid !== this.agentService.currentSessionId()) {
+        this.hasSyncedInitialUrl = true;
+        this.agentService.selectSession(sid, true);
+      }
+    };
+
+    this.route.paramMap
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((params) => {
+        const slug = params.get('sessionSlug');
+        if (slug) {
+          syncFromUrl(slug);
+        }
+      });
+
+    this.route.queryParamMap
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((qParams) => {
+        const sidParam = qParams.get('session');
+        if (sidParam) {
+          syncFromUrl(sidParam);
+        }
+      });
+
     if (typeof localStorage !== 'undefined') {
       const saved = localStorage.getItem('artemis_selected_profile');
       if (saved === 'flash' || saved === 'pro') {

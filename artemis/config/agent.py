@@ -889,6 +889,15 @@ class FlashUserChoiceConfig(BaseModel):
         le=12,
         description="Maximum options allowed in one ask_user_choice call.",
     )
+    max_form_options: int = Field(
+        default=20,
+        ge=2,
+        le=40,
+        description=(
+            "Maximum options in one kind='form_options' question (a radio / checkbox"
+            " group is shown in full)."
+        ),
+    )
     model_config = {"extra": "allow"}
 
 

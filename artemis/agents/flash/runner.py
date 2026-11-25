@@ -62,6 +62,9 @@ from artemis.agents.flash.user_choice import (
     choice_signature,
     comparable_items_notice,
     find_comparable_items,
+    find_selectable_group,
+    selectable_group_notice,
+    user_answer_summary,
     read_user_choice_mode,
     validate_ask_user_choice_args,
     wait_for_user_choice,
@@ -331,6 +334,7 @@ class FlashRunner:
             self._default_ask_on_choice = bool(getattr(uc_cfg, "ask_on_choice", True))
             self._default_ask_when_stuck = bool(getattr(uc_cfg, "ask_when_stuck", True))
             self._user_choice_max_options = int(getattr(uc_cfg, "max_options", 8))
+            self._user_choice_max_form_options = int(getattr(uc_cfg, "max_form_options", 20))
             self._stuck_after_no_progress_turns = int(
                 getattr(uc_cfg, "stuck_after_no_progress_turns", 2)
             )
@@ -350,6 +354,7 @@ class FlashRunner:
             self._default_ask_on_choice = True
             self._default_ask_when_stuck = True
             self._user_choice_max_options = 8
+            self._user_choice_max_form_options = 20
             self._stuck_after_no_progress_turns = 2
 
         if isinstance(getattr(self.ctx, "user_choice_enabled", None), bool):
@@ -412,6 +417,10 @@ class FlashRunner:
         self._no_progress_turns: int = 0
         self._turn_ended_by_user_choice: bool = False
         self._comparable_groups_hinted: set[frozenset[str]] = set()
+        # A pick question the user answered without picking ("show me more"):
+        # the goal's choice is still open until a later question is answered.
+        self._open_choice_kind: str | None = None
+        self._open_choice_rejections: int = 0
 
     @property
     def turn_limit(self) -> int | None:
@@ -880,6 +889,12 @@ class FlashRunner:
             try:
                 if self.ctx.data_engine.current_step_id is None:
                     self.ctx.data_engine.allocate_step_id()
+                extra_metadata: dict = {"token_usage": step_token_usage}
+                timing = self._consume_turn_timing()
+                if timing:
+                    extra_metadata["timing"] = timing
+                elif getattr(self, "_turn_timing", None) is not None:
+                    extra_metadata["timing"] = {"shared_model_call": True}
                 self.ctx.data_engine.record_step(
                     pre_screenshot_bytes=pre_screenshot_bytes,
                     ui_tree=xml_list,
@@ -887,7 +902,7 @@ class FlashRunner:
                     operator_raw_thinking=raw_text,
                     operator_native_thinking=native_text or None,
                     last_execution_result={"result": "Task completed with final report."},
-                    extra_metadata={"token_usage": step_token_usage},
+                    extra_metadata=extra_metadata,
                 )
             except Exception as step_err:
                 logger.warning(f"Error recording final step in FlashRunner: {step_err}")
@@ -1563,6 +1578,9 @@ class FlashRunner:
                     break
                 continue
 
+            if name == "report_task_status" and self._reject_completion_with_open_choice(args, tc_id, tool_calls, idx, messages):
+                return None, pre_screenshot_bytes, xml_list, action_sequence
+
             if name == "report_task_status":
                 probed = await self._probe_unseen_content(
                     args,
@@ -1800,6 +1818,13 @@ class FlashRunner:
         )
         return new_bytes, new_xml, new_sequence
 
+    def _consume_turn_timing(self) -> dict[str, Any]:
+        """Returns the current turn's model/prep timing once, marking it consumed."""
+        if getattr(self, "_turn_timing_pending", False):
+            self._turn_timing_pending = False
+            return dict(getattr(self, "_turn_timing", {}) or {})
+        return {}
+
     def _step_timing(self, exec_result) -> dict:
         """Timing for one recorded step: the turn's model time goes on the
         turn's first step only (several actions can share one model call)."""
@@ -1807,9 +1832,9 @@ class FlashRunner:
         timing = {
             k: meta.get(k) for k in ("action_s", "observe_s") if meta.get(k) is not None
         }
-        if getattr(self, "_turn_timing_pending", False):
-            timing.update(getattr(self, "_turn_timing", {}) or {})
-            self._turn_timing_pending = False
+        consumed = self._consume_turn_timing()
+        if consumed:
+            timing.update(consumed)
         else:
             timing["shared_model_call"] = True
         self._turn_action_s = getattr(self, "_turn_action_s", 0.0) + float(
@@ -1894,9 +1919,14 @@ class FlashRunner:
             if agy
             else ""
         )
+        silent_note = (
+            f" + empty turns {t.get('silent_llm_s', 0):.1f}s ({t.get('silent_turns', 0)}x)"
+            if t.get("silent_llm_s")
+            else ""
+        )
         logger.info(
             f"⏱ Turn {turn}: total {total_s:.1f}s = model {t.get('llm_s', 0):.1f}s{agy_note}"
-            f" + actions {action_s:.1f}s + screen capture {observe_s:.1f}s"
+            f"{silent_note} + actions {action_s:.1f}s + screen capture {observe_s:.1f}s"
             f" + prompt prep {t.get('prep_s', 0):.1f}s"
         )
 
@@ -1962,12 +1992,39 @@ class FlashRunner:
                     f"Indices from before the question are stale: re-locate it on the current screen "
                     f"by matching '{label}'{detail_hint} Scroll if needed."
                 )
+            elif kind == "form_options":
+                tool_msg = (
+                    f"User picked '{label}'{detail_part} in this option group. Select exactly that "
+                    "option on the current screen (indices from before the question are stale: "
+                    "re-locate it by its label, scroll inside the form if needed), then check that "
+                    "it now shows as selected/checked and that no other option of a radio group is."
+                )
             else:
                 tool_msg = f"User chose: '{label}'. Do that next on the current screen."
             injected = (
                 f'Asked user ({kind}): "{question}" -> User chose option {opt_id}: "{label}"{detail_part}'
             )
             short = f"option {opt_id}: '{label}'"
+            return tool_msg, injected, short
+
+        if ans_type == "options":
+            labels = [str(x) for x in (answer.get("labels") or [])]
+            ids = [str(x) for x in (answer.get("option_ids") or [])]
+            chosen = "; ".join(f"'{lbl}'" for lbl in labels)
+            all_labels = [str(o.get("label") or "") for o in options if o.get("label")]
+            not_chosen = "; ".join(f"'{lbl}'" for lbl in all_labels if lbl not in labels)
+            tool_msg = (
+                f"User picked these options in the group: {chosen}. Make the group match exactly: "
+                "tick every picked option that is not yet checked, and untick any option that is "
+                f"checked but not picked{(' (' + not_chosen + ')') if not_chosen else ''}. Indices from "
+                "before the question are stale: re-locate each option by its label and scroll inside "
+                "the form if needed. Tick them one per action or in one burst using target_text, then "
+                "verify the checked states on the next observation."
+            )
+            injected = (
+                f'Asked user ({kind}): "{question}" -> User picked options {", ".join(ids)}: {chosen}'
+            )
+            short = f"options {', '.join(ids)}: {chosen}"
             return tool_msg, injected, short
 
         if ans_type == "auto":
@@ -2009,7 +2066,13 @@ class FlashRunner:
                     f'Asked user ({kind}): "{question}" -> User instructed: "{text}" [release_loop]'
                 )
             else:
-                tool_msg = f'User instruction: "{text}". Follow it.'
+                tool_msg = (
+                    f'User instruction: "{text}". Follow it. This answer does not by itself '
+                    "complete the original goal or pick an option: once you have followed it, "
+                    "keep working toward the original goal, and if the choice is still open, "
+                    "ask again (ask_user_choice) with the options you can see now. Do not report "
+                    "the task completed while the goal's choice has not been made."
+                )
                 injected = f'Asked user ({kind}): "{question}" -> User instructed: "{text}"'
             short = f'custom instruction: "{text}"'
             return tool_msg, injected, short
@@ -2058,15 +2121,20 @@ class FlashRunner:
                     "user_wait_s": waited_s,
                 },
             }
-            if getattr(self, "_turn_timing_pending", False):
-                timing = dict(getattr(self, "_turn_timing", {}) or {})
-                self._turn_timing_pending = False
+            timing = self._consume_turn_timing()
+            if timing:
                 extra_metadata["timing"] = timing
             recorded_step_id = engine.record_step(
                 pre_screenshot_bytes=pre_screenshot_bytes,
                 post_screenshot_bytes=post_img_bytes,
                 ui_tree=(post_xml_list or xml_list),
-                action_taken={"action": "ask_user_choice", "args": norm_args},
+                action_taken={
+                    "action": "ask_user_choice",
+                    "args": norm_args,
+                    # Shown on the step card so the Q&A stays visible in the history.
+                    "question": norm_args.get("question", ""),
+                    "answer_summary": user_answer_summary(answer),
+                },
                 operator_raw_thinking=raw_text,
                 operator_native_thinking=native_text or None,
                 last_execution_result={"status": "dispatched", "result": injected_summary},
@@ -2148,7 +2216,9 @@ class FlashRunner:
             return True, pre_screenshot_bytes, xml_list
 
         ok, val_err, norm_args = validate_ask_user_choice_args(
-            args, max_options=getattr(self, "_user_choice_max_options", 8)
+            args,
+            max_options=getattr(self, "_user_choice_max_options", 8),
+            max_form_options=getattr(self, "_user_choice_max_form_options", 20),
         )
         if not ok:
             messages.append(ToolMessage(tool_call_id=tc_id, name="ask_user_choice", content=val_err, status="error"))
@@ -2192,6 +2262,8 @@ class FlashRunner:
             screenshot_path=card_screenshot,
             data_engine=engine,
             poll_interval_s=float(getattr(self, "_user_choice_poll_interval_s", 0.5)),
+            multi_select=bool(norm_args.get("multi_select", False)),
+            max_select=norm_args.get("max_select"),
         )
 
         timing = getattr(self, "_turn_timing", None)
@@ -2216,6 +2288,14 @@ class FlashRunner:
             answer=answer,
         )
         self._last_answered_choice_summary = short_summary
+        if norm_args["kind"] in ("pick_item", "form_options"):
+            if answer.get("type") in ("custom", "manual"):
+                self._open_choice_kind = norm_args["kind"]
+                self._open_choice_rejections = 0
+                # New items will appear: let the structural hint fire for them again.
+                self._comparable_groups_hinted = set()
+            else:
+                self._open_choice_kind = None
 
         if norm_args["kind"] == "stuck" and answer.get("type") == "auto":
             labels = [str(o.get("label") or "") for o in norm_args["options"] if o.get("label")]
@@ -2343,6 +2423,47 @@ class FlashRunner:
                     "stop and report failed instead of trying random taps."
                 )
 
+    def _reject_completion_with_open_choice(
+        self, args: dict, tc_id: str, tool_calls: list, idx: int, messages: list[BaseMessage]
+    ) -> bool:
+        """Refuse a 'completed' report while the user's pick is still open.
+
+        The user answered a pick question without picking (e.g. "show me more");
+        reporting completion then would skip their decision. Refused at most twice,
+        so a model that truly cannot continue is never trapped.
+        """
+        if not getattr(self, "_open_choice_kind", None):
+            return False
+        if str(args.get("status", "")).lower() != "completed":
+            return False
+        if getattr(self, "_open_choice_rejections", 0) >= 2:
+            return False
+        self._open_choice_rejections = getattr(self, "_open_choice_rejections", 0) + 1
+        messages.append(
+            ToolMessage(
+                tool_call_id=tc_id,
+                name="report_task_status",
+                content=(
+                    "Completion not accepted: the user has not picked yet. They answered your "
+                    "last question with an instruction instead of a choice, so the choice is "
+                    "still theirs. Do what they asked, then call ask_user_choice again "
+                    f"(kind='{self._open_choice_kind}') with the options you can see now. "
+                    "Do not pick for them."
+                ),
+                status="error",
+            )
+        )
+        for rem_tc in tool_calls[idx + 1:]:
+            messages.append(
+                ToolMessage(
+                    tool_call_id=rem_tc.get("id") or str(uuid.uuid4()),
+                    name=rem_tc.get("name", "").split(":")[-1],
+                    content="Action skipped: the completion report was refused.",
+                    status="error",
+                )
+            )
+        return True
+
     def _add_comparable_items_hint(self, state: State, pending_notices: list[str]) -> None:
         """Nudge Flash to ask when several same-layout items are on screen.
 
@@ -2355,6 +2476,21 @@ class FlashRunner:
             return
         ask_on_choice, _ = self._current_user_choice_mode()
         if not ask_on_choice:
+            return
+        elements = getattr(state, "indexed_elements", None)
+        device = getattr(self.ctx, "device", None)
+        multi, group_labels = find_selectable_group(
+            elements,
+            width=getattr(device, "device_width", None),
+            height=getattr(device, "device_height", None),
+        )
+        if group_labels:
+            key = frozenset(lbl.replace(" (selected)", "") for lbl in group_labels)
+            seen_groups = getattr(self, "_comparable_groups_hinted", set())
+            if not any(len(key & seen) >= 2 for seen in seen_groups):
+                seen_groups.add(key)
+                self._comparable_groups_hinted = seen_groups
+                pending_notices.append(selectable_group_notice(multi, group_labels))
             return
         device = getattr(self.ctx, "device", None)
         texts = find_comparable_items(
@@ -2458,6 +2594,7 @@ class FlashRunner:
         previous_turn: _TurnRecord | None = None
         pending_notices: list[str] = []
         silent_turns = 0
+        silent_carry = {"llm_s": 0.0, "prep_s": 0.0, "turns": 0, "resumes": 0}
 
         while limit is None or counted_turns < limit:
             turns += 1
@@ -2608,6 +2745,10 @@ class FlashRunner:
                     f"FlashRunner received response without tool calls at turn {turns}:"
                     f" {raw_text[:100]}..."
                 )
+                if getattr(self, "_turn_rec", None) is not None:
+                    self._turn_rec["silent"] = True
+                self._log_turn_timing(turns, time.monotonic() - turn_started)
+                self._turn_timing_pending = False
                 if is_final:
                     final_report = {"status": "failed", "explanation": raw_text}
                     break
@@ -2630,11 +2771,25 @@ class FlashRunner:
                         ),
                     }
                     break
+                silent_carry["llm_s"] += llm_s
+                silent_carry["prep_s"] += prep_s
+                silent_carry["turns"] += 1
+                silent_carry["resumes"] += resumes
                 pending_notices.append(_NO_TOOL_CALL_NOTICE)
                 ledger.stage_turn(messages[turn_base:])
                 previous_turn = _TurnRecord()
                 counted_turns += 1
                 continue
+
+            if silent_carry["turns"] > 0:
+                self._turn_timing["silent_llm_s"] = round(silent_carry["llm_s"], 3)
+                self._turn_timing["silent_prep_s"] = round(silent_carry["prep_s"], 3)
+                self._turn_timing["silent_turns"] = silent_carry["turns"]
+                if silent_carry["resumes"]:
+                    self._turn_timing["llm_resumes"] = (
+                        self._turn_timing.get("llm_resumes", 0) + silent_carry["resumes"]
+                    )
+                silent_carry = {"llm_s": 0.0, "prep_s": 0.0, "turns": 0, "resumes": 0}
 
             silent_turns = 0
             # Process tool calls

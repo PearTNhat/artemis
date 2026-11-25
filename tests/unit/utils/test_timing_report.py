@@ -60,3 +60,95 @@ def test_format_mentions_agy_and_shared_calls(tmp_path):
 
 def test_unknown_session(tmp_path):
     assert build_timing_report(_db(tmp_path), "zzz") is None
+
+
+def test_silent_turns_and_user_wait_reduce_other_time(tmp_path):
+    path = tmp_path / "silent.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE sessions (session_id TEXT, initial_goal TEXT, start_time REAL, status TEXT);
+        CREATE TABLE steps (session_id TEXT, step_number INT, timestamp REAL, action_taken TEXT, extra_metadata TEXT);
+        CREATE TABLE traces (session_id TEXT, type TEXT, name TEXT, duration REAL);
+        """
+    )
+    conn.execute("INSERT INTO sessions VALUES ('s1', 'set timeout', 100.0, 'completed')")
+    steps = [
+        (1, 122.5, {"action": "click", "target_text": "10 minutes"},
+         {"llm_s": 11.2, "silent_llm_s": 10.8, "silent_turns": 1, "silent_prep_s": 0.2,
+          "prep_s": 0.1, "action_s": 0.1, "observe_s": 0.1}),
+        (2, 138.0, {"action": "ask_user_choice", "args": {"question": "Pick"}},
+         {"llm_s": 5.0, "prep_s": 0.1, "user_wait_s": 10.0}),
+        (3, 148.0, {"action": "report_task_status", "args": {"status": "completed"}},
+         {"llm_s": 9.8, "prep_s": 0.1}),
+    ]
+    for n, ts, action, timing in steps:
+        meta = {"timing": timing, "token_usage": {"prompt_tokens": 500, "completion_tokens": 10}}
+        conn.execute(
+            "INSERT INTO steps VALUES ('s1', ?, ?, ?, ?)",
+            (n, ts, json.dumps(action), json.dumps(meta)),
+        )
+    conn.commit()
+    conn.close()
+
+    report = build_timing_report(path, "s1")
+    t = report["totals"]
+    assert t["wall_s"] == 48.0
+    assert t["llm_s"] == 26.0
+    assert t["silent_llm_s"] == 10.8
+    assert t["silent_turns"] == 1
+    assert t["prep_s"] == 0.5
+    assert t["user_wait_s"] == 10.0
+    assert t["other_s"] == 0.5
+    assert report["steps"][0]["silent_llm_s"] == 10.8
+
+    text = format_timing_report(report)
+    assert "empty" in text
+    assert "model (empty)" in text
+    assert "user wait" in text
+
+
+def test_report_tracks_silent_turns_and_user_wait(tmp_path):
+    path = tmp_path / "engine.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE sessions (session_id TEXT, initial_goal TEXT, start_time REAL, status TEXT);
+        CREATE TABLE steps (session_id TEXT, step_number INT, timestamp REAL, action_taken TEXT, extra_metadata TEXT);
+        CREATE TABLE traces (session_id TEXT, type TEXT, name TEXT, duration REAL);
+        """
+    )
+    conn.execute("INSERT INTO sessions VALUES ('s1', 'change timeout', 100.0, 'completed')")
+    steps = [
+        (1, 122.3, {"action": "click", "target_text": "10 minutes"},
+         {"llm_s": 11.2, "silent_llm_s": 11.0, "silent_turns": 1, "silent_prep_s": 0.1,
+          "prep_s": 0.1, "action_s": 0.5, "observe_s": 0.3}),
+        (2, 138.0, {"action": "ask_user_choice", "args": {"question": "Pick"}},
+         {"llm_s": 5.0, "prep_s": 0.1, "user_wait_s": 10.0}),
+        (3, 149.0, {"action": "report_task_status", "args": {"status": "completed"}},
+         {"llm_s": 10.5, "prep_s": 0.2}),
+    ]
+    for n, ts, action, timing in steps:
+        meta = {"timing": timing, "token_usage": {"prompt_tokens": 500, "completion_tokens": 10}}
+        conn.execute(
+            "INSERT INTO steps VALUES ('s1', ?, ?, ?, ?)",
+            (n, ts, json.dumps(action), json.dumps(meta)),
+        )
+    conn.commit()
+    conn.close()
+
+    report = build_timing_report(path, "s1")
+    t = report["totals"]
+    assert t["wall_s"] == 49.0
+    assert t["llm_s"] == 26.7
+    assert t["silent_llm_s"] == 11.0
+    assert t["silent_turns"] == 1
+    assert t["prep_s"] == 0.5
+    assert t["user_wait_s"] == 10.0
+    assert t["other_s"] == 0.0
+    assert report["steps"][0]["silent_llm_s"] == 11.0
+
+    text = format_timing_report(report)
+    assert "empty" in text
+    assert "model (empty)" in text
+    assert "user wait" in text

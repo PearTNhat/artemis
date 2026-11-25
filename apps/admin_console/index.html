@@ -729,6 +729,102 @@
         let sessionsMap = {};
         let isBackgroundTaskPanelOpen = false;
         let currentBackgroundTasksData = [];
+        let initialUrlSessionRestored = false;
+
+        function getAdminBasePath() {
+            const p = window.location.pathname || '/admin';
+            return p.startsWith('/debug') ? '/debug' : '/admin';
+        }
+
+        function slugifyGoal(goal, maxLength = 48) {
+            if (!goal) return '';
+            const marker = '[Chat context: earlier tasks in this conversation]';
+            const idx = goal.indexOf(marker);
+            const raw = (idx >= 0 ? goal.slice(0, idx) : goal).trim();
+            if (!raw) return '';
+            const ascii = raw
+                .replace(/đ/g, 'd')
+                .replace(/Đ/g, 'D')
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/^-+|-+$/g, '');
+            if (!ascii) return '';
+            if (ascii.length <= maxLength) return ascii;
+            const sliced = ascii.slice(0, maxLength).replace(/-+$/g, '');
+            const lastDash = sliced.lastIndexOf('-');
+            return lastDash > 16 ? sliced.slice(0, lastDash) : sliced;
+        }
+
+        function buildSessionSlug(sessionId, _goal) {
+            return String(sessionId || '').trim();
+        }
+
+        function extractSessionIdFromSlug(slugOrId) {
+            if (!slugOrId) return null;
+            let decoded = String(slugOrId).trim();
+            try { decoded = decodeURIComponent(decoded).trim(); } catch (e) {}
+            if (!decoded) return null;
+            const sepIdx = decoded.lastIndexOf('--');
+            if (sepIdx >= 0) {
+                const tail = decoded.slice(sepIdx + 2).trim();
+                if (tail) return tail;
+            }
+            const m = decoded.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
+            return m ? m[1] : decoded;
+        }
+
+        function getSessionIdFromCurrentUrl() {
+            const params = new URLSearchParams(window.location.search || '');
+            const qSid = params.get('session');
+            if (qSid) return extractSessionIdFromSlug(qSid);
+            const path = window.location.pathname || '';
+            const match = path.match(/^\/(?:admin|debug)\/(.+?)\/?$/);
+            if (match && match[1]) {
+                return extractSessionIdFromSlug(match[1]);
+            }
+            return null;
+        }
+
+        function syncAdminSessionUrl(sessionId, goal, mode = 'push') {
+            if (mode === 'none') return;
+            const base = getAdminBasePath();
+            if (!sessionId) {
+                if (window.location.pathname !== base || window.location.search) {
+                    window.history.replaceState(null, '', base);
+                }
+                return;
+            }
+            const slug = buildSessionSlug(sessionId, goal);
+            const targetUrl = `${base}/${encodeURIComponent(slug)}`;
+            const existingSid = getSessionIdFromCurrentUrl();
+            if (window.location.pathname === targetUrl && !window.location.search) {
+                return;
+            }
+            const useReplace = mode === 'replace' || existingSid === sessionId;
+            if (useReplace) {
+                window.history.replaceState({ sessionId }, '', targetUrl);
+            } else {
+                window.history.pushState({ sessionId }, '', targetUrl);
+            }
+        }
+
+        function copyCurrentSessionLink(btnEl) {
+            if (!currentSessionId) return;
+            const url = window.location.href;
+            const origText = btnEl ? btnEl.textContent : '';
+            const onCopied = () => {
+                if (!btnEl) return;
+                btnEl.textContent = '✓ Đã copy link';
+                setTimeout(() => { btnEl.textContent = origText; }, 1600);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(url).then(onCopied).catch(() => {});
+            } else {
+                onCopied();
+            }
+        }
 
         function toggleVideoContent(forceState) {
             const vc = document.getElementById('video-content');
@@ -1175,6 +1271,7 @@
                 if (res.ok) {
                     if (currentSessionId === sessionId) {
                         currentSessionId = null;
+                        syncAdminSessionUrl(null);
                         updateMiniVideoPlayer(null);
 
                         document.getElementById('session-header').innerHTML = '<h1>Select a session from the sidebar</h1>';
@@ -1239,6 +1336,7 @@
                 if (res.ok) {
                     if (ids.includes(currentSessionId)) {
                         currentSessionId = null;
+                        syncAdminSessionUrl(null);
                         updateMiniVideoPlayer(null);
                         document.getElementById('session-header').innerHTML = '<h1>Select a session from the sidebar</h1>';
                         document.getElementById('session-tabs-bar').style.display = 'none';
@@ -1282,6 +1380,7 @@
                 if (res.ok) {
                     if (ids.includes(currentSessionId)) {
                         currentSessionId = null;
+                        syncAdminSessionUrl(null);
                         updateMiniVideoPlayer(null);
                         document.getElementById('session-header').innerHTML = '<h1>Select a session from the sidebar</h1>';
                         document.getElementById('session-tabs-bar').style.display = 'none';
@@ -1305,6 +1404,26 @@
                 const res = await fetch('/api/sessions');
                 allSessionsData = await res.json();
                 filterSessionsList();
+
+                if (!initialUrlSessionRestored) {
+                    initialUrlSessionRestored = true;
+                    const urlSid = getSessionIdFromCurrentUrl();
+                    if (urlSid && !currentSessionId) {
+                        const matched = allSessionsData.find(s => s.session_id === urlSid);
+                        if (matched) {
+                            selectSession(matched.session_id, matched.initial_goal, matched.start_time, { historyMode: 'replace' });
+                        } else {
+                            try {
+                                const detailRes = await fetch(`/api/sessions/${encodeURIComponent(urlSid)}`);
+                                if (detailRes.ok) {
+                                    const detail = await detailRes.json();
+                                    sessionsMap[detail.session_id] = detail;
+                                    selectSession(detail.session_id, detail.initial_goal, detail.start_time, { historyMode: 'replace' });
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                }
             } catch (err) {
                 document.getElementById('session-list').innerText = 'Failed to load sessions';
             }
@@ -1417,7 +1536,7 @@
             }
         }
 
-        function selectSession(sessionId, goal, startTime) {
+        function selectSession(sessionId, goal, startTime, options = {}) {
             // Flush any pending stream persistence for the previous session before switching
             flushNodeStreamsPersist();
             currentSessionId = sessionId;
@@ -1425,7 +1544,15 @@
             userExpandedStepIds.clear();
             stepTracesCache = {};
             stepFilterMap = {};
-            document.getElementById('session-header').innerHTML = `<h1>${escapeHtml(goal || 'Session Details')}</h1><p><small>ID: ${escapeHtml(sessionId)}</small></p>`;
+            syncAdminSessionUrl(sessionId, goal, options.historyMode || 'push');
+            const slugDisplay = buildSessionSlug(sessionId, goal);
+            document.getElementById('session-header').innerHTML = `
+                <h1>${escapeHtml(goal || 'Session Details')}</h1>
+                <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 4px;">
+                    <p style="margin: 0;"><small style="font-family: monospace; color: #475569;">ID: ${escapeHtml(sessionId)}</small></p>
+                    <button type="button" onclick="copyCurrentSessionLink(this)" style="font-size: 0.75rem; padding: 3px 9px; border-radius: 5px; border: 1px solid #cbd5e1; background: #f8fafc; color: #334155; cursor: pointer; font-weight: 600;" title="${escapeHtml(slugDisplay)}">🔗 Copy link</button>
+                </div>
+            `;
             
 
             
@@ -2811,27 +2938,88 @@
                         `;
                     }
                     
-                    if (step.action_taken) {
+                    const actObj = step.action_taken && !Array.isArray(step.action_taken) ? step.action_taken : null;
+                    const actName = actObj ? String(actObj.action || actObj.name || '').toLowerCase() : '';
+                    const isUserChoiceStep = actName === 'ask_user_choice';
+
+                    if (isUserChoiceStep) {
+                        const actArgs = (actObj && typeof actObj.args === 'object' && actObj.args) ? actObj.args : {};
+                        const choiceKind = actArgs.kind || actObj.kind || 'pick_item';
+                        const choiceQuestion = actObj.question || actArgs.question || '';
+                        const choiceOptions = Array.isArray(actArgs.options) ? actArgs.options : [];
+                        const choiceReason = actArgs.reason || actObj.reason || '';
+                        let answerSummary = actObj.answer_summary || '';
+                        if (!answerSummary && step.last_execution_result && typeof step.last_execution_result.result === 'string') {
+                            const arrowIdx = step.last_execution_result.result.indexOf('-> ');
+                            if (arrowIdx >= 0) {
+                                answerSummary = step.last_execution_result.result.slice(arrowIdx + 3).trim();
+                            }
+                        }
+                        const kindBadgeLabel = choiceKind === 'stuck'
+                            ? 'AI bí — hỏi hướng'
+                            : (choiceKind === 'form_options' ? (actArgs.multi_select ? 'Chọn nhiều' : 'Chọn một') : 'Chọn mục');
+
+                        let optionsHtml = '';
+                        if (choiceOptions.length > 0) {
+                            optionsHtml = '<ul style="margin: 6px 0 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px;">';
+                            choiceOptions.forEach((opt, idx) => {
+                                const optId = opt && opt.id !== undefined ? String(opt.id) : String(idx + 1);
+                                const optLabel = opt && opt.label ? String(opt.label) : String(opt || '');
+                                const optDetail = opt && opt.detail ? ` <span style="color: #64748b; font-size: 0.78rem;">(${escapeHtml(opt.detail)})</span>` : '';
+                                const isPicked = answerSummary && (
+                                    answerSummary.startsWith(`${optId}. `) ||
+                                    answerSummary.includes(`, ${optId}. `) ||
+                                    answerSummary === optLabel
+                                );
+                                optionsHtml += `<li style="font-size: 0.83rem; color: ${isPicked ? '#047857' : '#334155'}; font-weight: ${isPicked ? '700' : '400'};">${escapeHtml(optId)}. ${escapeHtml(optLabel)}${optDetail}${isPicked ? ' ✓' : ''}</li>`;
+                            });
+                            optionsHtml += '</ul>';
+                        }
+
                         contentHtml += `
-                            <div style="background-color: #eff6ff; border: 1px solid #dbeafe; border-radius: 6px; padding: 12px 15px; border-left: 4px solid #2563eb;">
-                                <h4 style="margin: 0 0 6px 0; color: #1d4ed8; font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;">⚡ Action Executed</h4>
-                                <pre class="light-code" style="margin: 0; font-size: 0.82rem; color: #1e3a8a; font-family: monospace; white-space: pre-wrap; line-height: 1.4;">${escapeHtml(JSON.stringify(step.action_taken, null, 2))}</pre>
+                            <div style="background-color: #f8faff; border: 1px solid #c7d2fe; border-radius: 8px; padding: 14px 16px; border-left: 4px solid #4f46e5; display: flex; flex-direction: column; gap: 10px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                    <h4 style="margin: 0; color: #3730a3; font-size: 0.84rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;">💬 Hỏi ý kiến bạn</h4>
+                                    <span style="font-size: 0.72rem; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: #e0e7ff; color: #3730a3;">${escapeHtml(kindBadgeLabel)}</span>
+                                </div>
+                                ${choiceQuestion ? `<div style="font-size: 0.9rem; color: #0f172a; font-weight: 600;"><span style="color: #475569; font-weight: 600;">Câu hỏi:</span> ${escapeHtml(choiceQuestion)}</div>` : ''}
+                                ${choiceReason ? `<div style="font-size: 0.8rem; color: #475569;">Lý do: ${escapeHtml(choiceReason)}</div>` : ''}
+                                ${optionsHtml ? `<div><div style="font-size: 0.75rem; font-weight: 700; color: #475569; text-transform: uppercase;">Danh sách lựa chọn (${choiceOptions.length})</div>${optionsHtml}</div>` : ''}
+                                ${answerSummary ? `
+                                    <div style="background-color: #ecfdf5; border: 1px solid #6ee7b7; border-left: 4px solid #059669; border-radius: 6px; padding: 9px 12px;">
+                                        <span style="color: #065f46; font-weight: 700; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; margin-right: 6px;">Bạn trả lời:</span>
+                                        <span style="color: #047857; font-weight: 700; font-size: 0.9rem;">${escapeHtml(answerSummary)}</span>
+                                    </div>
+                                ` : ''}
+                                <details style="margin-top: 2px;">
+                                    <summary style="font-size: 0.76rem; color: #64748b; cursor: pointer; user-select: none;">Xem Raw JSON (action &amp; result)</summary>
+                                    <pre class="light-code" style="margin: 8px 0 0 0; font-size: 0.78rem; color: #334155; font-family: monospace; white-space: pre-wrap; background: #f1f5f9; padding: 8px; border-radius: 4px;">${escapeHtml(JSON.stringify({ action_taken: step.action_taken, last_execution_result: step.last_execution_result }, null, 2))}</pre>
+                                </details>
                             </div>
                         `;
-                    }
-                    
-                    if (step.last_execution_result) {
-                        const isSuccess = step.last_execution_result.success !== false;
-                        const resColor = isSuccess ? '#16a34a' : '#dc2626';
-                        const resBg = isSuccess ? '#f0fdf4' : '#fef2f2';
-                        const resBorder = isSuccess ? '#dcfce7' : '#fee2e2';
-                        
-                        contentHtml += `
-                            <div style="background-color: ${resBg}; border: 1px solid ${resBorder}; border-radius: 6px; padding: 12px 15px; border-left: 4px solid ${resColor};">
-                                <h4 style="margin: 0 0 6px 0; color: ${resColor}; font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;">✓ Execution/Validation Result</h4>
-                                <pre class="light-code" style="margin: 0; font-size: 0.82rem; color: ${isSuccess ? '#14532d' : '#7f1d1d'}; font-family: monospace; white-space: pre-wrap; line-height: 1.4;">${escapeHtml(JSON.stringify(step.last_execution_result, null, 2))}</pre>
-                            </div>
-                        `;
+                    } else {
+                        if (step.action_taken) {
+                            contentHtml += `
+                                <div style="background-color: #eff6ff; border: 1px solid #dbeafe; border-radius: 6px; padding: 12px 15px; border-left: 4px solid #2563eb;">
+                                    <h4 style="margin: 0 0 6px 0; color: #1d4ed8; font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;">⚡ Action Executed</h4>
+                                    <pre class="light-code" style="margin: 0; font-size: 0.82rem; color: #1e3a8a; font-family: monospace; white-space: pre-wrap; line-height: 1.4;">${escapeHtml(JSON.stringify(step.action_taken, null, 2))}</pre>
+                                </div>
+                            `;
+                        }
+
+                        if (step.last_execution_result) {
+                            const isSuccess = step.last_execution_result.success !== false;
+                            const resColor = isSuccess ? '#16a34a' : '#dc2626';
+                            const resBg = isSuccess ? '#f0fdf4' : '#fef2f2';
+                            const resBorder = isSuccess ? '#dcfce7' : '#fee2e2';
+
+                            contentHtml += `
+                                <div style="background-color: ${resBg}; border: 1px solid ${resBorder}; border-radius: 6px; padding: 12px 15px; border-left: 4px solid ${resColor};">
+                                    <h4 style="margin: 0 0 6px 0; color: ${resColor}; font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;">✓ Execution/Validation Result</h4>
+                                    <pre class="light-code" style="margin: 0; font-size: 0.82rem; color: ${isSuccess ? '#14532d' : '#7f1d1d'}; font-family: monospace; white-space: pre-wrap; line-height: 1.4;">${escapeHtml(JSON.stringify(step.last_execution_result, null, 2))}</pre>
+                                </div>
+                            `;
+                        }
                     }
                     
                     contentHtml += `</div>`; // End Left Column
@@ -3809,6 +3997,7 @@
                 if (res.ok) {
                     alert("Cleanup successful!");
                     currentSessionId = null;
+                    syncAdminSessionUrl(null);
                     document.getElementById('session-header').innerHTML = `<h1>Select a session from the sidebar</h1>`;
                     document.getElementById('tree-container').innerHTML = '';
                     document.getElementById('details-container').innerHTML = '';
@@ -3820,6 +4009,33 @@
                 alert(`Error during cleanup: ${err.message}`);
             }
         }
+
+        window.addEventListener('popstate', function() {
+            const urlSid = getSessionIdFromCurrentUrl();
+            if (!urlSid) {
+                currentSessionId = null;
+                updateMiniVideoPlayer(null);
+                document.getElementById('session-header').innerHTML = '<h1>Select a session from the sidebar</h1>';
+                document.getElementById('session-tabs-bar').style.display = 'none';
+                document.getElementById('steps-container').style.display = 'none';
+                document.getElementById('traces-container-wrapper').style.display = 'none';
+                document.getElementById('replay-container-wrapper').style.display = 'none';
+                if (eventSource) {
+                    eventSource.close();
+                    eventSource = null;
+                }
+                filterSessionsList();
+                return;
+            }
+            if (urlSid !== currentSessionId) {
+                const matched = allSessionsData.find(s => s.session_id === urlSid) || sessionsMap[urlSid];
+                if (matched) {
+                    selectSession(matched.session_id, matched.initial_goal, matched.start_time, { historyMode: 'none' });
+                } else {
+                    selectSession(urlSid, '', Date.now() / 1000, { historyMode: 'none' });
+                }
+            }
+        });
 
         // Initial load
         loadSessions();

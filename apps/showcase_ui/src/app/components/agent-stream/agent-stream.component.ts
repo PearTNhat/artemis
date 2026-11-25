@@ -175,6 +175,7 @@ import {
   extractActionExtraParams,
   getStepPreImageUrl,
   getStepPostImageUrl,
+  isUserChoiceAction,
   isReportStatusAction,
   getReportStatusValue,
   getReportStatusExplanation
@@ -1367,6 +1368,10 @@ export class AgentStreamComponent implements AfterViewInit {
 
   public isAndroidAction(action: any): boolean {
     return isAndroidAction(action);
+  }
+
+  public isUserChoiceAction(action: any): boolean {
+    return isUserChoiceAction(action);
   }
 
   public getActionIcon(action: any): string {

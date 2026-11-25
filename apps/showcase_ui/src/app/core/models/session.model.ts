@@ -32,8 +32,11 @@ export interface PendingChoiceOption {
 export interface PendingChoice {
   choice_id: string;
   session_id?: string | null;
-  kind: 'pick_item' | 'stuck';
+  kind: 'pick_item' | 'stuck' | 'form_options';
   question: string;
+  /** form_options: true for a checkbox group (several picks allowed). */
+  multi_select?: boolean;
+  max_select?: number | null;
   options: PendingChoiceOption[];
   reason?: string;
   screenshot_path?: string | null;

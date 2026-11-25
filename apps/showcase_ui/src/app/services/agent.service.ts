@@ -70,9 +70,12 @@ export interface SessionTimingStep {
   target: string;
   wall_s: number;
   llm_s: number | null;
+  silent_llm_s?: number | null;
+  silent_turns?: number;
   action_s: number | null;
   observe_s: number | null;
   prep_s: number | null;
+  user_wait_s?: number | null;
   shared_model_call: boolean;
   llm_resumes: number;
   agy: { model_calls?: number; opened_screenshot?: boolean } | null;
@@ -84,7 +87,17 @@ export interface SessionTimingReport {
   session_id: string;
   has_timing: boolean;
   steps: SessionTimingStep[];
-  totals: { wall_s: number; llm_s: number; action_s: number; observe_s: number; prep_s: number; other_s: number };
+  totals: {
+    wall_s: number;
+    llm_s: number;
+    silent_llm_s?: number;
+    silent_turns?: number;
+    action_s: number;
+    observe_s: number;
+    prep_s: number;
+    user_wait_s?: number;
+    other_s: number;
+  };
   agents: { name: string; count: number; total_s: number; longest_s: number }[];
 }
 
@@ -586,8 +599,9 @@ export class AgentService {
     payload: {
       session_id?: string;
       choice_id: string;
-      type: 'option' | 'auto' | 'custom' | 'manual';
+      type: 'option' | 'options' | 'auto' | 'custom' | 'manual';
       option_id?: string;
+      option_ids?: string[];
       text?: string;
     },
     summaryLabel?: string

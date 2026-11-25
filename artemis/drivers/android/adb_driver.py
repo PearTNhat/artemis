@@ -566,8 +566,25 @@ class AndroidAdbDriver(BaseDeviceDriver):
             if await self._clipboard_paste(norm_text):
                 return True
             logger.debug(
-                "Clipboard paste did not take; falling back to native input text."
+                "Clipboard paste did not take; trying the helper's direct text entry."
             )
+
+            # 1b. Tier 1b: set the text on the focused node through the helper
+            #     (no IME involved). A keyboard that intercepts KEYCODE_PASTE
+            #     (it shows the clipboard as a suggestion chip instead) or a
+            #     field still taking focus loses the paste; native `input text`
+            #     below cannot type non-ASCII text at all.
+            if client is not None and hasattr(client, "send_text"):
+                try:
+                    res = client.send_text(norm_text)
+                    if asyncio.iscoroutine(res):
+                        res = await res
+                    if res is not False:
+                        await asyncio.sleep(0.2)
+                        if await self._verify_focused_text(norm_text, strict=True):
+                            return True
+                except Exception as e:
+                    logger.debug(f"Helper send_text failed: {e}")
 
             # 2. Tier 2: Check if ADBKeyboard is currently active
             try:

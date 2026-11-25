@@ -22,6 +22,7 @@ import { LegacyWorkspaceComponent } from './pages/legacy-workspace/legacy-worksp
 export const routes: Routes = [
   { path: '', component: HomeComponent },
   { path: 'workspace', component: WorkspaceComponent },
+  { path: 'workspace/:sessionSlug', component: WorkspaceComponent },
   { path: 'check', component: LegacyWorkspaceComponent },
   { path: '**', redirectTo: '' }
 ];

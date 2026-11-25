@@ -70,7 +70,7 @@ export function isAndroidAction(action: any): boolean {
     'tap', 'click', 'click_sequence', 'input', 'input_text', 'swipe', 'scroll', 'press_key', 
     'press_home', 'press_back', 'launch_app', 'manage_app', 'open_app',
     'focus_and_input_text', 'focus_and_clear_text', 'long_press', 'long_press_on',
-    'wait_for_delay', 'wait', 'drag', 'drag_and_drop'
+    'wait_for_delay', 'wait', 'drag', 'drag_and_drop', 'ask_user_choice'
   ].includes(name);
 }
 
@@ -123,6 +123,8 @@ export function getActionIcon(action: any): string {
   if (!act) return 'ads_click';
   const name = (act.name || act.action || '').toLowerCase();
   switch (name) {
+    case 'ask_user_choice':
+      return 'contact_support';
     case 'tap':
     case 'click':
     case 'click_sequence':
@@ -161,6 +163,16 @@ export function getActionIcon(action: any): string {
 }
 
 /**
+ * Check whether an action is an interactive human-in-the-loop choice prompt.
+ */
+export function isUserChoiceAction(action: any): boolean {
+  const act = getActionObject(action);
+  if (!act) return false;
+  const name = (act.name || act.action || '').toLowerCase();
+  return name === 'ask_user_choice';
+}
+
+/**
  * Get human-readable title for Android actions
  */
 export function getActionTitle(action: any): string {
@@ -168,6 +180,8 @@ export function getActionTitle(action: any): string {
   if (!act) return 'Action';
   const name = (act.name || act.action || '').toLowerCase();
   switch (name) {
+    case 'ask_user_choice':
+      return 'Hỏi ý kiến bạn';
     case 'tap':
     case 'click':
     case 'tap_element':
@@ -233,6 +247,9 @@ export function getActionTargetText(action: any): string {
   const name = (act.name || act.action || '').toLowerCase();
   const args = act.args && typeof act.args === 'object' ? act.args : {};
 
+  if (name === 'ask_user_choice') {
+    return act.question || args.question || '';
+  }
   if (name.includes('app')) {
     const rawApp = act.app_name || act.package_name || act.app || args.app_name || args.package_name || args.app || '';
     const app = rawApp ? (rawApp.charAt(0).toUpperCase() + rawApp.slice(1)) : '';
@@ -266,6 +283,9 @@ export function getActionInputLabel(action: any): string {
   const act = getActionObject(action);
   if (!act) return 'Input';
   const name = (act.name || act.action || '').toLowerCase();
+  if (name === 'ask_user_choice') {
+    return 'Bạn trả lời';
+  }
   if (name.includes('delay') || name.includes('wait')) {
     return 'Duration';
   }
@@ -296,6 +316,9 @@ export function getActionInputText(action: any): string {
   const name = (act.name || act.action || '').toLowerCase();
   const args = act.args && typeof act.args === 'object' ? act.args : {};
 
+  if (name === 'ask_user_choice') {
+    return act.answer_summary || '';
+  }
   if (name === 'press_key' || name.includes('key')) {
     return act.key || act.keycode || args.key || args.keycode || '';
   }
@@ -527,6 +550,7 @@ export function extractActionExtraParams(action: any, cache?: WeakMap<any, Actio
   }
 
   const mergedObj = { ...act, ...parsedArgs };
+  const isUserChoice = isUserChoiceAction(act);
 
   // Two different durations share the name: a gesture argument (swipe / long
   // press length, in ms) and the recorded execution time of the action (in
@@ -548,12 +572,25 @@ export function extractActionExtraParams(action: any, cache?: WeakMap<any, Actio
   for (const [k, v] of Object.entries(mergedObj)) {
     const lowerK = k.toLowerCase();
     if (standardKeys.has(lowerK)) continue;
+    if (isUserChoice && (lowerK === 'question' || lowerK === 'answer_summary')) continue;
     if (v === null || v === undefined || v === '') continue;
 
     let valStr = String(v);
     if (valStr.includes('object at 0x') || valStr.startsWith('<artemis.') || valStr.includes('<controller')) continue;
 
-    if (typeof v === 'object') {
+    if (isUserChoice && lowerK === 'options' && Array.isArray(v)) {
+      valStr = v
+        .map((opt: any, idx: number) => {
+          if (opt && typeof opt === 'object') {
+            const optId = opt.id ?? idx + 1;
+            const optLabel = opt.label ?? '';
+            const optDetail = opt.detail ? ` (${opt.detail})` : '';
+            return `${optId}. ${optLabel}${optDetail}`;
+          }
+          return String(opt);
+        })
+        .join(' · ');
+    } else if (typeof v === 'object') {
       try { valStr = JSON.stringify(v); } catch { valStr = String(v); }
     }
 

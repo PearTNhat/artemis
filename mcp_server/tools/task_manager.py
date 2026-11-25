@@ -247,7 +247,9 @@ def mobile_manage_task(
     - **'answer_choice'**: Answers a pending `ask_user_choice` prompt when the
       task is `awaiting_user`. Pass `instruction` as the option number (e.g.
       `"2"`), `"auto"`, `"manual"` (after the user operated the phone and wants
-      Flash to continue), or free-form custom text.
+      Flash to continue), several numbers such as `"1,3"` when
+      `pending_choice.multi_select` is true (a checkbox group), or free-form
+      custom text.
       **CRITICAL RULES FOR CALLERS**:
       - You MUST ask the real human user and wait for their reply. NEVER answer
         on the user's behalf, NEVER poll in a loop while waiting for the user,
@@ -650,7 +652,14 @@ def mobile_manage_task(
         elif raw_inst in valid_option_ids:
             ans_payload = {"choice_id": choice_id, "type": "option", "option_id": raw_inst}
         else:
-            ans_payload = {"choice_id": choice_id, "type": "custom", "text": raw_inst}
+            # Several numbers ("1,3") for a checkbox group; anything else is custom text.
+            from artemis.agents.flash.user_choice import parse_choice_input
+
+            ans_payload = parse_choice_input(raw_inst, pending) or {
+                "choice_id": choice_id,
+                "type": "custom",
+                "text": raw_inst,
+            }
 
         write_choice_answer(trace_dir, ans_payload)
         update_status_user_choice(trace_id, None)

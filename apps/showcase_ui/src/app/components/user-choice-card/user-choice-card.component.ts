@@ -40,7 +40,7 @@ import { AgentService, PendingChoice } from '../../services/agent.service';
         <div class="uc-header">
           <div class="uc-title-group">
             <span class="material-symbols-outlined uc-icon">
-              {{ choice.kind === 'stuck' ? 'help_center' : 'checklist' }}
+              {{ choice.kind === 'stuck' ? 'help_center' : choice.kind === 'form_options' ? 'check_box' : 'checklist' }}
             </span>
             <div>
               <div class="uc-kicker">
@@ -99,15 +99,32 @@ import { AgentService, PendingChoice } from '../../services/agent.service';
               </div>
             } @else {
               <div class="uc-options-list">
+                @if (isMulti()) {
+                  <div class="uc-multi-hint">
+                    Chọn một hoặc nhiều lựa chọn{{ choice.max_select ? ' (tối đa ' + choice.max_select + ')' : '' }}
+                  </div>
+                }
                 @for (opt of itemOptions(); track opt.id) {
-                  <label class="uc-option-row" [class.is-selected]="selectedOption() === opt.id">
-                    <input
-                      type="radio"
-                      [name]="'uc-opt-' + choice.choice_id"
-                      [value]="opt.id"
-                      [checked]="selectedOption() === opt.id"
-                      (change)="selectOption(opt.id)"
-                    />
+                  <label
+                    class="uc-option-row"
+                    [class.is-selected]="isMulti() ? selectedItems().includes(opt.id) : selectedOption() === opt.id"
+                  >
+                    @if (isMulti()) {
+                      <input
+                        type="checkbox"
+                        [value]="opt.id"
+                        [checked]="selectedItems().includes(opt.id)"
+                        (change)="toggleItem(opt.id)"
+                      />
+                    } @else {
+                      <input
+                        type="radio"
+                        [name]="'uc-opt-' + choice.choice_id"
+                        [value]="opt.id"
+                        [checked]="selectedOption() === opt.id"
+                        (change)="selectOption(opt.id)"
+                      />
+                    }
                     <div class="uc-opt-text">
                       <span class="uc-opt-label">{{ opt.id }}. {{ opt.label }}</span>
                       @if (opt.detail) {
@@ -307,6 +324,12 @@ import { AgentService, PendingChoice } from '../../services/agent.service';
         border-color: #3b66f5;
         background: #eff6ff;
       }
+      .uc-multi-hint {
+        font-size: 12px;
+        color: #475569;
+        margin-bottom: 2px;
+      }
+      .uc-option-row input[type='checkbox'],
       .uc-option-row input[type='radio'] {
         margin-top: 3px;
       }
@@ -393,13 +416,17 @@ import { AgentService, PendingChoice } from '../../services/agent.service';
         margin: 10px 0;
         padding: 10px 14px;
         border-radius: 10px;
-        background: #f0fdf4;
-        border: 1px solid #bbf7d0;
-        color: #166534;
+        background: #ecfdf5;
+        border: 1px solid #a7f3d0;
+        color: #065f46;
         font-size: 13px;
         display: flex;
         align-items: center;
         gap: 8px;
+      }
+      .user-choice-resolved strong {
+        color: #047857;
+        font-weight: 700;
       }
       .uc-done-icon {
         font-size: 18px;
@@ -415,6 +442,8 @@ export class UserChoiceCardComponent implements OnChanges {
   @Input() public resolvedSummary: { choice_id: string; summary: string } | null = null;
 
   public selectedOption = signal<string>('');
+  /** Ticked options of a checkbox group (form_options with multi_select). */
+  public selectedItems = signal<string[]>([]);
   public customText: string = '';
   public manualWaitingMode = signal<boolean>(false);
   public isSending = signal<boolean>(false);
@@ -422,6 +451,23 @@ export class UserChoiceCardComponent implements OnChanges {
   public screenshotBroken = signal<boolean>(false);
   private nowSec = signal<number>(Date.now() / 1000);
   private timerId: any = null;
+
+  public isMulti(): boolean {
+    return !!this.choice?.multi_select;
+  }
+
+  public toggleItem(id: string): void {
+    const cur = this.selectedItems();
+    const next = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
+    const max = this.choice?.max_select;
+    if (max && next.length > max) {
+      this.errorMsg.set(`Chỉ được chọn tối đa ${max} lựa chọn.`);
+      return;
+    }
+    this.selectedItems.set(next);
+    this.selectedOption.set(next.length ? 'items' : '');
+    this.errorMsg.set(null);
+  }
 
   public itemOptions = computed(() => {
     return (this.choice?.options || []).filter((o) => !o.kind);
@@ -466,6 +512,7 @@ export class UserChoiceCardComponent implements OnChanges {
       const nextId = changes['choice'].currentValue?.choice_id;
       if (prevId !== nextId) {
         this.selectedOption.set('');
+        this.selectedItems.set([]);
         this.customText = '';
         this.manualWaitingMode.set(false);
         this.isSending.set(false);
@@ -477,6 +524,9 @@ export class UserChoiceCardComponent implements OnChanges {
 
   public selectOption(id: string): void {
     this.selectedOption.set(id);
+    if (['auto', 'custom', 'manual'].includes(id)) {
+      this.selectedItems.set([]);
+    }
     this.errorMsg.set(null);
   }
 
@@ -521,6 +571,15 @@ export class UserChoiceCardComponent implements OnChanges {
       payload.type = 'custom';
       payload.text = txt;
       summary = txt;
+    } else if (sel === 'items') {
+      const ids = this.selectedItems();
+      if (!ids.length) return;
+      payload.type = 'options';
+      payload.option_ids = ids;
+      summary = this.itemOptions()
+        .filter((o) => ids.includes(o.id))
+        .map((o) => `${o.id}. ${o.label}`)
+        .join(', ');
     } else {
       payload.type = 'option';
       payload.option_id = sel;

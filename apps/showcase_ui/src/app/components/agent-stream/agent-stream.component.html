@@ -457,8 +457,14 @@ limitations under the License.
               <div class="timing-summary">
                 <span>Tổng <b>{{ fmtSec(r.totals.wall_s) }}</b></span>
                 <span class="seg seg-llm">Model {{ fmtSec(r.totals.llm_s) }} ({{ timingPct(r.totals.llm_s, r) }}%)</span>
+                @if (r.totals.silent_llm_s) {
+                  <span class="seg seg-silent">Model (lượt trống) {{ fmtSec(r.totals.silent_llm_s) }} ({{ timingPct(r.totals.silent_llm_s, r) }}%)</span>
+                }
                 <span class="seg seg-action">Thao tác {{ fmtSec(r.totals.action_s) }} ({{ timingPct(r.totals.action_s, r) }}%)</span>
                 <span class="seg seg-observe">Chụp màn hình {{ fmtSec(r.totals.observe_s) }} ({{ timingPct(r.totals.observe_s, r) }}%)</span>
+                @if (r.totals.user_wait_s) {
+                  <span class="seg seg-wait">Chờ user {{ fmtSec(r.totals.user_wait_s) }} ({{ timingPct(r.totals.user_wait_s, r) }}%)</span>
+                }
                 <span class="seg">Khác {{ fmtSec(r.totals.other_s) }}</span>
               </div>
               @if (!r.has_timing) {
@@ -467,7 +473,7 @@ limitations under the License.
               <div class="timing-table-wrap">
                 <table class="timing-table">
                   <thead>
-                    <tr><th>#</th><th>Bước</th><th>Tổng</th><th>Model</th><th>Thao tác</th><th>Chụp</th><th>Token vào/ra</th></tr>
+                    <tr><th>#</th><th>Bước</th><th>Tổng</th><th>Model</th><th>Model (lượt trống)</th><th>Thao tác</th><th>Chụp</th><th>Token vào/ra</th></tr>
                   </thead>
                   <tbody>
                     @for (s of r.steps; track s.step) {
@@ -484,6 +490,9 @@ limitations under the License.
                         </td>
                         <td>{{ fmtSec(s.wall_s) }}</td>
                         <td>{{ s.shared_model_call ? '(chung)' : fmtSec(s.llm_s) }}</td>
+                        <td>
+                          {{ fmtSec(s.silent_llm_s) }}@if ((s.silent_turns ?? 0) > 1) { <span class="timing-target">({{ s.silent_turns }}×)</span> }
+                        </td>
                         <td>{{ fmtSec(s.action_s) }}</td>
                         <td>{{ fmtSec(s.observe_s) }}</td>
                         <td>{{ s.prompt_tokens ?? '–' }}/{{ s.completion_tokens ?? '–' }}</td>
@@ -967,6 +976,7 @@ limitations under the License.
                                 <div class="step-android-action-card"
                                   [class.is-running]="isItemRunning(item, block)"
                                   [class.is-failed]="isActionFailed(item.data, block.data)"
+                                  [class.is-user-choice]="isUserChoiceAction(item.data)"
                                   [class.is-expanded]="isActionExpanded('action-' + block.id + '-' + itemIdx)"
                                   >
                                   <div class="action-card-header" (click)="toggleActionExpanded('action-' + block.id + '-' + itemIdx, $event)">
@@ -987,14 +997,14 @@ limitations under the License.
                                     <div class="action-card-body">
                                       @if (getActionTargetText(item.data)) {
                                         <div class="action-detail-row">
-                                          <span class="detail-label">Target:</span>
-                                          <span class="detail-value">"{{ getActionTargetText(item.data) }}"</span>
+                                          <span class="detail-label">{{ isUserChoiceAction(item.data) ? 'Câu hỏi:' : 'Target:' }}</span>
+                                          <span class="detail-value">{{ isUserChoiceAction(item.data) ? getActionTargetText(item.data) : '"' + getActionTargetText(item.data) + '"' }}</span>
                                         </div>
                                       }
                                       @if (getActionInputText(item.data)) {
-                                        <div class="action-detail-row">
+                                        <div class="action-detail-row" [class.is-user-answer]="isUserChoiceAction(item.data)">
                                           <span class="detail-label">{{ getActionInputLabel(item.data) }}:</span>
-                                          <span class="detail-value">"{{ getActionInputText(item.data) }}"</span>
+                                          <span class="detail-value">{{ isUserChoiceAction(item.data) ? getActionInputText(item.data) : '"' + getActionInputText(item.data) + '"' }}</span>
                                         </div>
                                       }
                                       @if (getActionCoords(item.data)) {
@@ -1010,15 +1020,15 @@ limitations under the License.
                                     <div class="action-card-expanded-details" (click)="$event.stopPropagation()">
                                       <div class="expanded-grid">
                                         @if (getActionTargetText(item.data)) {
-                                          <div class="grid-item">
-                                            <span class="grid-label">Target</span>
-                                            <span class="grid-value">"{{ getActionTargetText(item.data) }}"</span>
+                                          <div class="grid-item" [class.full-width]="isUserChoiceAction(item.data)">
+                                            <span class="grid-label">{{ isUserChoiceAction(item.data) ? 'Câu hỏi' : 'Target' }}</span>
+                                            <span class="grid-value">{{ isUserChoiceAction(item.data) ? getActionTargetText(item.data) : '"' + getActionTargetText(item.data) + '"' }}</span>
                                           </div>
                                         }
                                         @if (getActionInputText(item.data)) {
-                                          <div class="grid-item">
+                                          <div class="grid-item" [class.full-width]="isUserChoiceAction(item.data)" [class.is-user-answer]="isUserChoiceAction(item.data)">
                                             <span class="grid-label">{{ getActionInputLabel(item.data) }}</span>
-                                            <span class="grid-value">"{{ getActionInputText(item.data) }}"</span>
+                                            <span class="grid-value">{{ isUserChoiceAction(item.data) ? getActionInputText(item.data) : '"' + getActionInputText(item.data) + '"' }}</span>
                                           </div>
                                         }
                                         @if (getActionCoords(item.data)) {

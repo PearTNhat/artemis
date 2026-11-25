@@ -5,7 +5,8 @@ import {
   getActionTargetText,
   isActionFailed,
   getActionErrorMessage,
-  extractActionExtraParams
+  extractActionExtraParams,
+  isUserChoiceAction
 } from './action-formatter.util';
 
 describe('action-formatter.util screenshot chaining', () => {
@@ -509,5 +510,31 @@ describe('extractActionExtraParams', () => {
     });
     expect(sequence.map(p => p.key)).not.toContain('Target Descriptions');
     expect(sequence.map(p => p.key)).toContain('Interval Ms');
+  });
+
+  it('detects ask_user_choice and formats options cleanly without duplicating question/answer_summary', () => {
+    const choiceAction = {
+      action: 'ask_user_choice',
+      question: 'Bạn muốn đặt thời gian chờ bao lâu?',
+      answer_summary: '5. 5 minutes',
+      args: {
+        kind: 'form_options',
+        question: 'Bạn muốn đặt thời gian chờ bao lâu?',
+        options: [
+          { id: '1', label: '15 seconds' },
+          { id: '5', label: '5 minutes', detail: 'recommended' }
+        ],
+        reason: 'Cần bạn chọn'
+      }
+    };
+    expect(isUserChoiceAction(choiceAction)).toBeTrue();
+    expect(isUserChoiceAction({ action: 'click' })).toBeFalse();
+
+    const params = extractActionExtraParams(choiceAction);
+    const keys = params.map(p => p.key);
+    expect(keys).not.toContain('Question');
+    expect(keys).not.toContain('Answer Summary');
+    const optParam = params.find(p => p.key === 'Options');
+    expect(optParam?.value).toBe('1. 15 seconds · 5. 5 minutes (recommended)');
   });
 });

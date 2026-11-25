@@ -1084,3 +1084,140 @@ def test_id_only_cards_take_their_inner_title_and_skeletons_are_skipped():
     ]
     # Still loading: cards without readable titles never trigger the hint.
     assert find_comparable_items(cards, 1080, 2400) == []
+
+
+def test_card_title_prefers_letters_over_rating_and_strips_separators():
+    from artemis.agents.flash.user_choice import find_comparable_items
+
+    cards = [
+        _el(f"dd_module_product_card_{i}", (20 + 490 * (i % 2), 533 + 400 * (i // 2), 489 + 490 * (i % 2), 900 + 400 * (i // 2)), cls="android.view.ViewGroup")
+        for i in range(4)
+    ]
+    inner = []
+    for i, title in enumerate(["Cable alpha fast charge", "Cable beta braided long", "Cable gamma short spare"]):
+        x = 30 + 490 * (i % 2)
+        y = 760 + 400 * (i // 2)
+        inner.append(_el(f"!!{title}!!", (x, y, x + 440, y + 40)))
+        inner.append(_el("!!!!4.9!780,2k ratings!", (x, y + 50, x + 440, y + 80)))
+    texts = find_comparable_items(cards + inner, 1080, 2400)
+    assert texts == ["Cable alpha fast charge", "Cable beta braided long", "Cable gamma short spare"]
+
+
+# --- form_options: radio / checkbox groups ----------------------------------
+
+def test_form_options_validation_allows_full_group_and_multi_select():
+    from artemis.agents.flash.user_choice import validate_ask_user_choice_args
+
+    opts = [{"label": f"Topping {i}", "detail": f"+{i}.000"} for i in range(1, 15)]
+    ok, err, norm = validate_ask_user_choice_args(
+        {"kind": "form_options", "question": "Toppings?", "options": opts, "multi_select": True, "max_select": 3},
+        max_options=8,
+    )
+    assert ok, err
+    assert len(norm["options"]) == 14  # whole group, not capped at 8
+    assert norm["multi_select"] is True and norm["max_select"] == 3
+    ok, _, norm = validate_ask_user_choice_args(
+        {"kind": "form_options", "question": "Size?", "options": opts[:3]}, max_options=8
+    )
+    assert ok and norm["multi_select"] is False
+
+
+def test_multi_answer_validation_and_cli_parse():
+    from artemis.agents.flash.user_choice import (
+        _validate_answer_for_pending,
+        build_pending_choice_payload,
+        parse_choice_input,
+    )
+
+    pending = build_pending_choice_payload(
+        choice_id="c1", session_id="s", kind="form_options", question="Toppings?",
+        options=[{"id": "1", "label": "Cheese"}, {"id": "2", "label": "Egg"}, {"id": "3", "label": "Bacon"}],
+        multi_select=True, max_select=2,
+    )
+    ok = _validate_answer_for_pending({"choice_id": "c1", "type": "options", "option_ids": ["1", "3"]}, pending)
+    assert ok["labels"] == ["Cheese", "Bacon"]
+    assert _validate_answer_for_pending({"choice_id": "c1", "type": "options", "option_ids": ["1", "2", "3"]}, pending) is None
+    assert _validate_answer_for_pending({"choice_id": "c1", "type": "options", "option_ids": ["9"]}, pending) is None
+    assert parse_choice_input("1, 3", pending) == {"choice_id": "c1", "type": "options", "option_ids": ["1", "3"]}
+    assert parse_choice_input("2", pending)["type"] == "option"
+
+    single = dict(pending, multi_select=False)
+    assert _validate_answer_for_pending({"choice_id": "c1", "type": "options", "option_ids": ["1"]}, single) is None
+    assert parse_choice_input("1,3", single)["type"] == "custom"
+
+
+def test_find_selectable_group_radio_checkbox_and_row_labels():
+    from artemis.agents.flash.user_choice import find_selectable_group
+
+    radios = [
+        _el(t, (40, y, 1000, y + 80), cls="android.widget.RadioButton", checkable="true",
+            checked="true" if i == 0 else "false")
+        for i, (t, y) in enumerate((("Size M", 600), ("Size L", 700), ("Size XL", 800)))
+    ]
+    multi, labels = find_selectable_group(radios)
+    assert multi is False and labels == ["Size M (selected)", "Size L", "Size XL"]
+
+    boxes = [_el("", (900, y, 980, y + 60), cls="android.widget.CheckBox", checkable="true") for y in (1000, 1100)]
+    names = [_el("Extra cheese", (40, 1005, 600, 1055)), _el("Fried egg", (40, 1105, 600, 1155))]
+    multi, labels = find_selectable_group(boxes + names)
+    assert multi is True and labels == ["Extra cheese", "Fried egg"]
+
+    toggles = [_el(t, (40, y, 1000, y + 80), cls="android.widget.Switch", checkable="true") for t, y in (("Wi-Fi", 300), ("Bluetooth", 400))]
+    assert find_selectable_group(toggles) == (None, [])
+
+
+def test_selectable_group_notice_teaches_form_options():
+    from artemis.agents.flash.user_choice import selectable_group_notice
+
+    text = selectable_group_notice(True, ["Extra cheese", "Fried egg"])
+    assert "form_options" in text and "multi_select=true" in text and "EVERY option" in text
+
+
+def test_completion_refused_while_users_pick_is_open():
+    from artemis.agents.flash.runner import FlashRunner
+
+    r = FlashRunner.__new__(FlashRunner)
+    r._open_choice_kind = None
+    r._open_choice_rejections = 0
+    msgs: list = []
+    calls = [{"id": "a", "name": "report_task_status"}, {"id": "b", "name": "click"}]
+    assert r._reject_completion_with_open_choice({"status": "completed"}, "a", calls, 0, msgs) is False
+
+    r._open_choice_kind = "pick_item"
+    assert r._reject_completion_with_open_choice({"status": "failed"}, "a", calls, 0, msgs) is False
+    assert r._reject_completion_with_open_choice({"status": "completed"}, "a", calls, 0, msgs) is True
+    assert len(msgs) == 2 and "not picked yet" in msgs[0].content and msgs[1].tool_call_id == "b"
+    assert r._reject_completion_with_open_choice({"status": "completed"}, "a", calls, 0, []) is True
+    # Never trap the model: the third attempt goes through.
+    assert r._reject_completion_with_open_choice({"status": "completed"}, "a", calls, 0, []) is False
+
+
+def test_user_answer_summary_wording():
+    from artemis.agents.flash.user_choice import user_answer_summary
+
+    assert user_answer_summary({"type": "option", "option_id": "2", "label": "Cable B"}) == "2. Cable B"
+    assert user_answer_summary({"type": "options", "labels": ["Cheese", "Egg"]}) == "Cheese, Egg"
+    assert "xem thêm" in user_answer_summary({"type": "custom", "text": "xem thêm"})
+
+
+def test_custom_drawn_tick_boxes_form_a_group():
+    """Pick-N lists whose tick boxes are plain unlabeled buttons (no checkable flag)."""
+    from artemis.agents.flash.user_choice import find_selectable_group
+
+    W, H = 1280, 2772
+    def px(l, t, r, b):  # 0-1000 grid -> pixels
+        return (l * W // 1000, t * H // 1000, r * W // 1000, b * H // 1000)
+    els = [
+        _el("Item list", px(40, 389, 251, 432)),
+        _el("Pick 3", px(849, 398, 939, 419)),
+        _el("Milk tea pearl size M", px(172, 446, 718, 475)),
+        _el("Kumquat tea size L", px(172, 498, 644, 526)),
+        _el("checkbox_tick", px(71, 554, 111, 573), cls="android.widget.ImageView"),
+        _el("Oolong jasmine milk tea M", px(172, 550, 839, 578)),
+        _el("", px(30, 432, 152, 484), cls="android.view.ViewGroup", is_hint=True),
+        _el("", px(30, 484, 152, 536), cls="android.view.ViewGroup", is_hint=True),
+        _el("", px(40, 68, 142, 115), cls="android.view.ViewGroup", is_hint=True),  # back button, alone
+    ]
+    multi, labels = find_selectable_group(els, width=W, height=H)
+    assert multi is None
+    assert labels == ["Milk tea pearl size M", "Kumquat tea size L", "Oolong jasmine milk tea M"]
