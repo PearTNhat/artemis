@@ -221,6 +221,8 @@ def submit_task_to_daemon(
     conversation_id: str | None = None,
     verification_level: str | None = None,
     explorer_mode: str | None = None,
+    ask_on_choice: bool | None = None,
+    ask_when_stuck: bool | None = None,
     base_url: str | None = None,
     timeout: float = 15.0,
 ) -> dict[str, Any] | None:
@@ -247,6 +249,10 @@ def submit_task_to_daemon(
         "ingress": ingress,
         "conversation_id": conversation_id,
     }
+    if ask_on_choice is not None:
+        payload["ask_on_choice"] = ask_on_choice
+    if ask_when_stuck is not None:
+        payload["ask_when_stuck"] = ask_when_stuck
 
     try:
         data = json.dumps(payload).encode("utf-8")
@@ -420,3 +426,60 @@ def wait_for_daemon_task(
         time.sleep(poll_interval)
 
     return {"session_id": session_id, "status": "timeout", "error": f"Timed out after {timeout}s"}
+
+
+def get_daemon_pending_choice(
+    session_id: str,
+    *,
+    base_url: str | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any] | None:
+    """Return ``pending_choice`` for ``session_id`` from the Daemon, or ``None``."""
+    url = f"{base_url or f'http://{DEFAULT_DAEMON_HOST}:{DEFAULT_DAEMON_PORT}'}/api/tasks/{session_id}/choice"
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Artemis-Client"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            if response.status == 200:
+                data = json.loads(response.read().decode("utf-8"))
+                if data.get("awaiting_user") and isinstance(data.get("pending_choice"), dict):
+                    return data["pending_choice"]
+    except Exception as exc:
+        logger.debug(f"Failed to query pending choice from Daemon at {url}: {exc}")
+    return None
+
+
+def submit_daemon_choice(
+    session_id: str,
+    answer: dict[str, Any],
+    *,
+    base_url: str | None = None,
+    timeout: float = 5.0,
+) -> bool:
+    """Submit an answer payload to ``POST /api/tasks/choice`` on the Daemon."""
+    url = f"{base_url or f'http://{DEFAULT_DAEMON_HOST}:{DEFAULT_DAEMON_PORT}'}/api/tasks/choice"
+    payload: dict[str, Any] = {
+        "session_id": session_id,
+        "choice_id": answer.get("choice_id", ""),
+        "type": answer.get("type", "auto"),
+    }
+    if answer.get("option_id") is not None:
+        payload["option_id"] = str(answer["option_id"])
+    if answer.get("text") is not None:
+        payload["text"] = str(answer["text"])
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json", "User-Agent": "Artemis-Client"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return response.status in (200, 201)
+    except Exception as exc:
+        logger.debug(f"Failed to submit choice to Daemon at {url}: {exc}")
+        return False

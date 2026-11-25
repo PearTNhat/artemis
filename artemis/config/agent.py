@@ -857,6 +857,41 @@ class FlashModelImageConfig(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class FlashUserChoiceConfig(BaseModel):
+    """Human-in-the-loop choice settings for the ⚡ Flash runner."""
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Master switch for ask_user_choice. Turn off only for unattended"
+            " benchmark/CI runs."
+        ),
+    )
+    ask_on_choice: bool = Field(
+        default=True,
+        description='Default for the user\'s "ask when several options" switch.',
+    )
+    ask_when_stuck: bool = Field(
+        default=True,
+        description='Default for the user\'s "ask when stuck" switch.',
+    )
+    stuck_after_no_progress_turns: int = Field(
+        default=2,
+        ge=0,
+        description=(
+            "Consecutive no-progress interaction turns before nudging Flash to"
+            " ask the user (or report failed when ask_when_stuck is off). 0 disables."
+        ),
+    )
+    max_options: int = Field(
+        default=8,
+        ge=2,
+        le=12,
+        description="Maximum options allowed in one ask_user_choice call.",
+    )
+    model_config = {"extra": "allow"}
+
+
 class FlashProfileConfig(BaseModel):
     """Configuration options specific to the ⚡ Flash execution profile (FlashRunner/ReactiveRunner)."""
 
@@ -919,6 +954,10 @@ class FlashProfileConfig(BaseModel):
     step_summarizer: StepSummarizerConfig = Field(
         default_factory=StepSummarizerConfig,
         description="Asynchronous visual context compressor settings.",
+    )
+    user_choice: FlashUserChoiceConfig = Field(
+        default_factory=FlashUserChoiceConfig,
+        description="Human-in-the-loop choice settings for the Flash runner.",
     )
     model_config = {"extra": "allow"}
 

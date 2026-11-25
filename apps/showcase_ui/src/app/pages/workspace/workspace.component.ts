@@ -156,6 +156,16 @@ export class WorkspaceComponent implements OnInit {
     this.agentService.startNewChat();
   }
 
+  public toggleAskOnChoice(event?: Event): void {
+    event?.stopPropagation();
+    this.agentService.setChoiceMode(!this.agentService.askOnChoice(), this.agentService.askWhenStuck());
+  }
+
+  public toggleAskWhenStuck(event?: Event): void {
+    event?.stopPropagation();
+    this.agentService.setChoiceMode(this.agentService.askOnChoice(), !this.agentService.askWhenStuck());
+  }
+
   /**
    * Dynamic tooltip and label indicating which task will be stopped
    */

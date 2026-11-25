@@ -31,12 +31,14 @@ from artemis.runtime.device_pool import DevicePool, DeviceStatus, device_pool
 from artemis.runtime.process_probe import pid_is_alive
 from artemis.runtime.daemon_client import (
     ensure_daemon_running,
+    get_daemon_pending_choice,
     get_daemon_session,
     get_daemon_status,
     is_artemis_daemon,
     is_daemon_running,
     stop_task_on_daemon,
     submit_batch_to_daemon,
+    submit_daemon_choice,
     submit_task_to_daemon,
     wait_for_daemon_task,
 )
@@ -82,6 +84,7 @@ __all__ = [
     "ensure_daemon_running",
     "ensure_device_awake",
     "find_server_pids",
+    "get_daemon_pending_choice",
     "get_daemon_session",
     "get_daemon_status",
     "get_server_status",
@@ -101,6 +104,7 @@ __all__ = [
     "stop_server",
     "stop_task_on_daemon",
     "submit_batch_to_daemon",
+    "submit_daemon_choice",
     "submit_task_to_daemon",
     "wait_for_daemon_task",
     "watch_for_cancel_request",

@@ -199,6 +199,11 @@ def normalize_coordinate_target(target: Any) -> int | list[int] | Any:
     - Integer index: e.g. 1 or "1" -> 1
     - Coordinate list: e.g. [500, 280] or ["500", "280"] -> [500, 280]
     - Serialized coordinate string: e.g. "[500, 280]" or "500, 280" -> [500, 280]
+    - Bounding box on the 0-1000 grid, as the element list prints it:
+      e.g. [101, 81, 384, 97] (left, top, right, bottom) -> its center [242, 89].
+      Models often copy an element's bounds instead of a point; a well-formed
+      box (0 <= left <= right <= 1000, 0 <= top <= bottom <= 1000) is reduced
+      to its center, anything else is returned unchanged and rejected later.
     """
     if isinstance(target, int):
         return target
@@ -209,6 +214,10 @@ def normalize_coordinate_target(target: Any) -> int | list[int] | Any:
                 return [int(target[0]), int(target[1])]
             except (ValueError, TypeError):
                 pass
+        elif len(target) == 4:
+            center = _bounds_center(target)
+            if center is not None:
+                return center
         elif len(target) == 1:
             return normalize_coordinate_target(target[0])
 
@@ -228,8 +237,23 @@ def normalize_coordinate_target(target: Any) -> int | list[int] | Any:
                     return [int(parts[0]), int(parts[1])]
                 except (ValueError, TypeError):
                     pass
+            elif len(parts) == 4:
+                center = _bounds_center(parts)
+                if center is not None:
+                    return center
 
     return target
+
+
+def _bounds_center(box: Any) -> list[int] | None:
+    """Center of a ``[left, top, right, bottom]`` box on the 0-1000 grid, or None."""
+    try:
+        left, top, right, bottom = (int(round(float(v))) for v in box)
+    except (ValueError, TypeError):
+        return None
+    if not (0 <= left <= right <= 1000 and 0 <= top <= bottom <= 1000):
+        return None
+    return [(left + right) // 2, (top + bottom) // 2]
 
 
 # Device-action declarations are generated from the canonical manifest

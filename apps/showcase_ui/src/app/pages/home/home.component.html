@@ -1943,6 +1943,23 @@
               <span class="record-text">Record</span>
               <span class="record-status-pill" [class.on]="isRecordingEnabled()">{{ isRecordingEnabled() ? 'ON' : 'OFF' }}</span>
             </button>
+
+            @if (selectedProfile() === 'flash') {
+              <button type="button" class="btn-debug-toggle"
+                [class.active]="agentService.askOnChoice()"
+                (click)="toggleAskOnChoice()"
+                title="Bật/tắt: AI hỏi bạn khi có nhiều lựa chọn">
+                <span class="debug-text">Hỏi nhiều lựa chọn</span>
+                <span class="debug-status-pill" [class.on]="agentService.askOnChoice()">{{ agentService.askOnChoice() ? 'ON' : 'OFF' }}</span>
+              </button>
+              <button type="button" class="btn-debug-toggle"
+                [class.active]="agentService.askWhenStuck()"
+                (click)="toggleAskWhenStuck()"
+                title="Bật/tắt: AI hỏi bạn khi bị bí (tắt = dừng có báo cáo, không bấm mò)">
+                <span class="debug-text">Hỏi khi bí</span>
+                <span class="debug-status-pill" [class.on]="agentService.askWhenStuck()">{{ agentService.askWhenStuck() ? 'ON' : 'OFF' }}</span>
+              </button>
+            }
           </div>
 
           <div class="bar-right">

@@ -15,9 +15,11 @@
 import asyncio
 from contextlib import suppress
 import json
-from typing import Any
+import os
+from pathlib import Path
+from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from artemis.core.diagnostics import readiness_engine
 from artemis.runtime import DeviceExecutionLock, device_pool
@@ -187,6 +189,8 @@ async def run_task(request: RunRequest):
         enable_outputter=request.enable_outputter,
         verification_level=request.verification_level,
         explorer_mode=request.explorer_mode,
+        ask_on_choice=request.ask_on_choice,
+        ask_when_stuck=request.ask_when_stuck,
         locked_app_package=request.locked_app_package,
         app_path=request.app_path,
         device_serial=target_serial,
@@ -326,6 +330,160 @@ async def inject_instruction_endpoint(request: InjectInstructionRequest):
         raise HTTPException(status_code=500, detail=f"Lỗi khi ghi chỉ dẫn: {e}")
 
 
+class SubmitChoiceRequest(BaseModel):
+    session_id: str | None = Field(default=None, description="Target session ID")
+    choice_id: str = Field(description="Active pending choice ID")
+    type: Literal["option", "auto", "custom", "manual"]
+    option_id: str | None = Field(default=None, description="Selected option ID when type='option'")
+    text: str | None = Field(default=None, description="Custom instruction when type='custom'")
+
+
+class ChoiceModeRequest(BaseModel):
+    session_id: str | None = Field(default=None, description="Target session ID")
+    ask_on_choice: bool = Field(description="Whether to ask user on comparable items")
+    ask_when_stuck: bool = Field(description="Whether to ask user when AI is stuck")
+
+
+def _resolve_target_session_id(session_id: str | None) -> str | None:
+    if session_id and str(session_id).strip():
+        return str(session_id).strip()
+    global_owner = DeviceExecutionLock.get_active_owner()
+    active_owners = DeviceExecutionLock.get_active_owners()
+    running_task = next(
+        (t for t in state.queue_items if isinstance(t, dict) and t.get("status") == "running"),
+        None,
+    )
+    resolved = (
+        (global_owner.session_id if global_owner else None)
+        or state.active_session_id
+        or (running_task.get("session_id") if running_task else None)
+        or (active_owners and list(active_owners.values())[0].session_id)
+    )
+    return str(resolved) if resolved else None
+
+
+def _resolve_session_trace_dir(session_id: str) -> str:
+    from artemis.runtime import trace_store
+
+    trace_dir = trace_store.get_trace_dir(str(session_id))
+    if not os.path.exists(trace_dir):
+        candidate = os.path.join(trace_store.TRACES_DIR, str(session_id))
+        if os.path.exists(candidate):
+            return candidate
+    return trace_dir
+
+
+def _read_session_pending_choice(session_id: str | None) -> dict[str, Any] | None:
+    if not session_id:
+        return None
+    from artemis.agents.flash.user_choice import read_pending_choice
+
+    return read_pending_choice(_resolve_session_trace_dir(str(session_id)))
+
+
+@router.post("/api/tasks/choice")
+async def submit_task_choice(request: SubmitChoiceRequest):
+    """Submit the user's answer to a pending ``ask_user_choice`` prompt."""
+    from artemis.agents.flash.user_choice import write_choice_answer
+
+    target_sid = _resolve_target_session_id(request.session_id)
+    if not target_sid:
+        raise HTTPException(status_code=409, detail="Không có câu hỏi nào đang chờ trả lời.")
+
+    trace_dir = _resolve_session_trace_dir(target_sid)
+    pending = _read_session_pending_choice(target_sid)
+    if not pending:
+        raise HTTPException(status_code=409, detail="Không có câu hỏi nào đang chờ trả lời.")
+    if pending.get("choice_id") != request.choice_id:
+        raise HTTPException(
+            status_code=409,
+            detail="choice_id không khớp với câu hỏi đang chờ hiện tại.",
+        )
+
+    answer_payload: dict[str, Any] = {
+        "choice_id": request.choice_id,
+        "type": request.type,
+    }
+    if request.type == "custom":
+        clean_text = (request.text or "").strip()
+        if not clean_text:
+            raise HTTPException(status_code=400, detail="Nội dung yêu cầu khác không được để trống.")
+        answer_payload["text"] = clean_text
+    elif request.type == "option":
+        opt_id = (request.option_id or "").strip()
+        valid_ids = {
+            str(o.get("id"))
+            for o in (pending.get("options") or [])
+            if isinstance(o, dict) and "kind" not in o
+        }
+        if not opt_id or opt_id not in valid_ids:
+            raise HTTPException(status_code=400, detail="option_id không hợp lệ.")
+        answer_payload["option_id"] = opt_id
+
+    write_choice_answer(trace_dir, answer_payload)
+    return {
+        "status": "success",
+        "session_id": target_sid,
+        "choice_id": request.choice_id,
+        "type": request.type,
+    }
+
+
+@router.get("/api/tasks/{session_id}/choice")
+async def get_task_choice(session_id: str):
+    """Return the pending ``ask_user_choice`` state for ``session_id`` (survives refresh)."""
+    pending = _read_session_pending_choice(session_id)
+    return {
+        "session_id": session_id,
+        "awaiting_user": pending is not None,
+        "pending_choice": pending,
+    }
+
+
+@router.get("/api/tasks/{session_id}/choice/screenshot")
+async def get_task_choice_screenshot(session_id: str):
+    """Serve the screenshot attached to a session's ``pending_choice.json``."""
+    pending = _read_session_pending_choice(session_id)
+    shot = pending.get("screenshot_path") if pending else None
+    if not shot:
+        raise HTTPException(status_code=404, detail="No pending choice screenshot.")
+    from artemis.runtime import trace_store
+
+    trace_dir = Path(_resolve_session_trace_dir(session_id)).resolve()
+    traces_root = Path(trace_store.TRACES_DIR).resolve()
+    shot_path = Path(str(shot))
+    if not shot_path.is_absolute():
+        shot_path = (trace_dir / shot_path).resolve()
+    else:
+        shot_path = shot_path.resolve()
+    if not (shot_path.is_relative_to(trace_dir) or shot_path.is_relative_to(traces_root)):
+        raise HTTPException(status_code=403, detail="Screenshot path outside trace directory.")
+    if not shot_path.is_file():
+        raise HTTPException(status_code=404, detail="Screenshot file not found.")
+    return FileResponse(str(shot_path))
+
+
+@router.post("/api/tasks/choice-mode")
+async def set_task_choice_mode(request: ChoiceModeRequest):
+    """Update the user-controlled ``ask_on_choice`` / ``ask_when_stuck`` switches mid-flight."""
+    from artemis.agents.flash.user_choice import write_user_choice_mode
+
+    target_sid = _resolve_target_session_id(request.session_id)
+    if not target_sid:
+        raise HTTPException(status_code=404, detail="Không có task nào đang chạy để đổi chế độ hỏi.")
+
+    trace_dir = _resolve_session_trace_dir(target_sid)
+    if not os.path.exists(trace_dir):
+        raise HTTPException(status_code=404, detail=f"Trace directory không tồn tại cho session {target_sid}")
+
+    mode = write_user_choice_mode(
+        trace_dir,
+        ask_on_choice=request.ask_on_choice,
+        ask_when_stuck=request.ask_when_stuck,
+    )
+    return {"status": "success", "session_id": target_sid, **mode}
+
+
 @router.get("/api/status")
 async def get_status():
     # Watchdog check to ensure background worker is alive
@@ -346,18 +504,26 @@ async def get_status():
             None,
         )
 
+    from artemis.agents.flash.user_choice import compact_pending_choice
+
     active_owners = DeviceExecutionLock.get_active_owners()
-    active_tasks = [
-        {
-            "device_id": owner.device_id,
-            "session_id": owner.session_id,
-            "goal": owner.description,
-            "pid": owner.pid,
-            "ingress": owner.ingress,
-            "acquired_at": owner.acquired_at,
-        }
-        for owner in active_owners.values()
-    ]
+    active_tasks = []
+    for owner in active_owners.values():
+        pending_choice_raw = _read_session_pending_choice(owner.session_id)
+        active_tasks.append(
+            {
+                "device_id": owner.device_id,
+                "session_id": owner.session_id,
+                "goal": owner.description,
+                "pid": owner.pid,
+                "ingress": owner.ingress,
+                "acquired_at": owner.acquired_at,
+                "awaiting_user": pending_choice_raw is not None,
+                "pending_choice": (
+                    compact_pending_choice(pending_choice_raw) if pending_choice_raw else None
+                ),
+            }
+        )
 
     running_sid = (
         (global_owner.session_id if global_owner else None)
@@ -415,8 +581,11 @@ async def get_status():
 
     if is_running:
         is_paused = state.is_paused
+        running_pending = _read_session_pending_choice(str(running_sid) if running_sid else None)
         return {
             "status": "paused" if is_paused else "running",
+            "awaiting_user": running_pending is not None,
+            "pending_choice": compact_pending_choice(running_pending) if running_pending else None,
             "paused_error": state.paused_error if is_paused else None,
             "goal": running_goal,
             "pid": (

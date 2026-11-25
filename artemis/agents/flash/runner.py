@@ -57,6 +57,16 @@ from langchain_core.messages import (
 
 from artemis.core.tool_declaration import ToolDeclaration
 from artemis.agents.flash.summarizer import VisualStepSummarizer, build_focus_context
+from artemis.agents.flash.user_choice import (
+    ASK_USER_CHOICE_TOOL,
+    choice_signature,
+    comparable_items_notice,
+    find_comparable_items,
+    read_user_choice_mode,
+    validate_ask_user_choice_args,
+    wait_for_user_choice,
+    write_user_choice_mode,
+)
 from artemis.agents.operator.prompts import REASONING_REMINDER, UserGuidance, render_user_guidance
 from artemis.agents.validator.tool_declarations import (
     ASK_EXPLORER_TOOL,
@@ -78,7 +88,7 @@ from artemis.config import (
     StepSummarizerConfig,
     load_agent_config,
 )
-from artemis.config.agent import FlashModelImageConfig
+from artemis.config.agent import FlashModelImageConfig, FlashProfileConfig, FlashUserChoiceConfig
 from artemis.config.llm import get_default_llm_config
 from artemis.utils import turn_log
 from artemis.context import ArtemisContext
@@ -181,6 +191,13 @@ _NO_TOOL_CALL_NOTICE = (
 
 _FINAL_TURN_WARNING = "[WARNING] This is your final turn; only 'report_task_status' is available."
 
+_INTERACTION_TOOLS = frozenset(
+    {"click", "click_sequence", "long_press", "swipe", "input_text", "press_key"}
+)
+_WAIT_ACTION_TOOLS = frozenset(
+    {"wait_for_text", "wait_for_screen_change", "wait_until_gone", "wait_for_delay"}
+)
+
 
 @dataclass
 class _TurnRecord:
@@ -195,6 +212,11 @@ class _TurnRecord:
 
     step_keys: list[str] = field(default_factory=list)
     actions: list[tuple[str, str, str]] = field(default_factory=list)
+    interaction_tools: list[str] = field(default_factory=list)
+    device_actions_called: bool = False
+    backtrack_called: bool = False
+    had_no_effect: bool = False
+    had_ineffective_tap: bool = False
 
     def result(self) -> dict | None:
         """The turn's execution result in the validator-report shape.
@@ -257,6 +279,8 @@ def _jaccard(a: set[str], b: set[str]) -> float:
 
 def _pixels_changed(before: bytes, after: bytes) -> bool:
     """64x64 grayscale comparison (status bar masked), as in wait_for_screen_change."""
+    if before == after:
+        return False
     try:
         from io import BytesIO
 
@@ -283,7 +307,14 @@ class FlashRunner:
         self.ctx = ctx
         self.goal = goal
         try:
+            # The SDK-built ``ctx.agent_config`` (AgentConfig) carries the per-task
+            # Flash profile but not the global sections (``memory`` …), so only its
+            # ``flash`` section overrides the jsonc config; everything else keeps
+            # coming from ``load_agent_config()``.
             cfg = load_agent_config()
+            ctx_flash = getattr(getattr(self.ctx, "agent_config", None), "flash", None)
+            if isinstance(ctx_flash, FlashProfileConfig):
+                cfg = cfg.model_copy(update={"flash": ctx_flash})
             self.max_turns = max_turns if max_turns is not None else cfg.flash.max_turns
             self.max_silent_turns = getattr(cfg.flash, "max_silent_turns", 5)
             self.fast_burst = getattr(cfg.flash, "fast_burst", False)
@@ -295,6 +326,14 @@ class FlashRunner:
             self.memory_runtime_cfg = cfg.memory.runtime
             self.transcript_cfg = cfg.memory.transcript
             self.chunking_cfg = cfg.memory.chunking
+            uc_cfg = getattr(cfg.flash, "user_choice", FlashUserChoiceConfig())
+            self.user_choice_enabled = bool(getattr(uc_cfg, "enabled", True))
+            self._default_ask_on_choice = bool(getattr(uc_cfg, "ask_on_choice", True))
+            self._default_ask_when_stuck = bool(getattr(uc_cfg, "ask_when_stuck", True))
+            self._user_choice_max_options = int(getattr(uc_cfg, "max_options", 8))
+            self._stuck_after_no_progress_turns = int(
+                getattr(uc_cfg, "stuck_after_no_progress_turns", 2)
+            )
         except Exception:
             self.max_turns = max_turns if max_turns is not None else 0
             self.max_silent_turns = 5
@@ -307,6 +346,20 @@ class FlashRunner:
             self.memory_runtime_cfg = MemoryRuntimeConfig()
             self.transcript_cfg = MemoryTranscriptConfig()
             self.chunking_cfg = None
+            self.user_choice_enabled = True
+            self._default_ask_on_choice = True
+            self._default_ask_when_stuck = True
+            self._user_choice_max_options = 8
+            self._stuck_after_no_progress_turns = 2
+
+        if isinstance(getattr(self.ctx, "user_choice_enabled", None), bool):
+            self.user_choice_enabled = bool(self.ctx.user_choice_enabled)
+        if isinstance(getattr(self.ctx, "ask_on_choice", None), bool):
+            self._default_ask_on_choice = bool(self.ctx.ask_on_choice)
+        if isinstance(getattr(self.ctx, "ask_when_stuck", None), bool):
+            self._default_ask_when_stuck = bool(self.ctx.ask_when_stuck)
+        self._user_choice_poll_interval_s = 0.5
+        self._reset_user_choice_state()
 
         # Observations made during this run (the runner's own and the executor's)
         # format the element list in the compact form; Pro never sets the flag.
@@ -348,6 +401,18 @@ class FlashRunner:
             except (AttributeError, TypeError, ValueError):
                 pass
 
+    def _reset_user_choice_state(self) -> None:
+        """Reset per-run human-in-the-loop choice tracking state."""
+        self._last_answered_choice_key: tuple[str, frozenset[str]] | None = None
+        self._last_answered_choice_summary: str = ""
+        self._acted_since_last_choice: bool = True
+        self._controlled_try: bool = False
+        self._allowed_stuck_steps: list[str] = []
+        self._try_budget: int = 0
+        self._no_progress_turns: int = 0
+        self._turn_ended_by_user_choice: bool = False
+        self._comparable_groups_hinted: set[frozenset[str]] = set()
+
     @property
     def turn_limit(self) -> int | None:
         """The reactive turn cap, or ``None`` when the loop is unbounded."""
@@ -385,6 +450,8 @@ class FlashRunner:
             tools.append(VIDEO_ANALYZER_TOOL)
         if getattr(self, "image_on_demand", False):
             tools.append(LOOK_AT_SCREEN_TOOL)
+        if getattr(self, "user_choice_enabled", False):
+            tools.append(ASK_USER_CHOICE_TOOL)
         tools.append(REPORT_TASK_STATUS_TOOL)
         # With an actuator installed, drop declarations for device actions the
         # backend does not implement (and append its extension tools); without
@@ -1133,6 +1200,30 @@ class FlashRunner:
             if name in action_names:
                 turn.step_keys.append(str(recorded_step_id) if recorded_step_id else str(tc_id))
                 turn.actions.append((name, exec_result.status, exec_result.text_summary))
+                if name not in _WAIT_ACTION_TOOLS:
+                    turn.device_actions_called = True
+                if name in _INTERACTION_TOOLS:
+                    turn.interaction_tools.append(name)
+                if name == "press_key" and str(args.get("key") or "").strip().upper() == "BACK":
+                    turn.backtrack_called = True
+                summary_text = exec_result.text_summary or ""
+                meta = getattr(exec_result, "metadata", None) or {}
+                if (
+                    NO_EFFECT_MARKER in summary_text
+                    or "(no visible change)" in summary_text
+                    or bool(meta.get("no_effect"))
+                ):
+                    turn.had_no_effect = True
+                if "ineffective_tap" in meta:
+                    if meta.get("ineffective_tap"):
+                        turn.had_ineffective_tap = True
+                elif (
+                    "ineffective" in summary_text.lower()
+                    or "repeated" in summary_text.lower()
+                ):
+                    turn.had_ineffective_tap = True
+                if exec_result.status == "success" and name not in _WAIT_ACTION_TOOLS:
+                    self._acted_since_last_choice = True
 
             # ⚡ Non-blocking dispatch of objective visual transition summarizer
             if self.summarizer and name in action_names:
@@ -1436,6 +1527,42 @@ class FlashRunner:
                     )
                 return None, pre_screenshot_bytes, xml_list, action_sequence
 
+            if name == "ask_user_choice":
+                ended_turn, pre_screenshot_bytes, xml_list = await self._handle_ask_user_choice(
+                    args=args,
+                    tc_id=tc_id,
+                    tool_calls=tool_calls,
+                    idx=idx,
+                    state=state,
+                    messages=messages,
+                    raw_text=raw_text,
+                    step_token_usage=step_token_usage,
+                    pre_screenshot_bytes=pre_screenshot_bytes,
+                    xml_list=xml_list,
+                    turn=turn,
+                    native_text=native_text,
+                )
+                if ended_turn:
+                    return None, pre_screenshot_bytes, xml_list, action_sequence
+                if not is_last:
+                    logger.warning(
+                        "ask_user_choice rejected mid-burst (call "
+                        f"{idx + 1}/{total_calls}); aborting remaining burst actions."
+                    )
+                    for rem_tc in tool_calls[idx + 1:]:
+                        rem_id = rem_tc.get("id") or str(uuid.uuid4())
+                        rem_name = rem_tc.get("name", "").split(":")[-1]
+                        messages.append(
+                            ToolMessage(
+                                tool_call_id=rem_id,
+                                name=rem_name,
+                                content="Action skipped: Burst was aborted due to previous action failure.",
+                                status="error",
+                            )
+                        )
+                    break
+                continue
+
             if name == "report_task_status":
                 probed = await self._probe_unseen_content(
                     args,
@@ -1728,9 +1855,21 @@ class FlashRunner:
             total_s=round(total_s, 3),
             action_s=round(action_s, 3),
             observe_s=round(observe_s, 3),
-            other_s=round(max(0.0, total_s - (timing.get("llm_s") or 0) - action_s - observe_s
-                              - (timing.get("prep_s") or 0)), 3),
+            other_s=round(
+                max(
+                    0.0,
+                    total_s
+                    - (timing.get("llm_s") or 0)
+                    - action_s
+                    - observe_s
+                    - (timing.get("prep_s") or 0)
+                    - (timing.get("user_wait_s") or 0),
+                ),
+                3,
+            ),
         )
+        if timing.get("user_wait_s") is not None:
+            rec["user_wait_s"] = round(float(timing["user_wait_s"]), 3)
         engine = getattr(self.ctx, "data_engine", None)
         directory = getattr(engine, "base_dir", None) if engine is not None else None
         if directory is None:
@@ -1760,6 +1899,478 @@ class FlashRunner:
             f" + actions {action_s:.1f}s + screen capture {observe_s:.1f}s"
             f" + prompt prep {t.get('prep_s', 0):.1f}s"
         )
+
+    def _user_choice_trace_dir(self) -> Path:
+        engine = getattr(self.ctx, "data_engine", None)
+        base = getattr(engine, "base_dir", None) if engine is not None else None
+        if base is not None:
+            return Path(base)
+        from artemis.config.paths import get_traces_dir
+
+        return get_traces_dir() / "flash_user_choice"
+
+    def _current_user_choice_mode(self) -> tuple[bool, bool]:
+        engine = getattr(self.ctx, "data_engine", None)
+        trace_dir = getattr(engine, "base_dir", None) if engine is not None else None
+        return read_user_choice_mode(
+            trace_dir,
+            default_ask_on_choice=getattr(self, "_default_ask_on_choice", True),
+            default_ask_when_stuck=getattr(self, "_default_ask_when_stuck", True),
+        )
+
+    def _init_user_choice_mode_file(self) -> None:
+        if not getattr(self, "user_choice_enabled", False):
+            return
+        engine = getattr(self.ctx, "data_engine", None)
+        base = getattr(engine, "base_dir", None) if engine is not None else None
+        if base is None:
+            return
+        mode_path = Path(base) / "user_choice_mode.json"
+        if not mode_path.exists():
+            try:
+                write_user_choice_mode(
+                    base,
+                    ask_on_choice=getattr(self, "_default_ask_on_choice", True),
+                    ask_when_stuck=getattr(self, "_default_ask_when_stuck", True),
+                )
+            except OSError as exc:
+                logger.debug(f"Could not initialize user_choice_mode.json: {exc}")
+
+    def _format_user_choice_outcome(
+        self,
+        *,
+        kind: str,
+        question: str,
+        options: list[dict[str, Any]],
+        answer: dict[str, Any],
+    ) -> tuple[str, str, str]:
+        """Return ``(tool_msg_text, injected_instruction_summary, short_summary)``."""
+        ans_type = answer.get("type")
+        if ans_type == "option":
+            opt_id = str(answer.get("option_id") or "")
+            label = str(answer.get("label") or "")
+            detail = str(answer.get("detail") or "")
+            detail_part = f" ({detail})" if detail else ""
+            if kind == "pick_item":
+                detail_hint = (
+                    f" and use its details '{detail}' to tell it apart if several items share that name or the name is truncated."
+                    if detail
+                    else "."
+                )
+                tool_msg = (
+                    f"User chose option {opt_id}: '{label}'{detail_part}. "
+                    f"Indices from before the question are stale: re-locate it on the current screen "
+                    f"by matching '{label}'{detail_hint} Scroll if needed."
+                )
+            else:
+                tool_msg = f"User chose: '{label}'. Do that next on the current screen."
+            injected = (
+                f'Asked user ({kind}): "{question}" -> User chose option {opt_id}: "{label}"{detail_part}'
+            )
+            short = f"option {opt_id}: '{label}'"
+            return tool_msg, injected, short
+
+        if ans_type == "auto":
+            if kind == "stuck":
+                labels = [str(o.get("label") or "") for o in options if o.get("label")]
+                budget = 2 * len(labels)
+                label_list = "; ".join(f"'{lbl}'" for lbl in labels)
+                tool_msg = (
+                    f"User allowed you to try the steps you listed, and ONLY those: {label_list}. "
+                    "Try them one at a time, safest first, each at most once. Only reversible steps "
+                    "(open, scroll, back, search); never a commitment, never editing user data, "
+                    "settings or permissions. After each try check the screen; if it did not help, "
+                    f"go back and try the next. You have {budget} turns for this. When the list is "
+                    "used up and you are still stuck, ask again (kind='stuck', say what you tried) "
+                    "or stop with report_task_status(failed). Do not invent new steps to tap."
+                )
+                injected = (
+                    f'Asked user (stuck): "{question}" -> User allowed trying only the listed steps: {label_list}'
+                )
+                short = f"try only listed steps: {label_list}"
+                return tool_msg, injected, short
+
+            tool_msg = (
+                "User let you decide. Pick the option that best fits the goal and state "
+                "the deciding criterion in your thought."
+            )
+            injected = f'Asked user (pick_item): "{question}" -> User let the AI decide'
+            short = "let AI decide"
+            return tool_msg, injected, short
+
+        if ans_type == "custom":
+            text = str(answer.get("text") or "").strip()
+            if answer.get("release_loop"):
+                tool_msg = (
+                    f'User instruction: "{text}". '
+                    "The user also signaled to stop any continuous/monitoring loop and wrap up the task. Follow it."
+                )
+                injected = (
+                    f'Asked user ({kind}): "{question}" -> User instructed: "{text}" [release_loop]'
+                )
+            else:
+                tool_msg = f'User instruction: "{text}". Follow it.'
+                injected = f'Asked user ({kind}): "{question}" -> User instructed: "{text}"'
+            short = f'custom instruction: "{text}"'
+            return tool_msg, injected, short
+
+        # manual
+        tool_msg = (
+            "The user operated the phone themselves and pressed Continue. "
+            "The screen may be very different now: read the current observation and continue the goal from here."
+        )
+        injected = (
+            f'Asked user ({kind}): "{question}" -> User operated the phone themselves, then pressed Continue'
+        )
+        short = "user operated the phone manually"
+        return tool_msg, injected, short
+
+    def _record_user_choice_step(
+        self,
+        *,
+        norm_args: dict[str, Any],
+        answer: dict[str, Any],
+        injected_summary: str,
+        waited_s: float,
+        raw_text: str,
+        step_token_usage: dict,
+        pre_screenshot_bytes,
+        xml_list,
+        post_img_bytes,
+        post_xml_list,
+        native_text: str | None = None,
+    ) -> Any:
+        engine = getattr(self.ctx, "data_engine", None)
+        if engine is None:
+            return None
+        try:
+            if engine.current_step_id is None:
+                engine.allocate_step_id()
+            extra_metadata: dict[str, Any] = {
+                "token_usage": step_token_usage,
+                "injected_instruction": injected_summary,
+                "user_choice": {
+                    "choice_id": answer.get("choice_id"),
+                    "kind": norm_args["kind"],
+                    "question": norm_args["question"],
+                    "options": norm_args["options"],
+                    "answer": answer,
+                    "user_wait_s": waited_s,
+                },
+            }
+            if getattr(self, "_turn_timing_pending", False):
+                timing = dict(getattr(self, "_turn_timing", {}) or {})
+                self._turn_timing_pending = False
+                extra_metadata["timing"] = timing
+            recorded_step_id = engine.record_step(
+                pre_screenshot_bytes=pre_screenshot_bytes,
+                post_screenshot_bytes=post_img_bytes,
+                ui_tree=(post_xml_list or xml_list),
+                action_taken={"action": "ask_user_choice", "args": norm_args},
+                operator_raw_thinking=raw_text,
+                operator_native_thinking=native_text or None,
+                last_execution_result={"status": "dispatched", "result": injected_summary},
+                extra_metadata=extra_metadata,
+            )
+            self._notify_history_chunker(recorded_step_id)
+            return recorded_step_id
+        except Exception as exc:
+            logger.warning(f"Error recording ask_user_choice step in FlashRunner: {exc}")
+            return None
+
+    async def _handle_ask_user_choice(
+        self,
+        *,
+        args: dict[str, Any],
+        tc_id: str,
+        tool_calls: list,
+        idx: int,
+        state: State,
+        messages: list[BaseMessage],
+        raw_text: str,
+        step_token_usage: dict,
+        pre_screenshot_bytes,
+        xml_list,
+        turn: _TurnRecord,
+        native_text: str | None = None,
+    ) -> tuple[bool, Any, Any]:
+        """Validate, wait for user input, re-observe, and record ``ask_user_choice``.
+
+        Returns ``(ended_turn, screenshot_bytes, xml_list)``. When ``ended_turn``
+        is False, a validation/mode/anti-repeat error ToolMessage was appended
+        and the caller should handle remaining burst calls as an error.
+        """
+        if not getattr(self, "user_choice_enabled", False):
+            err_msg = "ask_user_choice is disabled for this run. Proceed using the available tools."
+            messages.append(ToolMessage(tool_call_id=tc_id, name="ask_user_choice", content=err_msg, status="error"))
+            turn.actions.append(("ask_user_choice", "error", err_msg))
+            return False, pre_screenshot_bytes, xml_list
+
+        kind_raw = str(args.get("kind") or "").strip().lower()
+        ask_on_choice, ask_when_stuck = self._current_user_choice_mode()
+        if kind_raw == "pick_item" and not ask_on_choice:
+            err_msg = (
+                "Asking is turned off by the user. Choose yourself: pick what best fits "
+                "the goal and state the deciding criterion in your thought."
+            )
+            messages.append(ToolMessage(tool_call_id=tc_id, name="ask_user_choice", content=err_msg, status="error"))
+            turn.actions.append(("ask_user_choice", "error", err_msg))
+            return False, pre_screenshot_bytes, xml_list
+        if kind_raw == "stuck" and not ask_when_stuck:
+            err_msg = (
+                "Asking is turned off by the user. Do not tap at random: if you truly cannot "
+                "continue, call report_task_status with status='failed' and describe the current "
+                "screen and the options you considered."
+            )
+            messages.append(ToolMessage(tool_call_id=tc_id, name="ask_user_choice", content=err_msg, status="error"))
+            turn.actions.append(("ask_user_choice", "error", err_msg))
+            return False, pre_screenshot_bytes, xml_list
+
+        if getattr(self, "image_on_demand", False) and getattr(self, "_text_only_turn", False):
+            self._force_image = True
+            err_msg = (
+                "You have not seen the screenshot this turn. The next observation includes it; "
+                "check it, then ask again if still needed."
+            )
+            messages.append(
+                ToolMessage(tool_call_id=tc_id, name="ask_user_choice", content=err_msg, status="error")
+            )
+            turn.actions.append(("ask_user_choice", "error", err_msg))
+            for rem_tc in tool_calls[idx + 1:]:
+                messages.append(
+                    ToolMessage(
+                        tool_call_id=rem_tc.get("id") or str(uuid.uuid4()),
+                        name=rem_tc.get("name", "").split(":")[-1],
+                        content="Action skipped: the turn ended to show the screenshot.",
+                        status="error",
+                    )
+                )
+            return True, pre_screenshot_bytes, xml_list
+
+        ok, val_err, norm_args = validate_ask_user_choice_args(
+            args, max_options=getattr(self, "_user_choice_max_options", 8)
+        )
+        if not ok:
+            messages.append(ToolMessage(tool_call_id=tc_id, name="ask_user_choice", content=val_err, status="error"))
+            turn.actions.append(("ask_user_choice", "error", val_err))
+            return False, pre_screenshot_bytes, xml_list
+
+        sig = choice_signature(norm_args["kind"], norm_args["options"])
+        if (
+            getattr(self, "_last_answered_choice_key", None) == sig
+            and not getattr(self, "_acted_since_last_choice", True)
+        ):
+            prev_summary = getattr(self, "_last_answered_choice_summary", "")
+            repeat_msg = f"You just asked this and the user answered: '{prev_summary}'. Act on it."
+            messages.append(
+                ToolMessage(tool_call_id=tc_id, name="ask_user_choice", content=repeat_msg, status="error")
+            )
+            turn.actions.append(("ask_user_choice", "error", repeat_msg))
+            return False, pre_screenshot_bytes, xml_list
+
+        engine = getattr(self.ctx, "data_engine", None)
+        session_id = getattr(engine, "current_session_id", None) if engine is not None else None
+        trace_dir = self._user_choice_trace_dir()
+        # The card shows the user a fresh, settled screenshot: the turn's own
+        # screenshot may have been taken mid-load (skeleton placeholders).
+        card_screenshot = getattr(state, "latest_screenshot", None)
+        try:
+            card_obs, _ = await observe(self.ctx, self.controller, settle_ms=1200)
+            if getattr(card_obs, "ok", False) and getattr(card_obs, "screenshot_path", None):
+                card_screenshot = card_obs.screenshot_path
+        except DeviceOfflineError:
+            raise
+        except Exception as shot_err:
+            logger.debug(f"Fresh screenshot for the choice card failed: {shot_err}")
+        answer, waited_s = await wait_for_user_choice(
+            trace_dir=trace_dir,
+            session_id=str(session_id) if session_id else None,
+            kind=norm_args["kind"],
+            question=norm_args["question"],
+            options=norm_args["options"],
+            reason=norm_args.get("reason", ""),
+            screenshot_path=card_screenshot,
+            data_engine=engine,
+            poll_interval_s=float(getattr(self, "_user_choice_poll_interval_s", 0.5)),
+        )
+
+        timing = getattr(self, "_turn_timing", None)
+        if isinstance(timing, dict):
+            timing["user_wait_s"] = round(float(timing.get("user_wait_s") or 0.0) + waited_s, 3)
+
+        # Reset progress/retry counters on fresh answer; re-enable controlled-try only if stuck+auto.
+        self._no_progress_turns = 0
+        self._acted_since_last_choice = False
+        self._last_answered_choice_key = sig
+        self._controlled_try = False
+        self._allowed_stuck_steps = []
+        self._try_budget = 0
+
+        new_img_bytes, new_xml_list = await self._reobserve_after_resume(state)
+        self._force_image = True
+
+        tool_msg, injected_summary, short_summary = self._format_user_choice_outcome(
+            kind=norm_args["kind"],
+            question=norm_args["question"],
+            options=norm_args["options"],
+            answer=answer,
+        )
+        self._last_answered_choice_summary = short_summary
+
+        if norm_args["kind"] == "stuck" and answer.get("type") == "auto":
+            labels = [str(o.get("label") or "") for o in norm_args["options"] if o.get("label")]
+            self._controlled_try = True
+            self._allowed_stuck_steps = labels
+            self._try_budget = 2 * len(labels)
+
+        recorded_step_id = self._record_user_choice_step(
+            norm_args=norm_args,
+            answer=answer,
+            injected_summary=injected_summary,
+            waited_s=waited_s,
+            raw_text=raw_text,
+            step_token_usage=step_token_usage,
+            pre_screenshot_bytes=pre_screenshot_bytes,
+            xml_list=xml_list,
+            post_img_bytes=new_img_bytes,
+            post_xml_list=new_xml_list,
+            native_text=native_text,
+        )
+        turn.step_keys.append(str(recorded_step_id) if recorded_step_id else str(tc_id))
+        turn.actions.append(("ask_user_choice", "success", injected_summary))
+
+        rec = getattr(self, "_turn_rec", None)
+        if rec is not None:
+            rec["actions"].append(
+                {"tool": "ask_user_choice", "args": turn_log.compact_args(norm_args), "status": "success", "msg": short_summary}
+            )
+
+        messages.append(
+            ToolMessage(
+                tool_call_id=tc_id,
+                name="ask_user_choice",
+                content=tool_msg,
+                status="success",
+            )
+        )
+        for rem_tc in tool_calls[idx + 1:]:
+            messages.append(
+                ToolMessage(
+                    tool_call_id=rem_tc.get("id") or str(uuid.uuid4()),
+                    name=rem_tc.get("name", "").split(":")[-1],
+                    content="Action skipped: the turn ended to ask the user.",
+                    status="error",
+                )
+            )
+        self._turn_ended_by_user_choice = True
+        return True, new_img_bytes, new_xml_list
+
+    def _update_turn_choice_progress(
+        self,
+        *,
+        turn: _TurnRecord,
+        before_bytes,
+        before_xml: str | None,
+        after_bytes,
+        after_xml: str | None,
+        pending_notices: list[str],
+    ) -> None:
+        """Update controlled-try budget and no-progress detector after a normal turn."""
+        if not getattr(self, "user_choice_enabled", False):
+            return
+
+        _, ask_when_stuck = self._current_user_choice_mode()
+
+        # 1. Controlled-try budget for stuck + auto (only device action turns consume budget)
+        budget_exhausted_now = False
+        if getattr(self, "_controlled_try", False) and turn.device_actions_called:
+            self._try_budget = max(0, getattr(self, "_try_budget", 0) - 1)
+            if self._try_budget == 0:
+                allowed_n = 2 * len(getattr(self, "_allowed_stuck_steps", []))
+                self._controlled_try = False
+                self._allowed_stuck_steps = []
+                budget_exhausted_now = True
+                if ask_when_stuck:
+                    pending_notices.append(
+                        f"The {allowed_n} turns the user allowed for trying the listed steps are used up. "
+                        "If you are not yet clearly on the way to the goal, do not tap anything else: "
+                        "ask the user again (kind='stuck', list what you tried) or stop with report_task_status(failed)."
+                    )
+                else:
+                    pending_notices.append(
+                        f"The {allowed_n} turns the user allowed for trying the listed steps are used up. "
+                        "If you are not yet clearly on the way to the goal, do not tap anything else: "
+                        "stop with report_task_status(failed)."
+                    )
+
+        # 2. No-progress counter (only turns with interaction tools; ignore pure helper/wait turns)
+        if not turn.interaction_tools:
+            return
+
+        screen_changed = False
+        if not turn.had_no_effect and not turn.had_ineffective_tap and not turn.backtrack_called:
+            if before_bytes and after_bytes and _pixels_changed(before_bytes, after_bytes):
+                screen_changed = True
+            elif (before_xml or "").strip() != (after_xml or "").strip():
+                screen_changed = True
+
+        if turn.backtrack_called or not screen_changed:
+            self._no_progress_turns = getattr(self, "_no_progress_turns", 0) + 1
+        else:
+            self._no_progress_turns = 0
+
+        threshold = int(getattr(self, "_stuck_after_no_progress_turns", 2) or 0)
+        if threshold > 0 and self._no_progress_turns >= threshold and not budget_exhausted_now:
+            if getattr(self, "_controlled_try", False):
+                if ask_when_stuck:
+                    pending_notices.append(
+                        "The steps the user allowed did not help. Do not tap anything else: "
+                        "ask the user again (kind='stuck', list what you tried) or stop with report_task_status(failed)."
+                    )
+                else:
+                    pending_notices.append(
+                        "The steps the user allowed did not help. Do not tap anything else: "
+                        "stop with report_task_status(failed)."
+                    )
+            elif ask_when_stuck:
+                pending_notices.append(
+                    f"No progress for {self._no_progress_turns} turns. If you cannot tell what to do next, "
+                    "ask the user (kind='stuck') instead of trying random taps."
+                )
+            else:
+                pending_notices.append(
+                    f"No progress for {self._no_progress_turns} turns. If you cannot tell what to do next, "
+                    "stop and report failed instead of trying random taps."
+                )
+
+    def _add_comparable_items_hint(self, state: State, pending_notices: list[str]) -> None:
+        """Nudge Flash to ask when several same-layout items are on screen.
+
+        Structural only (no app or text rules). Fires once per item group, only
+        while the user's "ask on choice" switch is on and no controlled try is
+        running; small models follow a per-turn hint far better than the rule
+        in the system prompt.
+        """
+        if not getattr(self, "user_choice_enabled", False) or getattr(self, "_controlled_try", False):
+            return
+        ask_on_choice, _ = self._current_user_choice_mode()
+        if not ask_on_choice:
+            return
+        device = getattr(self.ctx, "device", None)
+        texts = find_comparable_items(
+            getattr(state, "indexed_elements", None),
+            getattr(device, "device_width", None),
+            getattr(device, "device_height", None),
+        )
+        if not texts:
+            return
+        group = frozenset(texts)
+        hinted = getattr(self, "_comparable_groups_hinted", set())
+        if any(len(group & seen) >= 2 for seen in hinted):
+            return
+        hinted.add(group)
+        self._comparable_groups_hinted = hinted
+        pending_notices.append(comparable_items_notice(texts))
 
     async def _reobserve_after_resume(self, state: State):
         """Captures the live screen after a paused LLM call was resumed."""
@@ -1835,8 +2446,11 @@ class FlashRunner:
         limit: int | None,
     ) -> dict:
         ledger, img_bytes, xml_list = await self._prepare_conversation(state, tools_declaration)
+        self._reset_user_choice_state()
+        self._init_user_choice_mode_file()
 
         turns = 0
+        counted_turns = 0
         action_sequence = 0
         final_report = None
         current_pre_screenshot_bytes = img_bytes
@@ -1845,7 +2459,7 @@ class FlashRunner:
         pending_notices: list[str] = []
         silent_turns = 0
 
-        while limit is None or turns < limit:
+        while limit is None or counted_turns < limit:
             turns += 1
             logger.info(f"--- Artemis Flash Turn {turns}{f'/{limit}' if limit else ''} ---")
 
@@ -1858,7 +2472,7 @@ class FlashRunner:
             previous_turn = None
 
             # Tool restriction on the final turn (bounded loops only)
-            is_final = limit is not None and turns == limit
+            is_final = limit is not None and (counted_turns + 1) == limit
             current_tools = report_only_tools if is_final else tools_declaration
             previous_turn_silent = bool(getattr(ledger, "last_turn_silent", False))
             injected: str | None = None
@@ -2019,11 +2633,15 @@ class FlashRunner:
                 pending_notices.append(_NO_TOOL_CALL_NOTICE)
                 ledger.stage_turn(messages[turn_base:])
                 previous_turn = _TurnRecord()
+                counted_turns += 1
                 continue
 
             silent_turns = 0
             # Process tool calls
             turn = _TurnRecord()
+            self._turn_ended_by_user_choice = False
+            before_turn_bytes = current_pre_screenshot_bytes
+            before_turn_xml = current_xml_list
             (
                 final_report_from_calls,
                 current_pre_screenshot_bytes,
@@ -2042,6 +2660,18 @@ class FlashRunner:
                 injected=injected,
                 native_text=native_text,
             )
+            if not self._turn_ended_by_user_choice:
+                counted_turns += 1
+                if final_report_from_calls is None:
+                    self._update_turn_choice_progress(
+                        turn=turn,
+                        before_bytes=before_turn_bytes,
+                        before_xml=before_turn_xml,
+                        after_bytes=current_pre_screenshot_bytes,
+                        after_xml=current_xml_list,
+                        pending_notices=pending_notices,
+                    )
+                    self._add_comparable_items_hint(state, pending_notices)
             ledger.stage_turn(messages[turn_base:])
             previous_turn = turn
             self._log_turn_timing(turns, time.monotonic() - turn_started)
@@ -2053,7 +2683,7 @@ class FlashRunner:
         if final_report is None:
             explanation = (
                 "Max turns reached without final status report."
-                if limit is not None and turns >= limit
+                if limit is not None and counted_turns >= limit
                 else "The model returned no response; the reactive loop stopped."
             )
             final_report = {"status": "failed", "explanation": explanation}

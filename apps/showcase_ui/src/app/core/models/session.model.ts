@@ -21,11 +21,31 @@ export interface ModelInfo {
   architecture?: string;
 }
 
+export interface PendingChoiceOption {
+  id: string;
+  label: string;
+  detail?: string;
+  index?: number;
+  kind?: 'auto' | 'custom' | 'manual';
+}
+
+export interface PendingChoice {
+  choice_id: string;
+  session_id?: string | null;
+  kind: 'pick_item' | 'stuck';
+  question: string;
+  options: PendingChoiceOption[];
+  reason?: string;
+  screenshot_path?: string | null;
+  created_at?: number;
+  waiting_seconds?: number;
+}
+
 export interface TaskQueueItem {
   session_id: string;
   goal: string;
   profile?: string;
-  status: 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
+  status: 'pending' | 'running' | 'paused' | 'awaiting_user' | 'completed' | 'failed' | 'cancelled';
   created_at?: number;
   start_time?: number;
   device_serial?: string | null;
@@ -38,6 +58,8 @@ export interface Session {
   start_time: number;
   end_time?: number;
   status?: string;
+  awaiting_user?: boolean;
+  pending_choice?: PendingChoice | null;
   video_url?: string;
   recording_status?: 'recording' | 'finalizing' | 'processing' | 'ready' | 'failed' | 'unavailable';
   model_info?: ModelInfo;
@@ -48,6 +70,8 @@ export interface Session {
 
 export interface AgentStatusResponse {
   status: 'idle' | 'running' | 'paused' | 'completed' | 'offline';
+  awaiting_user?: boolean;
+  pending_choice?: PendingChoice | null;
   session_id?: string | null;
   goal?: string | null;
   pid?: number | null;
@@ -81,5 +105,5 @@ export interface SessionUsage {
 
 export type AgentStatus = 'idle' | 'running' | 'completed' | 'offline' | string;
 
-export type TaskStatus = 'running' | 'paused' | 'completed' | 'pending' | 'failed' | 'cancelled';
+export type TaskStatus = 'running' | 'paused' | 'awaiting_user' | 'completed' | 'pending' | 'failed' | 'cancelled';
 

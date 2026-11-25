@@ -562,6 +562,12 @@ class TaskQueueService:
             cmd.extend(["--locked-app", str(locked_app)])
         if app_path:
             cmd.extend(["--app-path", str(app_path)])
+        ask_on_choice = task_item.get("ask_on_choice")
+        if ask_on_choice is not None:
+            cmd.append("--ask-on-choice" if ask_on_choice else "--no-ask-on-choice")
+        ask_when_stuck = task_item.get("ask_when_stuck")
+        if ask_when_stuck is not None:
+            cmd.append("--ask-when-stuck" if ask_when_stuck else "--no-ask-when-stuck")
         device_serial = task_item.get("device_serial")
         if device_serial:
             cmd.extend(["--device-serial", str(device_serial)])
@@ -1011,6 +1017,8 @@ class TaskQueueService:
         conversation_id: str | None,
         verification_level: str | None = None,
         explorer_mode: str | None = None,
+        ask_on_choice: bool | None = None,
+        ask_when_stuck: bool | None = None,
     ) -> dict[str, Any]:
         """Reserve a device slot and build one pending queue item for a goal."""
         sess_id = single_session_id if single_session_id else str(uuid.uuid4())
@@ -1032,6 +1040,8 @@ class TaskQueueService:
             "enable_outputter": enable_outputter,
             "verification_level": verification_level,
             "explorer_mode": explorer_mode,
+            "ask_on_choice": ask_on_choice,
+            "ask_when_stuck": ask_when_stuck,
             "locked_app_package": locked_app_package,
             "app_path": app_path,
             "device_serial": assigned_serial,
@@ -1059,6 +1069,8 @@ class TaskQueueService:
         conversation_id: str | None = None,
         verification_level: str | None = None,
         explorer_mode: str | None = None,
+        ask_on_choice: bool | None = None,
+        ask_when_stuck: bool | None = None,
     ) -> dict[str, Any]:
         """Enqueues one or more goals and wakes up the background worker.
 
@@ -1112,6 +1124,8 @@ class TaskQueueService:
                 conversation_id,
                 verification_level=verification_level,
                 explorer_mode=explorer_mode,
+                ask_on_choice=ask_on_choice,
+                ask_when_stuck=ask_when_stuck,
             )
             state.queue_items.append(task_item)
             enqueued_tasks.append(task_item)
@@ -1139,6 +1153,20 @@ class TaskQueueService:
                 # Best-effort cleanup of the pause marker; a leftover file
                 # only pauses until the next resume request.
                 pass
+
+    @staticmethod
+    def _clear_session_user_choice(session_id: str) -> None:
+        """Remove pending user choice files and clear awaiting_user for a stopped session."""
+        try:
+            from artemis.agents.flash.user_choice import (
+                clear_user_choice_files,
+                update_status_user_choice,
+            )
+
+            clear_user_choice_files(trace_store.get_trace_dir(session_id))
+            update_status_user_choice(session_id, None)
+        except Exception:
+            pass
 
     @classmethod
     def _terminate_all_device_owners(cls) -> None:
@@ -1219,10 +1247,24 @@ class TaskQueueService:
     @classmethod
     def _stop_all_tasks(cls) -> bool:
         """Terminate all active device owners and clear pending queue submissions."""
-        # 1. Cancel local queue reservations
+        # 1. Cancel local queue reservations and remember active session ids for choice cleanup
+        cleanup_sids: set[str] = set()
+        if state.active_session_id:
+            cleanup_sids.add(str(state.active_session_id))
+        for sid in state.active_connections:
+            cleanup_sids.add(str(sid))
+        try:
+            for dev_owner in DeviceExecutionLock.get_active_owners().values():
+                if dev_owner.session_id:
+                    cleanup_sids.add(str(dev_owner.session_id))
+        except OSError:
+            pass
         for item in state.queue_items:
-            if isinstance(item, dict) and item.get("status") != "running":
-                DeviceExecutionLock.cancel_reservation(item.get("queue_ticket"))
+            if isinstance(item, dict):
+                if item.get("session_id"):
+                    cleanup_sids.add(str(item["session_id"]))
+                if item.get("status") != "running":
+                    DeviceExecutionLock.cancel_reservation(item.get("queue_ticket"))
         state.clear_queue()
 
         # 2. Terminate all active owners across all devices
@@ -1235,6 +1277,8 @@ class TaskQueueService:
         state.current_profile = None
 
         cls._clear_pause_file()
+        for sid in cleanup_sids:
+            cls._clear_session_user_choice(sid)
 
         cls.ensure_worker_running()
         state.wake_event.set()
@@ -1499,6 +1543,7 @@ class TaskQueueService:
                 state.active_connections.pop(sid, None)
 
         if stopped_session_id:
+            cls._clear_session_user_choice(str(stopped_session_id))
             session_repo.update_session_status(str(stopped_session_id), "cancelled", time.time())
             try:
                 is_mcp = bool(owner and owner.ingress == "mcp")

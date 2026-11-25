@@ -21,6 +21,7 @@ from artemis.config.agent import (
     DEFAULT_VERIFICATION_LEVEL,
     ExplorerConfig,
     FlashProfileConfig,
+    FlashUserChoiceConfig,
     MemoryChunkingConfig,
     MemoryConfig,
     MemoryRecallConfig,

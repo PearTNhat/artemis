@@ -33,6 +33,27 @@ LAUNCH_APP_DOCSTRING = (
 )
 
 
+def match_package_by_name(app_name: str, packages: set[str]) -> str | None:
+    """The single installed package whose name contains the app name, else None.
+
+    ``"Shopee"`` -> ``com.shopee.vn``. The name is compared lowercased with
+    spaces, dots and dashes removed; names shorter than 4 characters and
+    names matching several packages are left to the LLM resolver.
+    """
+    import re
+
+    key = re.sub(r"[^0-9a-z]", "", str(app_name or "").lower())
+    if len(key) < 4:
+        return None
+    segment_hits = [p for p in packages if key in p.lower().split(".")]
+    if len(segment_hits) == 1:
+        return segment_hits[0]
+    if segment_hits:
+        return None
+    flat_hits = [p for p in packages if key in re.sub(r"[^0-9a-z]", "", p.lower())]
+    return flat_hits[0] if len(flat_hits) == 1 else None
+
+
 async def find_package(ctx: ArtemisContext, app_name: str, use_fallback: bool = True) -> str | None:
     """Finds the package name for a given application name.
 
@@ -59,6 +80,16 @@ async def find_package(ctx: ArtemisContext, app_name: str, use_fallback: bool = 
             if isinstance(package_cache, dict):
                 package_cache[app_name] = app_name
             return app_name
+
+        # Fast path: the name matches exactly one installed package (no LLM call,
+        # so a slow or overloaded model never delays a launch). Ambiguous or
+        # unmatched names still go to Hopper.
+        direct = match_package_by_name(app_name, package_set)
+        if direct:
+            logger.info(f"Matched app '{app_name}' to package '{direct}' without the LLM")
+            if isinstance(package_cache, dict):
+                package_cache[app_name] = direct
+            return direct
 
         hopper_output: HopperOutput = await hopper(
             ctx=ctx,

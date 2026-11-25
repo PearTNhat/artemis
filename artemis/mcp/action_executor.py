@@ -121,6 +121,10 @@ class _ArgError(ValueError):
     """Argument-translation failure whose message is already fully formatted."""
 
 
+class _RepeatedTapError(_ArgError):
+    """Repeated/ineffective tap rejection from the executor's local tap guards."""
+
+
 class McpActionExecutor:
     """Routes agent tool calls through the unified action MCP session."""
 
@@ -325,6 +329,7 @@ class McpActionExecutor:
         observe_s: float | None = None
         observe_detail: list[dict[str, Any]] = []
         device_offline = False
+        ineffective_tap = False
         with span:
             try:
                 session = await self._session_or_start()
@@ -401,7 +406,7 @@ class McpActionExecutor:
                                 dx = target_coordinates[0] - last_coords[0]
                                 dy = target_coordinates[1] - last_coords[1]
                                 if (dx * dx + dy * dy) <= 400:  # <= 20 units (~2% threshold)
-                                    raise _ArgError(
+                                    raise _RepeatedTapError(
                                         f"Repeated tap rejected: Point {target_coordinates} was already tapped in the "
                                         f"previous step and did not change the screen. If you are confirming a form, "
                                         f"please check if there is an unselected option, required field, or validation notice on screen."
@@ -411,7 +416,7 @@ class McpActionExecutor:
                         # this exact screen with no effect, and nothing was interacted
                         # with since (waits do not count). See _note_interaction.
                         if self._is_known_ineffective_tap(target_coordinates):
-                            raise _ArgError(
+                            raise _RepeatedTapError(
                                 f"Repeated tap rejected: Point {target_coordinates} was already tapped on this "
                                 f"screen and did not change anything, and nothing else was changed since. "
                                 f"Inspect the screen for an unselected required option, a disabled control, "
@@ -593,6 +598,10 @@ class McpActionExecutor:
                         }
                     else:
                         self._last_point_action = None
+            except _RepeatedTapError as e:
+                ineffective_tap = True
+                res = ActionResult.failure(raw_name, str(e), code=ActionCode.INVALID_ARGS)
+                message = str(e)
             except _ArgError as e:
                 res = ActionResult.failure(raw_name, str(e), code=ActionCode.INVALID_ARGS)
                 message = str(e)
@@ -636,6 +645,7 @@ class McpActionExecutor:
                 "target_coordinates": target_coordinates,
                 "timed_out": getattr(res, "timed_out", False),
                 "no_effect": getattr(res, "no_effect", False),
+                "ineffective_tap": ineffective_tap,
                 "device_offline": device_offline or is_device_offline_result(res),
                 # Wall time of the device action itself and of the post-action
                 # observation (settle + screenshot + UI hierarchy), in seconds.

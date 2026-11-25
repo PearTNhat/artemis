@@ -212,6 +212,8 @@ def mobile_run_task(
     device_serial: str | None = None,
     verification_level: str | None = None,
     explorer_mode: str | None = None,
+    ask_on_choice: bool = True,
+    ask_when_stuck: bool = True,
 ) -> dict[str, Any]:
     """Starts an autonomous mobile UI automation subagent on a connected Android device.
 
@@ -245,10 +247,17 @@ def mobile_run_task(
     1. **Fallback timer**: you MUST set a background timer and check the task
        status via `mobile_manage_task` at least once every 1 minute — mobile
        tasks can stall silently, so never rely on the completion wakeup alone.
-    2. **Post-task inspection**: after completion, inspect the execution logs
+    2. **When `status` is `'awaiting_user'` (or a `needs_input` wakeup arrives)**:
+       immediately present the `question` and numbered `options` to the real
+       user and **STOP polling** (do NOT schedule 1-minute timers while waiting
+       for the user, do NOT answer on the user's behalf, and do NOT stop the
+       task just because the user has not replied yet — the wait has no timeout).
+       Only call `mobile_manage_task(action="answer_choice", ...)` after the
+       user responds, and only send `"auto"` if the user explicitly asks for it.
+    3. **Post-task inspection**: after completion, inspect the execution logs
        to verify success (`stderr_log` carries critical failures and Python
        tracebacks — essential for debugging).
-    3. **Report & notes**: read `output.md` in `notes_dir` for the written
+    4. **Report & notes**: read `output.md` in `notes_dir` for the written
        report (Flash always; Pro when `expected_output_desc` is set), and for
        Pro runs the plans and notes the subagent recorded.
 
@@ -281,6 +290,10 @@ def mobile_run_task(
           by the Operator: `"flash"` (1-shot detection, the default),
           `"pro"` (3-turn ReAct), `"ultra"` (deep pixel reasoning; slowest).
           Ignored for Flash.
+        ask_on_choice: Flash only (default `True`). When `True`, Flash asks the
+          user instead of guessing when multiple comparable items appear.
+        ask_when_stuck: Flash only (default `True`). When `True`, Flash asks the
+          user when stuck instead of tapping at random or failing immediately.
     """
     # 0. Validate and normalize model
     if model.lower() not in ("flash", "pro"):
@@ -329,6 +342,8 @@ def mobile_run_task(
                     conversation_id=conversation_id,
                     verification_level=verification_level,
                     explorer_mode=explorer_mode,
+                    ask_on_choice=ask_on_choice,
+                    ask_when_stuck=ask_when_stuck,
                     base_url=base_url,
                 )
                 if resp and resp.get("status") == "rejected":
@@ -475,10 +490,14 @@ def mobile_run_task(
             cmd.extend(["--verification-level", verification_level])
         if explorer_mode:
             cmd.extend(["--explorer-pro-mode", explorer_mode])
+        cmd.append("--ask-on-choice" if ask_on_choice else "--no-ask-on-choice")
+        cmd.append("--ask-when-stuck" if ask_when_stuck else "--no-ask-when-stuck")
 
         env = os.environ.copy()
         env["ARTEMIS_SESSION_ID"] = trace_id
         env["ARTEMIS_TASK_INGRESS"] = "mcp"
+        if conversation_id:
+            env["ARTEMIS_CONVERSATION_ID"] = str(conversation_id)
         if device_serial:
             env["ADB_DEVICE_SERIAL"] = device_serial
             env["ARTEMIS_DEVICE_ID"] = device_serial

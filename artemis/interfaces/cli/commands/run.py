@@ -16,6 +16,10 @@
 
 import asyncio
 import os
+import select
+import sys
+import threading
+import time
 from typing import Annotated
 
 from langchain_core.callbacks.base import Callbacks
@@ -63,6 +67,9 @@ async def execute_task(
     explorer_flash_mode: str | None = None,
     explorer_pro_mode: str | None = None,
     verification_level: str | None = None,
+    no_ask_user: bool = False,
+    ask_on_choice: bool | None = None,
+    ask_when_stuck: bool | None = None,
 ) -> None:
     """Executes a single mobile automation task end-to-end.
 
@@ -134,6 +141,19 @@ async def execute_task(
             pro_mode=explorer_pro_mode,
         )
 
+    if no_ask_user or ask_on_choice is not None or ask_when_stuck is not None:
+        config.with_flash_user_choice(
+            enabled=False if no_ask_user else None,
+            ask_on_choice=ask_on_choice,
+            ask_when_stuck=ask_when_stuck,
+        )
+
+    is_worker = (
+        os.environ.get("ARTEMIS_TASK_WORKER") == "1"
+        or os.environ.get("ARTEMIS_DEVICE_QUEUE_TICKET") is not None
+    )
+    use_cli_prompt = (not is_worker) and (not no_ask_user) and sys.stdin.isatty()
+
     target_serial = (
         device_serial or settings.ADB_DEVICE_SERIAL or os.environ.get("ADB_DEVICE_SERIAL")
     )
@@ -153,17 +173,245 @@ async def execute_task(
     if graph_config_callbacks:
         config.with_graph_config_callbacks(graph_config_callbacks)
 
-    await run_automation(
-        config,
-        goal,
-        session_id=effective_sid,
-        locked_app_package=locked_app_package,
-        test_name=test_name,
-        traces_output_path_str=traces_output_path_str,
-        output_description=output_description,
-        profile=profile,
-        app_path=app_path,
+    from artemis.agents.flash.user_choice import (
+        format_pending_choice_prompt,
+        set_cli_choice_prompt,
     )
+
+    _CHOICE_INPUT_PROMPT = "Chọn [số / a=auto / làm xong rồi gõ m=manual / chữ khác]: "
+
+    if use_cli_prompt:
+        def _terminal_choice_prompt(pending: dict, stop_event: threading.Event) -> str | None:
+            print(f"\n{format_pending_choice_prompt(pending)}", flush=True)
+            print(_CHOICE_INPUT_PROMPT, end="", flush=True)
+            return _poll_stdin_line(
+                should_stop_fn=stop_event.is_set,
+                poll_interval=0.2,
+                reprompt_line=_CHOICE_INPUT_PROMPT,
+            )
+
+        set_cli_choice_prompt(_terminal_choice_prompt)
+    else:
+        set_cli_choice_prompt(None)
+
+    try:
+        await run_automation(
+            config,
+            goal,
+            session_id=effective_sid,
+            locked_app_package=locked_app_package,
+            test_name=test_name,
+            traces_output_path_str=traces_output_path_str,
+            output_description=output_description,
+            profile=profile,
+            app_path=app_path,
+        )
+    finally:
+        set_cli_choice_prompt(None)
+
+
+def _resolve_daemon_user_choice_flags(
+    *,
+    no_ask_user: bool,
+    ask_on_choice: bool | None,
+    ask_when_stuck: bool | None,
+    stdin_isatty: bool,
+) -> tuple[bool | None, bool | None]:
+    """Return ``(ask_on_choice, ask_when_stuck)`` for daemon submission.
+
+    When ``--no-ask-user`` is set or stdin is not an interactive TTY (scripts/CI),
+    force both switches to ``False`` so the daemon never pauses waiting on input.
+    """
+    if no_ask_user or not stdin_isatty:
+        return False, False
+    return ask_on_choice, ask_when_stuck
+
+
+def _poll_stdin_line(
+    *,
+    should_stop_fn,
+    poll_interval: float,
+    reprompt_line: str,
+    console: Console | None = None,
+) -> str | None:
+    """Read a non-empty line from ``sys.stdin``, checking ``should_stop_fn`` between polls."""
+    if sys.platform != "win32" and hasattr(select, "select"):
+        while not should_stop_fn():
+            try:
+                ready, _, _ = select.select([sys.stdin], [], [], poll_interval)
+            except (ValueError, OSError):
+                return None
+            if should_stop_fn():
+                return None
+            if ready:
+                line = sys.stdin.readline()
+                if not line:
+                    return None
+                if line.strip():
+                    return line.strip()
+                if console is not None:
+                    console.print(f"[dim]{reprompt_line}[/dim]", end="")
+                else:
+                    print(reprompt_line, end="", flush=True)
+        return None
+
+    while not should_stop_fn():
+        try:
+            raw = input()
+        except EOFError:
+            return None
+        if should_stop_fn():
+            return None
+        if raw.strip():
+            return raw.strip()
+        if console is not None:
+            console.print(f"[dim]{reprompt_line}[/dim]", end="")
+        else:
+            print(reprompt_line, end="", flush=True)
+    return None
+
+
+def _read_cli_choice_answer(
+    session_id: str,
+    pending: dict,
+    *,
+    base_url: str,
+    console: Console,
+    get_pending_fn,
+    submit_choice_fn,
+    parse_input_fn,
+    poll_interval: float,
+    stdin_readline_fn=None,
+) -> None:
+    """Wait for a single CLI answer in daemon mode unless resolved externally on Web UI."""
+    choice_id = str(pending.get("choice_id") or "")
+    prompt_line = "Chọn [số / a=auto / làm xong rồi gõ m=manual / chữ khác]: "
+    if stdin_readline_fn is not None:
+        while True:
+            raw = stdin_readline_fn(prompt_line)
+            if raw is None:
+                return
+            parsed = parse_input_fn(raw, pending)
+            if parsed is not None:
+                submit_choice_fn(session_id, parsed, base_url=base_url)
+                return
+
+    resolved_externally = {"flag": False}
+
+    def _external_resolved() -> bool:
+        latest = get_pending_fn(session_id, base_url=base_url)
+        if not latest or str(latest.get("choice_id") or "") != choice_id:
+            resolved_externally["flag"] = True
+            return True
+        return False
+
+    console.print(f"[dim]{prompt_line}[/dim]", end="")
+    raw_line = _poll_stdin_line(
+        should_stop_fn=_external_resolved,
+        poll_interval=poll_interval,
+        reprompt_line=prompt_line,
+        console=console,
+    )
+    if resolved_externally["flag"]:
+        console.print("\n[dim]✓ Đã được trả lời qua giao diện khác, tiếp tục chạy...[/dim]")
+        return
+    if raw_line is None:
+        return
+    parsed = parse_input_fn(raw_line, pending)
+    if parsed is not None:
+        submit_choice_fn(session_id, parsed, base_url=base_url)
+        console.print("[green]✓ Đã gửi lựa chọn cho AI.[/green]")
+
+
+def _wait_daemon_with_interactive_choices(
+    session_id: str,
+    *,
+    base_url: str,
+    console: Console,
+    interactive_tty: bool,
+    get_session_fn,
+    get_status_fn,
+    get_pending_fn,
+    submit_choice_fn,
+    format_prompt_fn,
+    parse_input_fn,
+    on_status_update=None,
+    timeout: float = 1800.0,
+    poll_interval: float = 1.0,
+    stdin_readline_fn=None,
+    clock_fn=None,
+    sleep_fn=None,
+) -> dict:
+    """Wait for daemon task completion while surfacing and handling pending user choices.
+
+    Time spent awaiting a user choice is excluded from ``timeout`` so waiting for
+    human input stays unbounded.
+    """
+    now_fn = clock_fn or time.monotonic
+    wait_fn = sleep_fn or time.sleep
+    active_elapsed = 0.0
+    last_tick = now_fn()
+    was_awaiting = False
+    last_status: str | None = None
+    prompted_choice_id: str | None = None
+
+    while active_elapsed < timeout:
+        now = now_fn()
+        if not was_awaiting:
+            active_elapsed += max(0.0, now - last_tick)
+        last_tick = now
+        if active_elapsed >= timeout:
+            break
+
+        sess = get_session_fn(session_id, base_url=base_url)
+        if sess:
+            status = sess.get("status")
+            if status != last_status:
+                last_status = status
+                if callable(on_status_update):
+                    on_status_update(sess)
+            if status in ("completed", "success", "failed", "cancelled"):
+                return sess
+        else:
+            st = get_status_fn(base_url=base_url)
+            if st:
+                queue = st.get("queue") or []
+                is_queued = any(
+                    isinstance(item, dict) and str(item.get("session_id")) == str(session_id)
+                    for item in queue
+                )
+                current_st = "queued" if is_queued else "launching"
+                if current_st != last_status:
+                    last_status = current_st
+                    if callable(on_status_update):
+                        on_status_update({"status": current_st, "session_id": session_id})
+
+        pending = get_pending_fn(session_id, base_url=base_url)
+        was_awaiting = pending is not None
+        if pending:
+            cid = str(pending.get("choice_id") or "")
+            if cid and cid != prompted_choice_id:
+                prompted_choice_id = cid
+                console.print(f"\n[yellow]{format_prompt_fn(pending)}[/yellow]")
+                console.print(f"[dim]Có thể trả lời tại Web UI ({base_url}) hoặc ngay tại đây.[/dim]")
+                if interactive_tty:
+                    _read_cli_choice_answer(
+                        session_id,
+                        pending,
+                        base_url=base_url,
+                        console=console,
+                        get_pending_fn=get_pending_fn,
+                        submit_choice_fn=submit_choice_fn,
+                        parse_input_fn=parse_input_fn,
+                        poll_interval=poll_interval,
+                        stdin_readline_fn=stdin_readline_fn,
+                    )
+                    # Exclude time blocked reading CLI choice input from active_elapsed.
+                    last_tick = now_fn()
+                    was_awaiting = get_pending_fn(session_id, base_url=base_url) is not None
+        wait_fn(poll_interval)
+
+    return {"session_id": session_id, "status": "timeout", "error": f"Timed out after {timeout}s"}
 
 
 def run_command(
@@ -295,6 +543,27 @@ def run_command(
             help="Run in standalone embedded mode without auto-spawning the Artemis Daemon.",
         ),
     ] = False,
+    no_ask_user: Annotated[
+        bool,
+        typer.Option(
+            "--no-ask-user",
+            help="Disable ask_user_choice in Flash mode (never pause waiting for user input).",
+        ),
+    ] = False,
+    ask_on_choice: Annotated[
+        bool | None,
+        typer.Option(
+            "--ask-on-choice/--no-ask-on-choice",
+            help="Override whether Flash asks the user when multiple comparable options appear.",
+        ),
+    ] = None,
+    ask_when_stuck: Annotated[
+        bool | None,
+        typer.Option(
+            "--ask-when-stuck/--no-ask-when-stuck",
+            help="Override whether Flash asks the user when stuck instead of stopping.",
+        ),
+    ] = None,
 ) -> None:
     """Run an autonomous UI automation task on the connected Android device."""
     ensure_video_recording_available(with_video_recording_tools)
@@ -313,9 +582,16 @@ def run_command(
             import uuid
             from artemis.runtime import (
                 ensure_daemon_running,
+                get_daemon_pending_choice,
+                get_daemon_session,
+                get_daemon_status,
+                submit_daemon_choice,
                 submit_task_to_daemon,
-                wait_for_daemon_task,
                 stop_task_on_daemon,
+            )
+            from artemis.agents.flash.user_choice import (
+                format_pending_choice_prompt,
+                parse_choice_input,
             )
 
             console.print("[dim]Connecting to Artemis Daemon scheduler...[/dim]")
@@ -324,6 +600,12 @@ def run_command(
                 target_sid = session_id or str(uuid.uuid4())
                 console.print(
                     f"[bold green]✓[/bold green] Artemis Daemon active at [cyan]{base_url}[/cyan]"
+                )
+                daemon_ask_on_choice, daemon_ask_when_stuck = _resolve_daemon_user_choice_flags(
+                    no_ask_user=no_ask_user,
+                    ask_on_choice=ask_on_choice,
+                    ask_when_stuck=ask_when_stuck,
+                    stdin_isatty=sys.stdin.isatty(),
                 )
                 resp = submit_task_to_daemon(
                     goal=goal,
@@ -335,6 +617,8 @@ def run_command(
                     app_path=app_path,
                     session_id=target_sid,
                     ingress="cli",
+                    ask_on_choice=daemon_ask_on_choice,
+                    ask_when_stuck=daemon_ask_when_stuck,
                     base_url=base_url,
                 )
                 if resp and resp.get("tasks"):
@@ -353,10 +637,17 @@ def run_command(
                             console.print("[green]▶ Task executing on mobile device...[/green]")
 
                     try:
-                        final_res = wait_for_daemon_task(
+                        final_res = _wait_daemon_with_interactive_choices(
                             target_sid,
                             base_url=base_url,
-                            timeout=1800.0,
+                            console=console,
+                            interactive_tty=(not no_ask_user and sys.stdin.isatty()),
+                            get_session_fn=get_daemon_session,
+                            get_status_fn=get_daemon_status,
+                            get_pending_fn=get_daemon_pending_choice,
+                            submit_choice_fn=submit_daemon_choice,
+                            format_prompt_fn=format_pending_choice_prompt,
+                            parse_input_fn=parse_choice_input,
                             on_status_update=on_status,
                         )
                         final_st = final_res.get("status")
@@ -405,6 +696,7 @@ def run_command(
         pass
 
     try:
+        effective_no_ask = no_ask_user or (not is_worker and not sys.stdin.isatty())
         asyncio.run(
             execute_task(
                 goal=goal,
@@ -427,6 +719,9 @@ def run_command(
                 explorer_flash_mode=explorer_flash_mode,
                 explorer_pro_mode=explorer_pro_mode,
                 verification_level=verification_level,
+                no_ask_user=effective_no_ask,
+                ask_on_choice=ask_on_choice,
+                ask_when_stuck=ask_when_stuck,
             )
         )
     except (KeyboardInterrupt, asyncio.CancelledError):

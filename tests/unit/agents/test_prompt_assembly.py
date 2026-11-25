@@ -199,3 +199,17 @@ def test_flash_goal_comes_last_so_the_prefix_is_shared_across_tasks():
     out = _render_flash(FLASH_FULL)
     assert out.rstrip().endswith("**test goal**")
     assert out.count("test goal") == 1
+
+
+def test_flash_user_choice_prompt_segments_gated_by_tool():
+    without = _render_flash(FLASH_FULL)
+    with_tool = _render_flash(FLASH_FULL | {"ask_user_choice"})
+    assert "**Asking the user.**" not in without
+    assert not _tool_refs(without, "ask_user_choice")
+    assert "elements whose purpose you are unsure of" not in without
+
+    assert "**Asking the user.**" in with_tool
+    assert _tool_refs(with_tool, "ask_user_choice")
+    assert "elements whose purpose you are unsure of" in with_tool
+    for forbidden in ("Shopee", "Grab", "TikTok", "Add to cart", "Place Order"):
+        assert forbidden.lower() not in with_tool.lower()

@@ -7,11 +7,11 @@
   // 1. Global Default Model (Applied to all sub-agents unless overridden below)
   // ------------------------------------------------------------------------------
   "default": {
-    "provider": "openai",
-    "model": "qwen3-vl:4b-16k",
+    "provider": "google",
+    "model": "gemini-3.1-flash-lite",
     "fallback": {
-      "provider": "openai",
-      "model": "qwen3-vl:4b-16k"
+      "provider": "google",
+      "model": "gemini-3.1-flash-lite"
     }
   },
 
@@ -36,7 +36,7 @@
     },
     "cost-saving": {
       "provider": "google",
-      "model": "gemini-3.5-flash-lite",
+      "model": "gemini-3.1-flash-lite",
       "fallback": { "provider": "google", "model": "gemini-3.1-flash-lite" }
     },
     "local-ollama": {
@@ -73,11 +73,11 @@
     // To achieve accurate [x, y] point and bounding box localization, this node MUST use specialized Gemini ER (Embodied Reasoning / Robotics) models:
     // e.g., "gemini-robotics-er-2-preview". Non-ER models will fail spatial coordinate detection.
     "object_detector": {
-      "provider": "openai",
-      "model": "qwen3-vl:4b-16k",
+      "provider": "google",
+      "model": "gemini-3.1-flash-lite",
       "fallback": {
-        "provider": "openai",
-        "model": "qwen3-vl:4b-16k"
+        "provider": "google",
+        "model": "gemini-3.1-flash-lite"
       }
     },
 
@@ -94,11 +94,11 @@
 
     // 🔽 Hopper: Fast lightweight package name locator
     "hopper": {
-      "provider": "openai",
-      "model": "qwen3-vl:4b-16k",
+      "provider": "google",
+      "model": "gemini-3.1-flash-lite",
       "fallback": {
-        "provider": "openai",
-        "model": "qwen3-vl:4b-16k"
+        "provider": "google",
+        "model": "gemini-3.1-flash-lite"
       }
     },
 
@@ -165,8 +165,17 @@
       // replacing images only after strictly objective, high-density summaries are ready.
       "step_summarizer": {
         "enabled": false, // Whether background step summarization is active (Gemini-only)
-        "model": "gemini-3.5-flash-lite", // Lightweight model for fast background inference
+        "model": "gemini-3.1-flash-lite", // Lightweight model for fast background inference
         "prune_history_xml": true // Prune outdated heavy XML trees from historical steps
+      },
+      // 🙋 AI asks the user (pick among comparable items, or when stuck) instead of guessing.
+      // Waits with no time limit. "enabled" is the master switch: turn it off for unattended benchmark/CI runs.
+      "user_choice": {
+        "enabled": true,
+        "ask_on_choice": true,       // default for the user's "ask when several options" switch
+        "ask_when_stuck": true,      // default for the user's "ask when stuck" switch
+        "stuck_after_no_progress_turns": 2,
+        "max_options": 8
       }
     },
     // ==========================================================================

@@ -439,4 +439,56 @@ describe('AgentService task cancellation and active session tracking', () => {
     // activeTasks should have filtered out sess-2
     expect(service.activeTasks().map((at: any) => at.session_id)).toEqual(['sess-1']);
   });
+
+  it('tracks pending choices per session, restores on fetchPendingChoice, and sends answers/modes', () => {
+    const service = Object.create(AgentService.prototype) as AgentService;
+    service.currentSessionId = signal<string | null>('sess-1');
+    service.runningSessionId = signal<string | null>('sess-1');
+    service.agentStatus = signal('running');
+    service.pendingChoicesBySession = signal<Record<string, any>>({});
+    service.resolvedChoicesBySession = signal<Record<string, any>>({});
+    service.pendingChoice = computed(() => {
+      const id = service.currentSessionId();
+      return id ? service.pendingChoicesBySession()[id] || null : null;
+    });
+    service.askOnChoice = signal(true);
+    service.askWhenStuck = signal(true);
+    service.isRunningTask = computed(() => service.agentStatus() === 'running');
+    const posts: { url: string; body: any }[] = [];
+    (service as any).http = {
+      get: (url: string) => of({
+        awaiting_user: true,
+        pending_choice: {
+          choice_id: 'c_1',
+          session_id: 'sess-2',
+          kind: 'pick_item',
+          question: 'Pick one?',
+          options: [{ id: '1', label: 'A' }, { id: '2', label: 'B' }]
+        }
+      }),
+      post: (url: string, body: any) => {
+        posts.push({ url, body });
+        return of({ status: 'success', session_id: body.session_id });
+      }
+    };
+
+    service.fetchPendingChoice('sess-2');
+    expect(service.pendingChoicesBySession()['sess-2']?.choice_id).toBe('c_1');
+    expect(service.pendingChoice()).toBeNull();
+    service.currentSessionId.set('sess-2');
+    expect(service.pendingChoice()?.choice_id).toBe('c_1');
+
+    service.answerChoice({ choice_id: 'c_1', type: 'option', option_id: '1' }, '1. A').subscribe();
+    expect(posts[0].url).toBe('/api/tasks/choice');
+    expect(posts[0].body.session_id).toBe('sess-2');
+    expect(service.pendingChoice()).toBeNull();
+    expect(service.resolvedChoicesBySession()['sess-2']?.summary).toBe('1. A');
+
+    service.setChoiceMode(false, true, 'sess-2');
+    expect(service.askOnChoice()).toBeFalse();
+    expect(posts[1]).toEqual({
+      url: '/api/tasks/choice-mode',
+      body: { session_id: 'sess-2', ask_on_choice: false, ask_when_stuck: true }
+    });
+  });
 });

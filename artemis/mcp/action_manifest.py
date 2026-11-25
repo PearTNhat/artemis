@@ -126,6 +126,7 @@ BACKEND_INDEPENDENT_TOOLS: frozenset[str] = frozenset(
         "search_history",
         "replay_steps",
         "get_step_screenshot",
+        "ask_user_choice",
         "report_task_status",
     }
 )

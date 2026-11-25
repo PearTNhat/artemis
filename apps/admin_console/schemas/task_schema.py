@@ -35,6 +35,8 @@ class RunRequest(BaseModel):
     # Chat follow-up: the session this request continues. Its goal, outcome and
     # last steps are prepended as context so the agent knows what was done.
     previous_session_id: str | None = None
+    ask_on_choice: bool | None = None
+    ask_when_stuck: bool | None = None
 
 
 class ReplayRequest(BaseModel):

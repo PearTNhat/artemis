@@ -121,6 +121,8 @@ async def run_task(
     device_serial: str | None = None,
     verification_level: str | None = None,
     explorer_pro_mode: str | None = None,
+    ask_on_choice: bool = True,
+    ask_when_stuck: bool = True,
 ):
     """Executes the mobile automation agent task and logs all actions/results.
 
@@ -213,7 +215,14 @@ async def run_task(
         else:
             profile = AgentProfile(name="default", llm_config=initialize_llm_config())
 
+        if conversation_id:
+            os.environ["ARTEMIS_CONVERSATION_ID"] = str(conversation_id)
+
         config_builder = Builders.AgentConfig.with_default_profile(profile)
+        config_builder.with_flash_user_choice(
+            ask_on_choice=ask_on_choice,
+            ask_when_stuck=ask_when_stuck,
+        )
         if verification_level:
             config_builder.with_verification_level(verification_level)
         if explorer_pro_mode:
@@ -434,6 +443,18 @@ if __name__ == "__main__":
         "--explorer-pro-mode",
         help="Pro-profile Explorer perception version: 'flash', 'pro' or 'ultra'",
     )
+    parser.add_argument(
+        "--ask-on-choice",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Flash user choice: ask when comparable options appear.",
+    )
+    parser.add_argument(
+        "--ask-when-stuck",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Flash user choice: ask when stuck instead of failing.",
+    )
 
     args = parser.parse_args()
 
@@ -449,5 +470,7 @@ if __name__ == "__main__":
             device_serial=args.device_serial,
             verification_level=args.verification_level,
             explorer_pro_mode=args.explorer_pro_mode,
+            ask_on_choice=args.ask_on_choice,
+            ask_when_stuck=args.ask_when_stuck,
         )
     )

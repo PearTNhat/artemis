@@ -86,10 +86,10 @@ limitations under the License.
             >
             <div class="item-header">
               <span class="task-badge" [ngClass]="getTaskStatus(session)">
-                @if (getTaskStatus(session) === 'running') {
+                @if (getTaskStatus(session) === 'running' || getTaskStatus(session) === 'awaiting_user') {
                   <span class="status-dot"></span>
                 }
-                {{ getTaskStatus(session) | uppercase }}
+                {{ getTaskStatus(session) === 'awaiting_user' ? 'Đang chờ bạn' : (getTaskStatus(session) | uppercase) }}
               </span>
               <div class="item-header-actions">
                 @if (getDeviceSerial(session)) {
@@ -102,7 +102,7 @@ limitations under the License.
                   <span class="item-time-divider">·</span>
                 }
                 <span class="item-time">{{ session.start_time * 1000 | date:'shortTime' }}</span>
-                @if (getTaskStatus(session) === 'running' || getTaskStatus(session) === 'paused') {
+                @if (getTaskStatus(session) === 'running' || getTaskStatus(session) === 'paused' || getTaskStatus(session) === 'awaiting_user') {
                   <button
                     type="button"
                     class="btn-stop-card"
@@ -113,7 +113,7 @@ limitations under the License.
                     <span class="material-symbols-outlined">stop_circle</span>
                   </button>
                 }
-                @if (getTaskStatus(session) !== 'running' && getTaskStatus(session) !== 'paused') {
+                @if (getTaskStatus(session) !== 'running' && getTaskStatus(session) !== 'paused' && getTaskStatus(session) !== 'awaiting_user') {
                   <button
                     type="button"
                     class="btn-delete-card"
@@ -1535,6 +1535,12 @@ limitations under the License.
             </div>
           </div>
         }
+        <!-- Human-in-the-loop Choice Card -->
+        <app-user-choice-card
+          [choice]="agentService.pendingChoice()"
+          [resolvedSummary]="agentService.resolvedChoiceSummary()"
+        ></app-user-choice-card>
+
         <!-- Planning Loader -->
         @if (showPlanningLoader() && (startupWorkItems().length === 0 || startupPreparationIsComplete() || consolidatedBlocks().length > 0)) {
           <div class="planning-loader-container">

@@ -18,12 +18,12 @@ import { Injectable, signal, inject, computed, DestroyRef, NgZone } from '@angul
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 
-import { Session, ModelInfo, TaskQueueItem, AgentStatusResponse, SessionUsage } from '../core/models/session.model';
+import { Session, ModelInfo, TaskQueueItem, AgentStatusResponse, SessionUsage, PendingChoice } from '../core/models/session.model';
 import { ProTuningDefaults, ProTuningOptions } from '../core/models/pro-tuning.model';
 import { StepItemData, StepReplayFrame, LLMStreamResetEventData, StreamResetNotice, DEFAULT_STREAM_RESET_MESSAGE, PersistedCheckerStream, StreamSegment } from '../core/models/stream.model';
 import { extractStepReplayFrames } from '../utils/action-formatter.util';
 import { persistedStreamToSegments } from '../utils/stream-aggregator.util';
-export type { Session, ModelInfo, TaskQueueItem, AgentStatusResponse, StepItemData, StepReplayFrame, LLMStreamResetEventData, StreamResetNotice };
+export type { Session, ModelInfo, TaskQueueItem, AgentStatusResponse, StepItemData, StepReplayFrame, LLMStreamResetEventData, StreamResetNotice, PendingChoice };
 
 const SESSION_CACHE_KEY = 'artemis.sessions.v1';
 
@@ -120,6 +120,7 @@ export class AgentService {
     const goal = this.runningGoal();
     const runId = this.runningSessionId();
     const activeList = this.activeTasks();
+    const pendingChoices = this.pendingChoicesBySession();
 
     const sessionMap = new Map<string, Session>();
     // Lookup maps keep the per-session merge O(1) instead of scanning the
@@ -134,10 +135,13 @@ export class AgentService {
       const isCurrentActive = ((status === 'running' || status === 'paused') && runId === s.session_id)
         || !!activeMatch;
       const isTerminal = s.status === 'completed' || s.status === 'success' || s.status === 'failed' || s.status === 'cancelled';
+      const isAwaiting = !isTerminal && Boolean(activeMatch?.awaiting_user || pendingChoices[s.session_id]);
       let sStatus = s.status;
       if (!isTerminal) {
         const isPending = !!pendingMatch && !isCurrentActive;
-        sStatus = isCurrentActive ? (status === 'paused' ? 'paused' : 'running') : (isPending ? 'pending' : s.status);
+        sStatus = isAwaiting
+          ? 'awaiting_user'
+          : (isCurrentActive ? (status === 'paused' ? 'paused' : 'running') : (isPending ? 'pending' : s.status));
       } else {
         sStatus = (s.status === 'success') ? 'completed' : s.status;
       }
@@ -153,13 +157,15 @@ export class AgentService {
       const finalSession: Session = {
         ...s,
         status: sStatus,
+        awaiting_user: isAwaiting,
+        pending_choice: pendingChoices[s.session_id] || activeMatch?.pending_choice || null,
         device_serial: serial,
         model_info: isCurrentActive && this.activeModel() ? this.activeModel()! : s.model_info
       };
       sessionMap.set(s.session_id, finalSession);
       if (isTerminal) {
         this.activeSessionTracking.delete(s.session_id);
-      } else if (sStatus === 'running' || sStatus === 'paused' || sStatus === 'pending') {
+      } else if (sStatus === 'running' || sStatus === 'paused' || sStatus === 'awaiting_user' || sStatus === 'pending') {
         this.activeSessionTracking.set(s.session_id, finalSession);
       }
     });
@@ -170,9 +176,14 @@ export class AgentService {
         const activeMatch = activeById.get(p.session_id);
         const isCurrentRunning = ((status === 'running' || status === 'paused') && runId === p.session_id)
           || !!activeMatch;
+        const isAwaiting = Boolean(activeMatch?.awaiting_user || pendingChoices[p.session_id]);
         const finalPending: Session = {
           ...p,
-          status: isCurrentRunning ? (status === 'paused' ? 'paused' : 'running') : (p.status || 'pending'),
+          status: isAwaiting
+            ? 'awaiting_user'
+            : (isCurrentRunning ? (status === 'paused' ? 'paused' : 'running') : (p.status || 'pending')),
+          awaiting_user: isAwaiting,
+          pending_choice: pendingChoices[p.session_id] || activeMatch?.pending_choice || null,
           device_serial: p.device_serial || p.device_id || activeMatch?.device_id || null
         };
         sessionMap.set(p.session_id, finalPending);
@@ -185,21 +196,26 @@ export class AgentService {
       activeList.forEach((at) => {
         const sid = at.session_id || `active-${at.device_id}`;
         const existing = sessionMap.get(sid);
+        const isAwaiting = Boolean(at.awaiting_user || pendingChoices[sid]);
         if (!existing) {
           const newSession: Session = {
             session_id: sid,
             initial_goal: at.goal || goal || '',
             start_time: at.acquired_at ? (new Date(at.acquired_at).getTime() / 1000) : (Date.now() / 1000),
-            status: 'running',
+            status: isAwaiting ? 'awaiting_user' : 'running',
+            awaiting_user: isAwaiting,
+            pending_choice: pendingChoices[sid] || at.pending_choice || null,
             model_info: this.activeModel() || undefined,
             device_serial: at.device_id || null
           };
           sessionMap.set(sid, newSession);
           this.activeSessionTracking.set(sid, newSession);
-        } else if (existing.status === 'pending') {
+        } else if (existing.status === 'pending' || (isAwaiting && existing.status !== 'awaiting_user')) {
           const updated: Session = {
             ...existing,
-            status: 'running',
+            status: isAwaiting ? 'awaiting_user' : 'running',
+            awaiting_user: isAwaiting,
+            pending_choice: pendingChoices[sid] || at.pending_choice || existing.pending_choice || null,
             device_serial: at.device_id || existing.device_serial
           };
           sessionMap.set(sid, updated);
@@ -207,11 +223,14 @@ export class AgentService {
         }
       });
     } else if ((status === 'running' || status === 'paused') && runId && !sessionMap.has(runId)) {
+      const isAwaiting = Boolean(pendingChoices[runId]);
       const activeSession: Session = {
         session_id: runId,
         initial_goal: goal || '',
         start_time: Date.now() / 1000,
-        status,
+        status: isAwaiting ? 'awaiting_user' : status,
+        awaiting_user: isAwaiting,
+        pending_choice: pendingChoices[runId] || null,
         model_info: this.activeModel() || undefined
       };
       sessionMap.set(runId, activeSession);
@@ -255,6 +274,22 @@ export class AgentService {
   public userPinnedSessionId = signal<string | null>(null); // Pinned session if user explicitly selected a non-running task
   public startupProgressBySession = signal<Record<string, StartupProgressEvent[]>>({});
   private pendingStartupProgress = signal<StartupProgressEvent[]>([]);
+  public pendingChoicesBySession = signal<Record<string, PendingChoice>>({});
+  public resolvedChoicesBySession = signal<Record<string, { choice_id: string; summary: string }>>({});
+  public askOnChoice = signal<boolean>(true);
+  public askWhenStuck = signal<boolean>(true);
+
+  public pendingChoice = computed<PendingChoice | null>(() => {
+    const curId = this.currentSessionId();
+    if (!curId) return null;
+    return this.pendingChoicesBySession()[curId] || null;
+  });
+
+  public resolvedChoiceSummary = computed<{ choice_id: string; summary: string } | null>(() => {
+    const curId = this.currentSessionId();
+    if (!curId) return null;
+    return this.resolvedChoicesBySession()[curId] || null;
+  });
 
   public currentStartupProgress = computed(() => {
     const sessionId = this.currentSessionId();
@@ -383,10 +418,10 @@ export class AgentService {
     if (!curId) return false;
     const session = this.currentSession();
     if (session) {
-      return session.status === 'running' || session.status === 'paused';
+      return session.status === 'running' || session.status === 'paused' || session.status === 'awaiting_user';
     }
     // Fallback if session was just submitted/selected but not yet merged into sessions list
-    const isActiveStatus = this.agentStatus() === 'running' || this.agentStatus() === 'paused';
+    const isActiveStatus = this.agentStatus() === 'running' || this.agentStatus() === 'paused' || this.agentStatus() === 'awaiting_user';
     if (isActiveStatus && this.runningSessionId() === curId) {
       return true;
     }
@@ -450,8 +485,8 @@ export class AgentService {
    * Check if any task is currently running
    */
   public isRunningTask = computed(() => {
-    if (this.agentStatus() === 'running' || this.agentStatus() === 'paused') return true;
-    return this.sessions().some(s => s.status === 'running' || s.status === 'paused');
+    if (this.agentStatus() === 'running' || this.agentStatus() === 'paused' || this.agentStatus() === 'awaiting_user') return true;
+    return this.sessions().some(s => s.status === 'running' || s.status === 'paused' || s.status === 'awaiting_user');
   });
 
   /**
@@ -476,7 +511,8 @@ export class AgentService {
     expectedOutput?: string,
     enableOutputter?: boolean,
     proTuning?: ProTuningOptions,
-    previousSessionId?: string | null
+    previousSessionId?: string | null,
+    choiceMode?: { askOnChoice?: boolean; askWhenStuck?: boolean }
   ): Observable<any> {
     return new Observable((obs) => {
       const submittedEvent: StartupProgressEvent = {
@@ -485,7 +521,12 @@ export class AgentService {
         timestamp: Date.now() / 1000
       };
       this.pendingStartupProgress.set([submittedEvent]);
-      const payload: any = { goal, profile };
+      const payload: any = {
+        goal,
+        profile,
+        ask_on_choice: choiceMode?.askOnChoice ?? (this.askOnChoice ? this.askOnChoice() : true),
+        ask_when_stuck: choiceMode?.askWhenStuck ?? (this.askWhenStuck ? this.askWhenStuck() : true),
+      };
       if (previousSessionId) {
         payload.previous_session_id = previousSessionId;
       }
@@ -539,6 +580,103 @@ export class AgentService {
   }
 
   /**
+   * Submit the user's choice for a pending ask_user_choice prompt.
+   */
+  public answerChoice(
+    payload: {
+      session_id?: string;
+      choice_id: string;
+      type: 'option' | 'auto' | 'custom' | 'manual';
+      option_id?: string;
+      text?: string;
+    },
+    summaryLabel?: string
+  ): Observable<any> {
+    const sid = payload.session_id || this.currentSessionId() || this.runningSessionId() || undefined;
+    const body = { ...payload, session_id: sid };
+    return new Observable((obs) => {
+      this.http.post<any>('/api/tasks/choice', body).subscribe({
+        next: (res) => {
+          const targetSid = res?.session_id || sid;
+          if (targetSid) {
+            this.clearPendingChoiceForSession(targetSid);
+            if (summaryLabel) {
+              this.resolvedChoicesBySession.update((map) => ({
+                ...map,
+                [targetSid]: { choice_id: payload.choice_id, summary: summaryLabel }
+              }));
+            }
+          }
+          obs.next(res);
+          obs.complete();
+        },
+        error: (err) => obs.error(err)
+      });
+    });
+  }
+
+  /**
+   * Update user-controlled ask_on_choice / ask_when_stuck switches.
+   * When a task is currently running, also pushes the change mid-flight to the backend.
+   */
+  public setChoiceMode(askOnChoice: boolean, askWhenStuck: boolean, sessionId?: string): void {
+    this.askOnChoice.set(askOnChoice);
+    this.askWhenStuck.set(askWhenStuck);
+    const sid = sessionId || this.currentSessionId() || this.runningSessionId();
+    if (!sid || !this.isRunningTask()) {
+      return;
+    }
+    this.http.post<any>('/api/tasks/choice-mode', {
+      session_id: sid,
+      ask_on_choice: askOnChoice,
+      ask_when_stuck: askWhenStuck
+    }).subscribe({
+      error: (err) => console.debug('Choice mode update skipped/failed:', err)
+    });
+  }
+
+  public fetchPendingChoice(sessionId: string): void {
+    if (!sessionId) return;
+    this.http.get<{ awaiting_user?: boolean; pending_choice?: PendingChoice | null }>(
+      `/api/tasks/${encodeURIComponent(sessionId)}/choice`
+    ).subscribe({
+      next: (res) => {
+        if (res?.awaiting_user && res?.pending_choice) {
+          this.setPendingChoiceForSession(sessionId, res.pending_choice);
+        } else {
+          this.clearPendingChoiceForSession(sessionId);
+        }
+      },
+      error: () => {
+        // Ignore transient lookup errors
+      }
+    });
+  }
+
+  private setPendingChoiceForSession(sessionId: string, pending: PendingChoice): void {
+    const normalized: PendingChoice = {
+      ...pending,
+      session_id: pending.session_id || sessionId
+    };
+    this.pendingChoicesBySession?.update((map) => ({ ...map, [sessionId]: normalized }));
+    this.resolvedChoicesBySession?.update((map) => {
+      if (!(sessionId in map)) return map;
+      const copy = { ...map };
+      delete copy[sessionId];
+      return copy;
+    });
+  }
+
+  private clearPendingChoiceForSession(sessionId: string): void {
+    this.pendingChoicesBySession?.update((map) => {
+      if (!(sessionId in map)) return map;
+      const copy = { ...map };
+      delete copy[sessionId];
+      return copy;
+    });
+  }
+
+  /**
    * Inject real-time instruction / guidance into a currently running task.
    */
   public injectInstruction(instruction: string, sessionId?: string): Observable<any> {
@@ -567,21 +705,18 @@ export class AgentService {
 
     if (!effectiveStopAll && !targetSessionId) {
       targetSessionId = this.sessions().find(
-        (session) => session.status === 'running' || session.status === 'paused'
+        (session) => session.status === 'running' || session.status === 'paused' || session.status === 'awaiting_user'
       )?.session_id || null;
     }
 
-    // Keep the task's terminal state stable while the stop request and the
-    // persisted session update cross the network. Clearing the global runner
-    // state first used to make the session merger infer "completed" from the
-    // still-stale DB row, causing a brief completed -> cancelled flicker.
     if (targetSessionId) {
       this.setSessionStatus(targetSessionId, 'cancelled');
+      this.clearPendingChoiceForSession(targetSessionId);
     }
 
     // Determine if other active sessions are still executing across multiple devices
     const otherRunningSessions = this.sessions().filter(
-      (s) => (s.status === 'running' || s.status === 'paused') && s.session_id !== targetSessionId
+      (s) => (s.status === 'running' || s.status === 'paused' || s.status === 'awaiting_user') && s.session_id !== targetSessionId
     );
 
     // Apply optimistic updates: only set idle if effectiveStopAll is true or no other tasks are running
@@ -816,6 +951,7 @@ export class AgentService {
     this.pausedError.set(null);
     this.fetchNotes(sessionId);
     this.fetchChecks(sessionId);
+    this.fetchPendingChoice(sessionId);
 
     // If video window is currently open, dynamically sync/refresh video for new session
     if (this.isVideoWindowOpen()) {
@@ -871,7 +1007,9 @@ export class AgentService {
       'session_ended',
       'recording_ready',
       'recording_failed',
-      'checker_event'
+      'checker_event',
+      'user_choice_requested',
+      'user_choice_resolved'
     ];
 
     eventTypes.forEach((eventType) => {
@@ -930,9 +1068,26 @@ export class AgentService {
             return;
           }
 
+          if (eventType === 'user_choice_requested') {
+            const targetSid = evtSessionId || this.runningSessionId() || this.currentSessionId();
+            if (targetSid && parsedData?.choice_id) {
+              this.setPendingChoiceForSession(String(targetSid), parsedData as PendingChoice);
+            }
+            return;
+          }
+
+          if (eventType === 'user_choice_resolved') {
+            const targetSid = evtSessionId || this.runningSessionId() || this.currentSessionId();
+            if (targetSid) {
+              this.clearPendingChoiceForSession(String(targetSid));
+            }
+            return;
+          }
+
           if (eventType === 'session_ended') {
             const endedId = evtSessionId || this.runningSessionId();
             if (endedId) {
+              this.clearPendingChoiceForSession(String(endedId));
               this.applySessionEndedStatus(endedId, parsedData);
               this.invalidateStatusSignatures();
               this.activeTasks.update(list => list.filter(at => at.session_id !== endedId));
@@ -1634,7 +1789,16 @@ export class AgentService {
           const activeTasksSignature = JSON.stringify(data.active_tasks || []);
           if (activeTasksSignature !== this.lastActiveTasksSignature) {
             this.lastActiveTasksSignature = activeTasksSignature;
-            this.activeTasks.set(data.active_tasks || []);
+            const activeList: any[] = data.active_tasks || [];
+            this.activeTasks.set(activeList);
+            activeList.forEach((at) => {
+              if (!at?.session_id) return;
+              if (at.awaiting_user && at.pending_choice) {
+                this.setPendingChoiceForSession(String(at.session_id), at.pending_choice);
+              } else if (at.awaiting_user === false) {
+                this.clearPendingChoiceForSession(String(at.session_id));
+              }
+            });
           }
           
           if (oldStatus !== data.status || oldRunningSessionId !== data.session_id) {

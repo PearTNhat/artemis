@@ -221,24 +221,44 @@ def mobile_manage_task(
     trace_id: str,
     instruction: str | None = None,
     release_loop: bool = False,
+    ask_on_choice: bool | None = None,
+    ask_when_stuck: bool | None = None,
 ) -> dict[str, Any]:
     """Manages the lifecycle and retrieves the status of a background mobile automation task.
 
     This is your primary diagnostic and control tool for tasks started by
     `mobile_run_task`. You MUST use it to poll the task status when your
     1-minute fallback timer triggers (as required by `mobile_run_task`). You
-    can also steer a subagent that is stuck or off-track, or abort a task.
+    can also steer a subagent that is stuck or off-track, answer a pending user
+    choice, toggle choice switches, or abort a task.
 
     ### Actions
-    - **'status'**: Returns `trace_id`, `status` ('running'/'completed'/'failed'/
-      'cancelled'), `device_serial` (which phone owns this task in multi-device
-      setups), `task_desc`, `model`, `elapsed_seconds`, a `test_summary` (when
-      the run declared verification check items: machine-readable
-      passed/failed/inconclusive/unchecked counts plus failed-item details —
-      no need to parse report prose), and `progress` (Flash:
-      current turn, latest thought/action — intervene if turns climb without
-      progress or the thought indicates it is stuck; Pro: the active task plan
-      — check it still aligns with your goal).
+    - **'status'**: Returns `trace_id`, `status` ('running'/'awaiting_user'/
+      'completed'/'failed'/'cancelled'), `device_serial` (which phone owns this
+      task in multi-device setups), `task_desc`, `model`, `elapsed_seconds`, a
+      `test_summary` (when the run declared verification check items:
+      machine-readable passed/failed/inconclusive/unchecked counts plus
+      failed-item details — no need to parse report prose), `pending_choice`
+      (present when `status == 'awaiting_user'`: `{choice_id, kind, question,
+      options, waiting_seconds}`), and `progress` (Flash: current turn, latest
+      thought/action — intervene if turns climb without progress or the thought
+      indicates it is stuck; Pro: the active task plan — check it still aligns
+      with your goal).
+    - **'answer_choice'**: Answers a pending `ask_user_choice` prompt when the
+      task is `awaiting_user`. Pass `instruction` as the option number (e.g.
+      `"2"`), `"auto"`, `"manual"` (after the user operated the phone and wants
+      Flash to continue), or free-form custom text.
+      **CRITICAL RULES FOR CALLERS**:
+      - You MUST ask the real human user and wait for their reply. NEVER answer
+        on the user's behalf, NEVER poll in a loop while waiting for the user,
+        and NEVER call `stop` just because the user has not replied yet (waiting
+        has no timeout).
+      - Only send `instruction="auto"` when the real user explicitly says so.
+      - Meaning of `"auto"` depends on `pending_choice.kind`:
+        * `kind="pick_item"` -> AI picks 1 item from the list for the goal.
+        * `kind="stuck"` -> AI is allowed to try ONLY the steps it listed,
+          within a fixed turn budget, without inventing new random taps.
+    - **'set_choice_mode'**: Updates `ask_on_choice` / `ask_when_stuck` mid-flight.
     - **'inject_instruction'**: Injects real-time guidance mid-flight when the
       subagent errs, stalls, or loops. Applied at the start of the next
       planning turn (Pro) or the next reactive loop (Flash). Requires
@@ -254,13 +274,16 @@ def mobile_manage_task(
       should wind down cleanly instead of being killed.
 
     Args:
-        action: `"status"`, `"inject_instruction"`, or `"stop"`.
+        action: `"status"`, `"answer_choice"`, `"set_choice_mode"`,
+          `"inject_instruction"`, or `"stop"`.
         trace_id: The task's session identifier from `mobile_run_task`.
-        instruction: Guidance string; required for `inject_instruction`
-          (optional when `release_loop=True`), omit otherwise.
+        instruction: For `answer_choice`: `"<option number>"`, `"auto"`,
+          `"manual"`, or custom text. For `inject_instruction`: guidance string.
         release_loop: With `inject_instruction`: explicit user stop signal
           that authorizes the subagent to complete continuous monitoring
           loops and finish the task gracefully.
+        ask_on_choice: With `set_choice_mode`: enable/disable asking on choices.
+        ask_when_stuck: With `set_choice_mode`: enable/disable asking when stuck.
     """
     status_data = trace_store.read_status(trace_id)
     if not status_data:
@@ -481,6 +504,16 @@ def mobile_manage_task(
 
             response["progress"] = progress
 
+            from artemis.agents.flash.user_choice import (
+                compact_pending_choice,
+                read_pending_choice,
+            )
+
+            pending_choice = read_pending_choice(trace_dir)
+            if pending_choice:
+                response["status"] = "awaiting_user"
+                response["pending_choice"] = compact_pending_choice(pending_choice)
+
         return response
 
     elif action == "stop":
@@ -557,6 +590,13 @@ def mobile_manage_task(
                         "message": f"Failed to terminate process {pid}: {e}",
                     }
 
+        from artemis.agents.flash.user_choice import (
+            clear_user_choice_files,
+            update_status_user_choice,
+        )
+
+        clear_user_choice_files(trace_dir)
+        update_status_user_choice(trace_id, None)
         trace_store.update_trace_status(
             trace_id, "cancelled", error="Task aborted by user request."
         )
@@ -564,6 +604,94 @@ def mobile_manage_task(
             "trace_id": trace_id,
             "status": "cancelled",
             "message": f"Successfully stopped background task '{trace_id}'.",
+        }
+
+    elif action == "answer_choice":
+        from artemis.agents.flash.user_choice import (
+            read_pending_choice,
+            update_status_user_choice,
+            write_choice_answer,
+        )
+
+        if current_status not in ("running", "pending"):
+            return {
+                "trace_id": trace_id,
+                "status": current_status,
+                "message": f"Cannot answer choice because task is in a terminal state: {current_status}",
+            }
+        pending = read_pending_choice(trace_dir)
+        if not pending:
+            return {
+                "trace_id": trace_id,
+                "status": current_status,
+                "message": "No pending user choice is currently waiting for an answer.",
+            }
+        raw_inst = str(instruction or "").strip()
+        if not raw_inst:
+            return {
+                "trace_id": trace_id,
+                "status": "awaiting_user",
+                "message": (
+                    "Missing required argument 'instruction' for action 'answer_choice'. "
+                    "Pass an option number (e.g. '1'), 'auto', 'manual', or custom text."
+                ),
+            }
+        choice_id = str(pending.get("choice_id") or "")
+        lowered = raw_inst.lower()
+        valid_option_ids = {
+            str(o.get("id"))
+            for o in (pending.get("options") or [])
+            if isinstance(o, dict) and "kind" not in o
+        }
+        if lowered == "auto":
+            ans_payload = {"choice_id": choice_id, "type": "auto"}
+        elif lowered == "manual":
+            ans_payload = {"choice_id": choice_id, "type": "manual"}
+        elif raw_inst in valid_option_ids:
+            ans_payload = {"choice_id": choice_id, "type": "option", "option_id": raw_inst}
+        else:
+            ans_payload = {"choice_id": choice_id, "type": "custom", "text": raw_inst}
+
+        write_choice_answer(trace_dir, ans_payload)
+        update_status_user_choice(trace_id, None)
+        return {
+            "trace_id": trace_id,
+            "status": "running",
+            "choice_id": choice_id,
+            "answer": ans_payload,
+            "message": f"Submitted user choice ({ans_payload['type']}) for trace '{trace_id}'.",
+        }
+
+    elif action == "set_choice_mode":
+        from artemis.agents.flash.user_choice import (
+            read_user_choice_mode,
+            write_user_choice_mode,
+        )
+
+        if current_status not in ("running", "pending"):
+            return {
+                "trace_id": trace_id,
+                "status": current_status,
+                "message": f"Cannot update choice mode because task is in a terminal state: {current_status}",
+            }
+        if ask_on_choice is None and ask_when_stuck is None:
+            return {
+                "trace_id": trace_id,
+                "status": current_status,
+                "message": "Provide at least one of 'ask_on_choice' or 'ask_when_stuck'.",
+            }
+        cur_choice, cur_stuck = read_user_choice_mode(trace_dir)
+        new_choice = cur_choice if ask_on_choice is None else bool(ask_on_choice)
+        new_stuck = cur_stuck if ask_when_stuck is None else bool(ask_when_stuck)
+        os.makedirs(trace_dir, exist_ok=True)
+        mode = write_user_choice_mode(
+            trace_dir, ask_on_choice=new_choice, ask_when_stuck=new_stuck
+        )
+        return {
+            "trace_id": trace_id,
+            "status": current_status,
+            **mode,
+            "message": f"Updated user choice mode for trace '{trace_id}'.",
         }
 
     elif action == "inject_instruction":

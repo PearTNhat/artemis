@@ -74,10 +74,10 @@ limitations under the License.
           >
           <div class="task-card-header">
             <span class="task-badge" [ngClass]="getTaskStatus(session)">
-              @if (getTaskStatus(session) === 'running') {
+              @if (getTaskStatus(session) === 'running' || getTaskStatus(session) === 'awaiting_user') {
                 <span class="status-dot"></span>
               }
-              {{ getTaskStatus(session) | uppercase }}
+              {{ getTaskStatus(session) === 'awaiting_user' ? 'Đang chờ bạn' : (getTaskStatus(session) | uppercase) }}
             </span>
             <div class="task-card-header-actions">
               @if (getDeviceSerial(session)) {
@@ -90,7 +90,7 @@ limitations under the License.
                 <span class="task-time-divider">·</span>
               }
               <span class="task-time">{{ session.start_time * 1000 | date:'shortTime' }}</span>
-              @if (getTaskStatus(session) === 'running' || getTaskStatus(session) === 'paused') {
+              @if (getTaskStatus(session) === 'running' || getTaskStatus(session) === 'paused' || getTaskStatus(session) === 'awaiting_user') {
                 <button
                   type="button"
                   class="btn-stop-card"
@@ -101,7 +101,7 @@ limitations under the License.
                   <span class="material-symbols-outlined">stop_circle</span>
                 </button>
               }
-              @if (getTaskStatus(session) !== 'running' && getTaskStatus(session) !== 'paused') {
+              @if (getTaskStatus(session) !== 'running' && getTaskStatus(session) !== 'paused' && getTaskStatus(session) !== 'awaiting_user') {
                 <button
                   type="button"
                   class="btn-delete-card"

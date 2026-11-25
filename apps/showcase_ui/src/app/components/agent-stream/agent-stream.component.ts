@@ -24,6 +24,7 @@ import { SystemService } from '../../services/system.service';
 import { Session, ModelInfo, SessionUsage } from '../../core/models/session.model';
 import { MarkdownSegment, MarkdownLine, NoteMilestone, ParsedNote } from '../../core/models/markdown.model';
 import { OverlayModule, ConnectedPosition } from '@angular/cdk/overlay';
+import { UserChoiceCardComponent } from '../user-choice-card/user-choice-card.component';
 import { StepBlock, PhaseBlock, StepEvent, ActionParam, CheckerResult, StreamResetNotice, DEFAULT_STREAM_RESET_MESSAGE } from '../../core/models/stream.model';
 import {
   contextPercent,
@@ -234,7 +235,7 @@ export type { MarkdownSegment, MarkdownLine, NoteMilestone, ParsedNote, StreamRe
 @Component({
   selector: 'app-agent-stream',
   standalone: true,
-  imports: [CommonModule, FormsModule, OverlayModule],
+  imports: [CommonModule, FormsModule, OverlayModule, UserChoiceCardComponent],
   templateUrl: './agent-stream.component.html',
   styleUrl: './agent-stream.component.scss',
   changeDetection: ChangeDetectionStrategy.OnPush
@@ -393,13 +394,13 @@ export class AgentStreamComponent implements AfterViewInit {
   public activeQueue = computed(() => {
     const list = this.agentService.sessions().filter((s) => {
       const status = this.getTaskStatus(s);
-      return status === 'running' || status === 'paused' || status === 'pending';
+      return status === 'running' || status === 'paused' || status === 'awaiting_user' || status === 'pending';
     });
     return list.sort((a, b) => {
       const statusA = this.getTaskStatus(a);
       const statusB = this.getTaskStatus(b);
-      const isRunA = statusA === 'running' || statusA === 'paused';
-      const isRunB = statusB === 'running' || statusB === 'paused';
+      const isRunA = statusA === 'running' || statusA === 'paused' || statusA === 'awaiting_user';
+      const isRunB = statusB === 'running' || statusB === 'paused' || statusB === 'awaiting_user';
       if (isRunA && !isRunB) return -1;
       if (!isRunA && isRunB) return 1;
       return (a.start_time || 0) - (b.start_time || 0);
@@ -457,6 +458,7 @@ export class AgentStreamComponent implements AfterViewInit {
   });
 
   public showPlanningLoader = computed(() => {
+    if (this.agentService.pendingChoice()) return false;
     const isRunning = this.agentService.agentStatus() === 'running';
     const currentSessionId = this.agentService.currentSessionId();
     const runningSessionId = this.agentService.runningSessionId();
@@ -916,13 +918,16 @@ export class AgentStreamComponent implements AfterViewInit {
     return tuningLabel(kind, id);
   }
 
-  public getTaskStatus(session: Session): 'running' | 'paused' | 'completed' | 'pending' | 'failed' | 'cancelled' {
+  public getTaskStatus(session: Session): 'running' | 'paused' | 'awaiting_user' | 'completed' | 'pending' | 'failed' | 'cancelled' {
+    if (session.awaiting_user && session.status !== 'completed' && session.status !== 'failed' && session.status !== 'cancelled') {
+      return 'awaiting_user';
+    }
     if (session.status) {
       const s = session.status.toLowerCase();
       if (s === 'completed' || s === 'success' || s === 'failed' || s === 'cancelled') {
         return (s === 'success' ? 'completed' : s) as any;
       }
-      if (s === 'running' || s === 'paused' || s === 'pending') {
+      if (s === 'running' || s === 'paused' || s === 'awaiting_user' || s === 'pending') {
         return s as any;
       }
     }

@@ -1299,6 +1299,14 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.errorMessage.set(null);
   }
 
+  public toggleAskOnChoice(): void {
+    this.agentService.setChoiceMode(!this.agentService.askOnChoice(), this.agentService.askWhenStuck());
+  }
+
+  public toggleAskWhenStuck(): void {
+    this.agentService.setChoiceMode(this.agentService.askOnChoice(), !this.agentService.askWhenStuck());
+  }
+
 
   public proceedToLauncher(): void {
     this.activeTab.set('launcher');

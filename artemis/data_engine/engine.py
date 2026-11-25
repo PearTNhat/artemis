@@ -602,6 +602,14 @@ class DataEngine:
             except Exception as e:
                 logger.error(f"Failed to delete old pause file: {e}")
 
+        # Clear orphaned human-in-the-loop choice files in this session's directory
+        try:
+            from artemis.agents.flash.user_choice import clear_user_choice_files
+
+            clear_user_choice_files(self.base_dir)
+        except Exception as e:
+            logger.debug(f"Could not clean orphan user choice files: {e}")
+
         session = SessionMetadata(
             session_id=session_id,
             initial_goal=goal,

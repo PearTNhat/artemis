@@ -198,6 +198,21 @@ limitations under the License.
                   <span class="pill-label">{{ followUpSessionId() ? 'Chat tiếp · New chat' : 'New chat' }}</span>
                 </button>
 
+                @if (selectedProfile() === 'flash' || isTaskRunning()) {
+                  <button type="button" class="new-chat-pill"
+                    [class.is-continuing]="agentService.askOnChoice()"
+                    (mousedown)="$event.preventDefault()" (click)="toggleAskOnChoice($event)"
+                    title="Bật/tắt: AI hỏi bạn khi gặp nhiều lựa chọn ngang hàng">
+                    <span class="pill-label">{{ agentService.askOnChoice() ? '☑ Hỏi khi nhiều lựa chọn' : '☐ Hỏi khi nhiều lựa chọn' }}</span>
+                  </button>
+                  <button type="button" class="new-chat-pill"
+                    [class.is-continuing]="agentService.askWhenStuck()"
+                    (mousedown)="$event.preventDefault()" (click)="toggleAskWhenStuck($event)"
+                    title="Bật/tắt: AI hỏi bạn khi bị bí (nếu tắt sẽ dừng và báo cáo, không bấm mò)">
+                    <span class="pill-label">{{ agentService.askWhenStuck() ? '☑ Hỏi khi bí' : '☐ Hỏi khi bí' }}</span>
+                  </button>
+                }
+
                 <!-- Active Model Switcher Dropdown in Dock -->
                 <div class="dock-model-dropdown-container">
                   <button type="button" class="dock-model-pill" 

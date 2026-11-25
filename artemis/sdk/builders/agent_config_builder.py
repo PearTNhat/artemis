@@ -262,6 +262,9 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
         step_summarizer: bool | None = None,
         step_summarizer_model: str | None = None,
         prune_history_xml: bool | None = None,
+        user_choice_enabled: bool | None = None,
+        ask_on_choice: bool | None = None,
+        ask_when_stuck: bool | None = None,
     ) -> "AgentConfigBuilder":
         """Configure ⚡ Flash execution profile options.
 
@@ -273,6 +276,9 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
             step_summarizer: Enable/disable asynchronous visual context compressor
             step_summarizer_model: Lightweight model for background step summarization
             prune_history_xml: Whether to prune outdated XML trees from historical steps
+            user_choice_enabled: Master switch for ``ask_user_choice``
+            ask_on_choice: Default for asking when multiple comparable options appear
+            ask_when_stuck: Default for asking when Flash is stuck
         """
         updates: dict[str, Any] = {}
         if max_turns is not None:
@@ -293,9 +299,36 @@ class AgentConfigBuilder(AgentConfigBuilderBase):
             if prune_history_xml is not None:
                 sum_updates["prune_history_xml"] = prune_history_xml
             updates["step_summarizer"] = self._flash.step_summarizer.model_copy(update=sum_updates)
+        if (
+            user_choice_enabled is not None
+            or ask_on_choice is not None
+            or ask_when_stuck is not None
+        ):
+            uc_updates: dict[str, Any] = {}
+            if user_choice_enabled is not None:
+                uc_updates["enabled"] = user_choice_enabled
+            if ask_on_choice is not None:
+                uc_updates["ask_on_choice"] = ask_on_choice
+            if ask_when_stuck is not None:
+                uc_updates["ask_when_stuck"] = ask_when_stuck
+            updates["user_choice"] = self._flash.user_choice.model_copy(update=uc_updates)
         if updates:
             self._flash = self._flash.model_copy(update=updates)
         return self
+
+    def with_flash_user_choice(
+        self,
+        *,
+        enabled: bool | None = None,
+        ask_on_choice: bool | None = None,
+        ask_when_stuck: bool | None = None,
+    ) -> "AgentConfigBuilder":
+        """Configure Flash human-in-the-loop choice overrides for a task."""
+        return self.with_flash_config(
+            user_choice_enabled=enabled,
+            ask_on_choice=ask_on_choice,
+            ask_when_stuck=ask_when_stuck,
+        )
 
     def with_flash_step_summarizer(
         self,

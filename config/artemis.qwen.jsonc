@@ -167,6 +167,15 @@
         "enabled": false, // Whether background step summarization is active (Gemini-only)
         "model": "gemini-3.5-flash-lite", // Lightweight model for fast background inference
         "prune_history_xml": true // Prune outdated heavy XML trees from historical steps
+      },
+      // 🙋 AI asks the user (pick among comparable items, or when stuck) instead of guessing.
+      // Waits with no time limit. "enabled" is the master switch: turn it off for unattended benchmark/CI runs.
+      "user_choice": {
+        "enabled": true,
+        "ask_on_choice": true,       // default for the user's "ask when several options" switch
+        "ask_when_stuck": true,      // default for the user's "ask when stuck" switch
+        "stuck_after_no_progress_turns": 2,
+        "max_options": 8
       }
     },
     // ==========================================================================

@@ -50,13 +50,13 @@ export class ChatInterfaceComponent {
   public activeQueue = computed(() => {
     const list = this.agentService.sessions().filter((s) => {
       const status = this.getTaskStatus(s);
-      return status === 'running' || status === 'paused' || status === 'pending';
+      return status === 'running' || status === 'paused' || status === 'awaiting_user' || status === 'pending';
     });
     return list.sort((a, b) => {
       const statusA = this.getTaskStatus(a);
       const statusB = this.getTaskStatus(b);
-      const isRunA = statusA === 'running' || statusA === 'paused';
-      const isRunB = statusB === 'running' || statusB === 'paused';
+      const isRunA = statusA === 'running' || statusA === 'paused' || statusA === 'awaiting_user';
+      const isRunB = statusB === 'running' || statusB === 'paused' || statusB === 'awaiting_user';
       if (isRunA && !isRunB) return -1;
       if (!isRunA && isRunB) return 1;
       return (a.start_time || 0) - (b.start_time || 0); // stable FIFO order
@@ -175,13 +175,16 @@ export class ChatInterfaceComponent {
   /**
    * Determine the current task execution status
    */
-  public getTaskStatus(session: Session): 'running' | 'paused' | 'completed' | 'pending' | 'failed' | 'cancelled' {
+  public getTaskStatus(session: Session): 'running' | 'paused' | 'awaiting_user' | 'completed' | 'pending' | 'failed' | 'cancelled' {
+    if (session.awaiting_user && session.status !== 'completed' && session.status !== 'failed' && session.status !== 'cancelled') {
+      return 'awaiting_user';
+    }
     if (session.status) {
       const s = session.status.toLowerCase();
       if (s === 'completed' || s === 'success' || s === 'failed' || s === 'cancelled') {
         return (s === 'success' ? 'completed' : s) as any;
       }
-      if (s === 'running' || s === 'paused' || s === 'pending') {
+      if (s === 'running' || s === 'paused' || s === 'awaiting_user' || s === 'pending') {
         return s as any;
       }
     }
