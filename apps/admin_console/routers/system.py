@@ -605,8 +605,19 @@ async def get_model_config_and_env():
             return "****"
         return f"****{k[-4:]}"
 
-    gemini_real = get_real_env_value("GEMINI_API_KEY", "google") or get_real_env_value(
-        "GOOGLE_API_KEY", "google"
+    raw_gemini_keys = read_raw_env_file_val("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEYS")
+    first_pool_gemini = next(
+        (
+            part.strip().strip('"').strip("'")
+            for part in (raw_gemini_keys or "").split(",")
+            if part.strip() and not is_placeholder_key(part.strip())
+        ),
+        None,
+    )
+    gemini_real = (
+        get_real_env_value("GEMINI_API_KEY", "google")
+        or first_pool_gemini
+        or get_real_env_value("GOOGLE_API_KEY", "google")
     )
     openai_real = get_real_env_value("OPENAI_API_KEY", "openai")
     anthropic_real = get_real_env_value("ANTHROPIC_API_KEY", "anthropic")

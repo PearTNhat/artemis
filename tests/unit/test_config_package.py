@@ -82,6 +82,7 @@ def test_settings_and_api_key_fallbacks(monkeypatch):
     """Test Settings model, API key fallbacks, and get/set methods."""
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEYS", raising=False)
     monkeypatch.delenv("GCP_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
@@ -107,6 +108,21 @@ def test_settings_and_api_key_fallbacks(monkeypatch):
     assert custom_settings.get_api_key("xai").get_secret_value() == "xai_test_key"
 
 
+def test_gemini_api_keys_pool_fallback(monkeypatch):
+    """GEMINI_API_KEYS alone populates single-key fallbacks while preserving the full pool."""
+    for env_k in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GEMINI_API_KEYS", "GCP_API_KEY"):
+        monkeypatch.delenv(env_k, raising=False)
+
+    pool_settings = Settings(
+        _env_file=None,
+        GEMINI_API_KEYS=SecretStr("key_one, key_two , key_three"),
+    )
+    assert pool_settings.GEMINI_API_KEY.get_secret_value() == "key_one"
+    assert pool_settings.GOOGLE_API_KEY.get_secret_value() == "key_one"
+    assert pool_settings.get_api_key("google").get_secret_value() == "key_one"
+    assert pool_settings.GEMINI_API_KEYS.get_secret_value() == "key_one, key_two , key_three"
+
+
 def test_placeholder_api_key_filtering(monkeypatch):
     """Test that default template placeholders are filtered out and treated as unconfigured."""
     from artemis.config.settings import is_placeholder_key
@@ -125,6 +141,7 @@ def test_placeholder_api_key_filtering(monkeypatch):
     for env_k in (
         "GOOGLE_API_KEY",
         "GEMINI_API_KEY",
+        "GEMINI_API_KEYS",
         "GCP_API_KEY",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",

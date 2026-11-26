@@ -153,6 +153,18 @@ class Settings(BaseSettings):
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
+    @staticmethod
+    def _first_valid_key(val: str | SecretStr | None) -> str | None:
+        """Return the first non-placeholder key from a single key or comma-separated list."""
+        if val is None:
+            return None
+        raw = val.get_secret_value() if isinstance(val, SecretStr) else str(val)
+        for part in raw.split(","):
+            candidate = part.strip().strip('"').strip("'")
+            if candidate and not is_placeholder_key(candidate):
+                return candidate
+        return None
+
     @model_validator(mode="after")
     def fallback_api_keys(self) -> "Settings":
         """Normalize Google / Gemini / GCP and OCR API keys and filter placeholders."""
@@ -173,6 +185,12 @@ class Settings(BaseSettings):
             val = getattr(self, attr, None)
             if val and is_placeholder_key(val):
                 setattr(self, attr, None)
+
+        first_pool_key = self._first_valid_key(self.GEMINI_API_KEYS)
+        if self.GEMINI_API_KEYS and not first_pool_key:
+            self.GEMINI_API_KEYS = None
+        if not self.GEMINI_API_KEY and first_pool_key:
+            self.GEMINI_API_KEY = SecretStr(first_pool_key)
 
         if not self.GOOGLE_API_KEY:
             if self.GEMINI_API_KEY:
