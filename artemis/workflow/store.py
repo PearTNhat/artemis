@@ -69,6 +69,7 @@ def fp_from_json(d: dict[str, Any]) -> ScreenFingerprint:
 class Node:
     id: str
     fps: list[ScreenFingerprint] = field(default_factory=list)
+    miss_count: int = 0
 
     def add_fp(self, fp: ScreenFingerprint) -> None:
         if any(f.tokens == fp.tokens and f.package == fp.package for f in self.fps):
@@ -170,7 +171,7 @@ class Edge:
             ok=int(st.get("ok", 0)),
             fail=int(st.get("fail", 0)),
             consec_fail=int(st.get("consec_fail", 0)),
-            seen=max(1, int(st.get("seen", 1))),
+            seen=max(0, int(st.get("seen", 1))),
             state=str(d.get("state") or "active"),
         )
 
@@ -188,6 +189,7 @@ class Workflow:
     updated_at: float = 0.0
     end_nodes: list[str] = field(default_factory=list)  # screens a successful run finished on
     start_nodes: list[str] = field(default_factory=list)  # entry screens a successful run started on
+    app_version: str = ""  # last observed Android versionName for this app package (L-046)
 
     def new_node_id(self) -> str:
         i = len(self.nodes) + 1
@@ -211,7 +213,64 @@ class Workflow:
     def has_commitment(self) -> bool:
         return any(e.kind == "commitment_stop" for e in self.edges)
 
+    def apply_app_version(self, current_version: str) -> bool:
+        """Tracks ``versionName`` across app updates (L-046).
+
+        When the app version changes from a previously recorded version, every
+        ``active`` navigation edge becomes ``provisional`` (with its new-version
+        confirmation counter reset so 2 independent sightings confirm it), while
+        ``slot`` edges stay active (protected by post-typing verification).
+        """
+        ver = str(current_version or "").strip()
+        if not ver:
+            return False
+        if not self.app_version:
+            self.app_version = ver
+            return True
+        if self.app_version == ver:
+            return False
+        self.app_version = ver
+        for e in self.edges:
+            if e.kind == "nav" and e.state == "active":
+                e.state = "provisional"
+                e.seen = 0
+        return True
+
+    def record_node_matches_and_prune(self, matched_node_ids: set[str], *, max_miss: int = 10) -> list[str]:
+        """Updates consecutive unmatched-run counters and prunes nodes past ``max_miss`` (L-046).
+
+        Protected ``start_nodes`` and ``end_nodes`` are never pruned. Any edge
+        whose ``src`` or ``dst`` belonged to a pruned node is removed with it.
+        """
+        if not matched_node_ids:
+            return []
+        protected = set(self.start_nodes) | set(self.end_nodes)
+        for nid, node in self.nodes.items():
+            if nid in matched_node_ids:
+                node.miss_count = 0
+            elif nid not in protected:
+                node.miss_count += 1
+        stale = [
+            nid
+            for nid, node in self.nodes.items()
+            if nid not in protected and node.miss_count > max_miss
+        ]
+        if stale:
+            stale_set = set(stale)
+            for nid in stale_set:
+                del self.nodes[nid]
+            self.edges = [
+                e for e in self.edges if e.src not in stale_set and e.dst not in stale_set
+            ]
+        return stale
+
     def to_json(self) -> dict[str, Any]:
+        def _node_dict(n: Node) -> dict[str, Any]:
+            nd: dict[str, Any] = {"fingerprints": [fp_to_json(f) for f in n.fps]}
+            if n.miss_count:
+                nd["miss_count"] = n.miss_count
+            return nd
+
         d: dict[str, Any] = {
             "schema": SCHEMA,
             "workflow_id": self.workflow_id,
@@ -220,10 +279,12 @@ class Workflow:
             "slots": self.slots,
             "stats": {"runs": self.runs, "ok": self.ok_runs},
             "updated_at": self.updated_at,
-            "nodes": {nid: {"fingerprints": [fp_to_json(f) for f in n.fps]} for nid, n in self.nodes.items()},
+            "nodes": {nid: _node_dict(n) for nid, n in self.nodes.items()},
             "edges": [e.to_json() for e in self.edges],
             "end_nodes": self.end_nodes,
         }
+        if self.app_version:
+            d["app_version"] = self.app_version
         if self.start_nodes:
             d["start_nodes"] = self.start_nodes
         return d
@@ -237,7 +298,11 @@ class Workflow:
             goal=str(d.get("goal") or ""),
             slots={str(k): str(v) for k, v in (d.get("slots") or {}).items()},
             nodes={
-                nid: Node(nid, [fp_from_json(f) for f in (nd.get("fingerprints") or [])])
+                nid: Node(
+                    nid,
+                    [fp_from_json(f) for f in (nd.get("fingerprints") or [])],
+                    miss_count=int(nd.get("miss_count") or 0),
+                )
                 for nid, nd in (d.get("nodes") or {}).items()
             },
             edges=[Edge.from_json(e) for e in d.get("edges") or []],
@@ -246,6 +311,7 @@ class Workflow:
             updated_at=float(d.get("updated_at") or 0.0),
             end_nodes=[str(n) for n in d.get("end_nodes") or []],
             start_nodes=[str(n) for n in d.get("start_nodes") or []],
+            app_version=str(d.get("app_version") or ""),
         )
 
 

@@ -854,6 +854,15 @@ class FlashModelImageConfig(BaseModel):
     text_max_consecutive: int = Field(
         default=4, ge=1, description="'on_demand': attach the screenshot after this many text-only turns."
     )
+    marks: Literal["unlabeled", "off"] = Field(
+        default="unlabeled",
+        description=(
+            "Selective Set-of-Mark overlay on the model screenshot (L-054): "
+            "'unlabeled' draws [index] boxes only on unlabeled controls, input fields, "
+            "and OCR gap-fill elements (never keyboard keys or already XML-labeled items); "
+            "'off' sends the clean screenshot."
+        ),
+    )
     model_config = {"extra": "allow"}
 
 

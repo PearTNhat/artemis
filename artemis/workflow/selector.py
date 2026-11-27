@@ -131,6 +131,56 @@ def match_goal_template(
     return extracted
 
 
+def _mask_slot_values_text(text: str, values: dict[str, str]) -> str:
+    """Replaces literal slot values in ``text`` with a fixed marker and normalizes whitespace."""
+    out = (text or "").strip().casefold()
+    for val in sorted((v.strip() for v in (values or {}).values() if v and v.strip()), key=len, reverse=True):
+        left_b = r"(?<!\w)" if val[0].isalnum() else ""
+        right_b = r"(?!\w)" if val[-1].isalnum() else ""
+        out = re.sub(left_b + re.escape(val.casefold()) + right_b, " <slot> ", out)
+    return re.sub(r"\s+", " ", out).strip()
+
+
+def goal_deviation_summary(
+    goal: str,
+    wf_goal: str,
+    wf_slots: dict[str, str],
+    matched_slots: dict[str, str] | None = None,
+) -> str:
+    """Describes extra or changed instructions between ``goal`` and ``wf_goal`` after masking slots (L-048).
+
+    Returns ``""`` when ``goal`` follows the exact recorded static framing (only slot values differ).
+    """
+    if match_goal_template(goal, wf_goal, wf_slots) is not None:
+        return ""
+    masked_old = _mask_slot_values_text(wf_goal, wf_slots)
+    slot_pool = dict(wf_slots or {})
+    if matched_slots:
+        slot_pool.update(matched_slots)
+    masked_new = _mask_slot_values_text(goal, slot_pool)
+    if not masked_new or masked_new == masked_old:
+        return ""
+    old_clauses = {
+        re.sub(r"^[\W_]+|[\W_]+$", "", c).strip()
+        for c in re.split(r"[.;,\n]+", masked_old)
+        if c.strip()
+    }
+    extra_clauses: list[str] = []
+    for raw_clause in re.split(r"[.;,\n]+", (goal or "").strip()):
+        cleaned_raw = raw_clause.strip()
+        if not cleaned_raw:
+            continue
+        masked_clause = re.sub(r"^[\W_]+|[\W_]+$", "", _mask_slot_values_text(cleaned_raw, slot_pool)).strip()
+        if masked_clause and masked_clause not in old_clauses and masked_clause not in masked_old:
+            extra_clauses.append(cleaned_raw)
+    if extra_clauses:
+        snippet = "; ".join(extra_clauses)
+        if len(snippet) > 180:
+            snippet = snippet[:177] + "..."
+        return f"task differs from recorded template ({wf_goal!r}); new/changed instruction: {snippet!r}"
+    return f"task wording differs from recorded template ({wf_goal!r})"
+
+
 def select_workflow_fast(
     goal: str, candidates: Sequence[WF]
 ) -> tuple[WF | None, dict[str, str]]:

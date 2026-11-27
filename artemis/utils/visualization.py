@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import difflib
+import functools
 import io
 import os
 import re
@@ -773,6 +774,7 @@ def merge_ocr_into_list(
     width: int,
     height: int,
     refine: Any = None,
+    ignore_boxes: list[tuple[int, int, int, int]] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """XML-first fusion of local OCR into the compact element list (in place on ``elements``).
 
@@ -847,6 +849,9 @@ def merge_ocr_into_list(
             continue
         # 3. Inside an unlabelled control: OCR names it (smallest control wins).
         cx, cy = (left + right) / 2, (top + bottom) / 2
+        if ignore_boxes and any(bx[0] <= cx <= bx[2] and bx[1] <= cy <= bx[3] for bx in ignore_boxes):
+            stats["duplicate"] += 1
+            continue
         owners = [el for el in icons if el["bounds"][0] <= cx <= el["bounds"][2] and el["bounds"][1] <= cy <= el["bounds"][3]]
         if owners:
             owner = min(owners, key=lambda e: (e["bounds"][2] - e["bounds"][0]) * (e["bounds"][3] - e["bounds"][1]))
@@ -877,7 +882,7 @@ def merge_ocr_into_list(
         by_index = {int(el["index"]): el for el in icons}
         out = []
         for line in list_text.splitlines():
-            mt = re.match(r"\[(\d+)\] \((\w+)\) ", line)
+            mt = re.match(r"\[(\d+)\] \(([^)]+)\) ", line)
             if mt and int(mt.group(1)) in icon_texts:
                 label = " ".join(icon_texts[int(mt.group(1))])[:_MAX_OCR_LABEL_CHARS]
                 quoted = '"' + label.replace('"', "'") + '"'
@@ -891,7 +896,92 @@ def merge_ocr_into_list(
         list_text = "\n".join(out)
     if new_lines:
         list_text = (list_text + "\n" if list_text else "") + "\n".join(new_lines)
+    # Attach nearby OCR/XML labels to unlabeled input fields that still lack a label (L-050).
+    unlabeled_inputs = [
+        el for el in elements if _is_input_element(el) and not str(el.get("text") or "").strip()
+    ]
+    if unlabeled_inputs:
+        labeled_now = [
+            el for el in elements if str(el.get("text") or "").strip() and el.get("bounds") and el.get("center")
+        ]
+        updated_labels: dict[int, str] = {}
+        for inp in unlabeled_inputs:
+            if inp.get("nearby_label"):
+                continue
+            lbl = _nearest_input_label(inp, labeled_now, width, height)
+            if lbl:
+                inp["nearby_label"] = lbl
+                updated_labels[int(inp["index"])] = lbl
+        if updated_labels:
+            patched = []
+            for line in list_text.splitlines():
+                mt = re.match(r"\[(\d+)\] \(input field\) ", line)
+                if mt and int(mt.group(1)) in updated_labels:
+                    lbl_q = '"' + updated_labels[int(mt.group(1))].replace('"', "'") + '"'
+                    line = f"[{mt.group(1)}] (input field: {lbl_q}) {line[mt.end():]}"
+                patched.append(line)
+            list_text = "\n".join(patched)
     return list_text, stats
+
+
+def _is_input_element(el: dict[str, Any]) -> bool:
+    cls = str(el.get("class") or "")
+    return "EditText" in cls or _is_truthy(el.get("editable"))
+
+
+def _nearest_input_label(
+    element: dict[str, Any],
+    labeled: list[dict[str, Any]],
+    width: int,
+    height: int,
+) -> str:
+    """Finds a nearby XML/OCR text label inside, just above (~1 line), or just left of an unlabeled input field (L-050)."""
+    bounds = element.get("bounds")
+    if not bounds or not labeled:
+        return ""
+    l, t, r, b = bounds
+    cx, cy = (l + r) / 2.0, (t + b) / 2.0
+    h = max(1, b - t)
+
+    def _clean(item: dict[str, Any]) -> str:
+        return str(item.get("text") or "").strip().replace("\n", " ")[:40]
+
+    # 1. Label sitting inside the field frame (e.g. Material OutlinedTextField label)
+    inside = [
+        it for it in labeled
+        if it is not element and l - 4 <= it["center"][0] <= r + 4 and t - 4 <= it["center"][1] <= b + 4
+        and _clean(it)
+    ]
+    if inside:
+        best = min(inside, key=lambda it: (it["bounds"][1], abs(it["center"][0] - cx)))
+        return _clean(best)
+
+    # 2. Label immediately above within ~1 row and horizontally overlapping
+    above_gap = max(45, int(height * 0.05), h)
+    above = [
+        it for it in labeled
+        if it is not element
+        and 0 <= t - it["bounds"][3] <= above_gap
+        and min(r, it["bounds"][2]) - max(l, it["bounds"][0]) > 0
+        and _clean(it)
+    ]
+    if above:
+        best = min(above, key=lambda it: (t - it["bounds"][3], abs(it["center"][0] - cx)))
+        return _clean(best)
+
+    # 3. Label immediately to the left on the same row
+    left_gap = max(40, int(width * 0.2))
+    same_row = [
+        it for it in labeled
+        if it is not element
+        and abs(cy - it["center"][1]) <= max(35, h * 0.6)
+        and 0 <= l - it["bounds"][2] <= left_gap
+        and _clean(it)
+    ]
+    if same_row:
+        best = min(same_row, key=lambda it: l - it["bounds"][2])
+        return _clean(best)
+    return ""
 
 
 def _is_status_bar_node(node: dict[str, Any], height: int, bounds: tuple[int, int, int, int] | None) -> bool:
@@ -901,11 +991,114 @@ def _is_status_bar_node(node: dict[str, Any], height: int, bounds: tuple[int, in
     return bounds[3] <= height * _STATUS_BAR_FRACTION
 
 
+_IME_ACTION_LABELS = frozenset({
+    "done", "next", "search", "go", "send", "enter", "return", "previous", "prev",
+    "submit", "ok", "xong", "tiep", "tim", "tim kiem", "gui", "di",
+    "hide keyboard", "close keyboard", "dismiss keyboard", "collapse keyboard",
+    "an ban phim", "dong ban phim",
+})
+_IME_ACTION_RID_TOKENS = ("key_pos_ime_action", "ime_action", "hide_keyboard", "close_keyboard")
+
+
+def _keyboard_window_info(
+    fused_xml: list[dict[str, Any]], width: int, height: int
+) -> tuple[set[int], tuple[int, int, int, int] | None]:
+    """Detects soft-keyboard (IME) nodes in ``fused_xml`` across any keyboard app (L-053)."""
+    if not fused_xml or width <= 0 or height <= 0:
+        return set(), None
+    y_floor = int(height * 0.38)
+    pkg_stats: dict[str, dict[str, Any]] = {}
+    node_entries: list[tuple[dict[str, Any], str, tuple[int, int, int, int]]] = []
+    for n in fused_xml:
+        if not isinstance(n, dict) or n.get("ocr_virtual"):
+            continue
+        b = parse_bounds(n.get("bounds"))
+        if not b or b[2] <= b[0] or b[3] <= b[1]:
+            continue
+        pkg = str(n.get("package") or "").strip()
+        if not pkg or pkg == "com.android.systemui":
+            continue
+        node_entries.append((n, pkg, b))
+        st = pkg_stats.setdefault(
+            pkg, {"has_editable": False, "top_active": 0, "lower_boxes": [], "lower_leaf_keys": 0}
+        )
+        if _is_input_element(n):
+            st["has_editable"] = True
+        is_active = bool(
+            _is_truthy(n.get("clickable"))
+            or _is_truthy(n.get("long-clickable"))
+            or _is_input_element(n)
+            or (n.get("text") or n.get("content-desc") or n.get("hint") or "").strip()
+        )
+        if b[1] < y_floor and is_active:
+            st["top_active"] += 1
+        if b[1] >= y_floor:
+            st["lower_boxes"].append((max(0, b[0]), max(0, b[1]), min(width, b[2]), min(height, b[3])))
+            if is_active:
+                st["lower_leaf_keys"] += 1
+
+    if len(pkg_stats) < 2:
+        return set(), None
+
+    kb_pkgs: set[str] = set()
+    for pkg, st in pkg_stats.items():
+        if st["has_editable"] or st["top_active"] > 0 or not st["lower_boxes"]:
+            continue
+        ux1 = min(bx[0] for bx in st["lower_boxes"])
+        ux2 = max(bx[2] for bx in st["lower_boxes"])
+        if ux2 - ux1 < width * 0.75:
+            continue
+        pkg_l = pkg.lower()
+        looks_like_ime_pkg = any(tok in pkg_l for tok in ("inputmethod", "keyboard", "latinime", ".ime"))
+        if st["lower_leaf_keys"] >= 6 or (looks_like_ime_pkg and st["lower_leaf_keys"] >= 2):
+            kb_pkgs.add(pkg)
+
+    if not kb_pkgs or len(kb_pkgs) >= len(pkg_stats):
+        return set(), None
+    if not any(pkg not in kb_pkgs and (st["top_active"] > 0 or st["has_editable"]) for pkg, st in pkg_stats.items()):
+        return set(), None
+
+    kb_ids = {id(n) for n, pkg, _ in node_entries if pkg in kb_pkgs}
+    lower_all = [
+        (max(0, b[0]), max(0, b[1]), min(width, b[2]), min(height, b[3]))
+        for n, pkg, b in node_entries
+        if pkg in kb_pkgs and b[1] >= y_floor
+    ]
+    if not lower_all:
+        return set(), None
+    kb_bounds = (
+        min(bx[0] for bx in lower_all),
+        min(bx[1] for bx in lower_all),
+        max(bx[2] for bx in lower_all),
+        max(bx[3] for bx in lower_all),
+    )
+    return kb_ids, kb_bounds
+
+
+def _is_ime_action_key(node: dict[str, Any]) -> bool:
+    """True for named IME action/dismiss keys kept individually when folding keyboard keys (L-053)."""
+    from artemis.workflow.targets import fold
+
+    rid = str(node.get("resource-id") or "").lower()
+    is_interactive = bool(
+        _is_truthy(node.get("clickable")) or _is_truthy(node.get("long-clickable"))
+    )
+    if any(tok in rid for tok in _IME_ACTION_RID_TOKENS):
+        return True
+    raw = str(node.get("text") or node.get("content-desc") or "").strip()
+    if not raw or not is_interactive:
+        return False
+    norm = re.sub(r"\s+", " ", fold(raw))
+    if norm in _IME_ACTION_LABELS:
+        return True
+    return ("hide" in norm and "keyboard" in norm) or ("an" in norm and "ban phim" in norm)
+
+
 def _icon_kind(node: dict[str, Any]) -> str:
     """Short role word for an unlabeled control, from its Android class."""
     cls = str(node.get("class") or "")
-    if "EditText" in cls:
-        return "input"
+    if "EditText" in cls or _is_truthy(node.get("editable")):
+        return "input field"
     if any(k in cls for k in ("Switch", "CheckBox", "RadioButton", "ToggleButton")):
         return "toggle"
     if "Image" in cls:
@@ -972,15 +1165,38 @@ def format_minimal_list_with_elements(
             n for n in fused_xml
             if not _is_status_bar_node(n, height, parse_bounds(n.get("bounds")))
         ]
+    kb_ids, kb_bounds = (
+        _keyboard_window_info(fused_xml, width, height) if compact else (set(), None)
+    )
+    if kb_ids:
+        app_xml = [n for n in fused_xml if id(n) not in kb_ids]
+        kb_action_xml = [n for n in fused_xml if id(n) in kb_ids and _is_ime_action_key(n)]
+        kept_kb_ids = {id(n) for n in kb_action_xml}
+        folded_kb_count = sum(
+            1
+            for n in fused_xml
+            if id(n) in kb_ids
+            and id(n) not in kept_kb_ids
+            and (
+                _is_truthy(n.get("clickable"))
+                or _is_truthy(n.get("long-clickable"))
+                or bool((n.get("text") or n.get("content-desc") or "").strip())
+            )
+        )
+    else:
+        app_xml = fused_xml
+        kb_action_xml = []
+        folded_kb_count = 0
+
     required_ids, star_ids = (
-        _required_markers(fused_xml, width) if compact and mark_required else (set(), set())
+        _required_markers(app_xml, width) if compact and mark_required else (set(), set())
     )
     # Row/container selection state (L-040): a RecyclerView/LinearLayout row often
     # carries selected=true or checked=true while its child TextView does not.
     screen_area = max(1, width * height)
     selected_row_boxes: list[tuple[int, int, int, int]] = []
     checked_row_boxes: list[tuple[int, int, int, int]] = []
-    for container in fused_xml:
+    for container in app_xml:
         if str(container.get("text") or container.get("content-desc") or "").strip():
             continue
         if _is_truthy(container.get("scrollable")):
@@ -1010,7 +1226,7 @@ def format_minimal_list_with_elements(
                     return True
         return False
 
-    for node in fused_xml:
+    for node in app_xml:
         if id(node) in star_ids:
             continue  # folded into its label as "(required)"
         text = node.get("text") or node.get("content-desc") or ""
@@ -1162,11 +1378,51 @@ def format_minimal_list_with_elements(
         # a card is expected layout, and the guard must not start blocking
         # labeled targets because of them.
         icon_lines, icon_elements = _unlabeled_controls(
-            fused_xml, width, height, elements, start_idx=idx, normalize_bounds=normalize_bounds
+            app_xml, width, height, elements, start_idx=idx, normalize_bounds=normalize_bounds,
+            quote=quote,
         )
         lines.extend(icon_lines)
         elements.extend(icon_elements)
         labels.extend(str(el["index"]) for el in icon_elements)
+        idx += len(icon_elements)
+        if kb_bounds is not None:
+            kb_norm = normalize_bounds(*kb_bounds)
+            kb_summary = (
+                f"(keyboard open {kb_norm}: {folded_kb_count} keys folded"
+                + ("; action keys listed below" if kb_action_xml else "")
+                + "; use press_key('BACK') to hide)"
+            )
+            lines.append(kb_summary)
+            for k_node in kb_action_xml:
+                kb_b = parse_bounds(k_node.get("bounds"))
+                if not kb_b:
+                    continue
+                k_left, k_top, k_right, k_bottom = (
+                    max(0, kb_b[0]), max(0, kb_b[1]), min(width, kb_b[2]), min(height, kb_b[3])
+                )
+                if k_right <= k_left or k_bottom <= k_top:
+                    continue
+                k_shown = str(
+                    k_node.get("text") or k_node.get("content-desc") or k_node.get("hint") or "Action"
+                ).strip()
+                k_cx, k_cy = get_center_coordinates(k_left, k_top, k_right, k_bottom)
+                lines.append(f"[{idx}] {quote(k_shown)} {normalize_bounds(k_left, k_top, k_right, k_bottom)}")
+                k_el = {
+                    "index": idx,
+                    "center": [k_cx, k_cy],
+                    "text": k_shown,
+                    "bounds": [k_left, k_top, k_right, k_bottom],
+                    "class": k_node.get("class"),
+                    "resource_id": k_node.get("resource-id"),
+                    "is_ocr": False,
+                    "is_keyboard": True,
+                }
+                for state_attr in ("checked", "checkable", "enabled", "selected", "package"):
+                    if k_node.get(state_attr) is not None:
+                        k_el[state_attr] = k_node.get(state_attr)
+                elements.append(k_el)
+                labels.append(str(idx))
+                idx += 1
         if overlay_hidden:
             lines.append(
                 f"(a layer on top covers the screen below: {overlay_hidden} elements under it are not listed)"
@@ -1182,18 +1438,30 @@ def _unlabeled_controls(
     *,
     start_idx: int,
     normalize_bounds: Any,
+    quote: Any = None,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """Clickable controls with no text, hint or description (back arrows, "+",
     search fields, toggles), as compact lines plus element records.
 
-    Skipped: containers (too large, or holding an already listed element's
-    center), slivers, and a wrapper that repeats the center of a control
-    already taken.
+    Skipped: containers (too large, or holding an already listed interactive
+    control's center), slivers, and a wrapper that repeats the center of a control
+    already taken. Editable inputs keep their slot even when a static text label
+    sits inside their bounds (L-050).
     """
     lines: list[str] = []
     found: list[dict[str, Any]] = []
     screen_area = max(1, width * height)
-    listed_centers = [el["center"] for el in listed if el.get("center")]
+    interactive_listed_centers = [
+        el["center"]
+        for el in listed
+        if el.get("center")
+        and (
+            _is_input_element(el)
+            or any(k in str(el.get("class") or "") for k in ("Button", "ImageButton", "Switch", "CheckBox"))
+        )
+    ]
+    all_listed_centers = [el["center"] for el in listed if el.get("center")]
+    labeled_listed = [el for el in listed if str(el.get("text") or "").strip() and el.get("bounds") and el.get("center")]
     candidates: list[tuple[int, dict[str, Any]]] = []
     for pos, node in enumerate(fused_xml):
         if len(candidates) >= _MAX_ICON_LINES:
@@ -1203,7 +1471,8 @@ def _unlabeled_controls(
         if node.get("ocr_elements") or node.get("ocr_virtual"):
             continue
         cls = str(node.get("class") or "")
-        if not (_is_truthy(node.get("clickable")) or _is_truthy(node.get("long-clickable")) or "EditText" in cls):
+        is_input = "EditText" in cls or _is_truthy(node.get("editable"))
+        if not (_is_truthy(node.get("clickable")) or _is_truthy(node.get("long-clickable")) or is_input):
             continue
         bounds = parse_bounds(node.get("bounds"))
         if not bounds:
@@ -1214,12 +1483,13 @@ def _unlabeled_controls(
         w, h = right - left, bottom - top
         if w < _ICON_MIN_SIDE_PX or h < _ICON_MIN_SIDE_PX:
             continue
-        cap = _INPUT_MAX_AREA_FRACTION if "EditText" in cls else _ICON_MAX_AREA_FRACTION
+        cap = _INPUT_MAX_AREA_FRACTION if is_input else _ICON_MAX_AREA_FRACTION
         if w * h > screen_area * cap:
             continue
         if _is_status_bar_node(node, height, (left, top, right, bottom)):
             continue
-        if any(left <= cx <= right and top <= cy <= bottom for cx, cy in listed_centers):
+        check_centers = interactive_listed_centers if is_input else all_listed_centers
+        if any(left <= cx <= right and top <= cy <= bottom for cx, cy in check_centers):
             continue
         cx, cy = get_center_coordinates(left, top, right, bottom)
         if any(abs(cx - c["center"][0]) < 8 and abs(cy - c["center"][1]) < 8 for _, c in candidates):
@@ -1233,7 +1503,7 @@ def _unlabeled_controls(
             "is_ocr": False,
             "is_icon": True,
         }
-        for state_attr in ("checked", "checkable", "enabled", "selected", "package"):
+        for state_attr in ("checked", "checkable", "enabled", "selected", "package", "editable", "password"):
             if node.get(state_attr) is not None:
                 element[state_attr] = node.get(state_attr)
         candidates.append((pos, element))
@@ -1253,7 +1523,13 @@ def _unlabeled_controls(
     for pos, element in kept:
         left, top, right, bottom = element["bounds"]
         kind = _icon_kind(element)
-        line = f"[{idx}] ({kind}) {normalize_bounds(left, top, right, bottom)}"
+        nearby = _nearest_input_label(element, labeled_listed, width, height) if kind == "input field" else ""
+        if nearby:
+            element["nearby_label"] = nearby
+            q_lbl = quote(nearby) if callable(quote) else '"' + nearby.replace('"', "'") + '"'
+            line = f"[{idx}] ({kind}: {q_lbl}) {normalize_bounds(left, top, right, bottom)}"
+        else:
+            line = f"[{idx}] ({kind}) {normalize_bounds(left, top, right, bottom)}"
         if kind == "toggle":
             line += f" checked:{str(element.get('checked') or '?').strip().lower()}"
         if str(element.get("enabled") or "").strip().lower() == "false":
@@ -1659,3 +1935,145 @@ def overlay_action_on_screenshot(image_bytes: bytes, action_obj: Any) -> bytes |
     if not annotated or annotated == image_bytes:
         return None
     return annotated
+
+
+@functools.lru_cache(maxsize=16)
+def _som_font(fs: int):
+    from PIL import ImageFont
+
+    try:
+        return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", fs)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def select_som_elements(elements: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Selects elements eligible for selective Set-of-Mark (L-054):
+    unlabeled controls (``is_icon``), input fields, and OCR gap-fill lines,
+    never keyboard keys and never regular XML-labeled elements."""
+    if not elements:
+        return []
+    selected: list[dict[str, Any]] = []
+    for el in elements:
+        if not isinstance(el, dict) or el.get("is_keyboard"):
+            continue
+        b = el.get("bounds")
+        if not isinstance(b, (list, tuple)) or len(b) != 4:
+            continue
+        x1, y1, x2, y2 = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+        if x2 <= x1 or y2 <= y1:
+            continue
+        if el.get("index") is None:
+            continue
+        if el.get("is_icon") or el.get("is_ocr") or el.get("is_hint") or _is_input_element(el):
+            selected.append(el)
+    return selected
+
+
+def draw_som_marks(
+    image_bytes: bytes,
+    elements: list[dict[str, Any]] | None,
+    *,
+    max_side: int = 0,
+    jpeg_quality: int = 80,
+) -> bytes:
+    """Draws Set-of-Mark v2 (``som_image_v2``) index boxes onto ``image_bytes``
+    at full resolution before optional downscaling to ``max_side`` (L-054)."""
+    if not image_bytes:
+        return image_bytes
+    candidates = select_som_elements(elements)
+    if not candidates:
+        if max_side and max_side > 0:
+            from artemis.utils.model_image import shrink_for_model
+
+            return shrink_for_model(image_bytes, max_side, jpeg_quality)
+        return image_bytes
+
+    try:
+        from PIL import Image, ImageDraw
+
+        im = Image.open(io.BytesIO(image_bytes))
+        if im.mode != "RGB":
+            im = im.convert("RGB")
+        W, H = im.size
+        d = ImageDraw.Draw(im)
+        fs = max(12, W // 55)
+        font = _som_font(fs)
+
+        def _clamped_bounds(el: dict[str, Any]) -> tuple[int, int, int, int] | None:
+            x1, y1, x2, y2 = (int(v) for v in el["bounds"])
+            x1, y1 = max(0, min(W, x1)), max(0, min(H, y1))
+            x2, y2 = max(0, min(W, x2)), max(0, min(H, y2))
+            return (x1, y1, x2, y2) if x2 > x1 and y2 > y1 else None
+
+        norm_cands: list[tuple[dict[str, Any], tuple[int, int, int, int]]] = []
+        for el in candidates:
+            cb = _clamped_bounds(el)
+            if cb is not None:
+                norm_cands.append((el, cb))
+        if not norm_cands:
+            if max_side and max_side > 0:
+                from artemis.utils.model_image import shrink_for_model
+
+                return shrink_for_model(image_bytes, max_side, jpeg_quality)
+            return image_bytes
+
+        def _area(b: tuple[int, int, int, int]) -> int:
+            return max(1, (b[2] - b[0]) * (b[3] - b[1]))
+
+        marks: list[tuple[dict[str, Any], tuple[int, int, int, int]]] = []
+        for el, b in sorted(norm_cands, key=lambda item: _area(item[1])):
+            if any(
+                (min(b[2], m[2]) - max(b[0], m[0])) > 0
+                and (min(b[3], m[3]) - max(b[1], m[1])) > 0
+                and (min(b[2], m[2]) - max(b[0], m[0])) * (min(b[3], m[3]) - max(b[1], m[1]))
+                > 0.6 * min(_area(b), _area(m))
+                for _, m in marks
+            ):
+                continue
+            marks.append((el, b))
+
+        lw = max(2, W // 500)
+        for _, b in marks:
+            d.rectangle(b, outline=(230, 20, 20), width=lw)
+
+        placed: list[tuple[int, int, int, int]] = []
+
+        def _free(r: tuple[int, int, int, int]) -> bool:
+            return (
+                r[0] >= 0
+                and r[1] >= 0
+                and r[2] <= W
+                and r[3] <= H
+                and not any(r[0] < q[2] and q[0] < r[2] and r[1] < q[3] and q[1] < r[3] for q in placed)
+            )
+
+        for el, b in marks:
+            x1, y1, x2, y2 = b
+            lab = str(el["index"])
+            tw, th = int(d.textlength(lab, font=font)) + 6, fs + 4
+            spots = [(x1, y1 - th), (x1 - tw, y1), (x1, y2), (x2, y1), (x1, y1)]
+            r = next(
+                ((sx, sy, sx + tw, sy + th) for sx, sy in spots if _free((sx, sy, sx + tw, sy + th))),
+                (max(0, min(W - tw, x1)), max(0, min(H - th, y1)), max(0, min(W - tw, x1)) + tw, max(0, min(H - th, y1)) + th),
+            )
+            placed.append(r)
+            d.rectangle(r, fill=(230, 20, 20), outline=(255, 255, 255), width=1)
+            d.text((r[0] + 3, r[1] + 1), lab, fill=(255, 255, 255), font=font)
+
+        if max_side and max_side > 0 and max(W, H) > max_side:
+            scale = max_side / float(max(W, H))
+            im = im.resize(
+                (max(1, round(W * scale)), max(1, round(H * scale))),
+                Image.Resampling.LANCZOS,
+            )
+        out = io.BytesIO()
+        im.save(out, format="JPEG", quality=int(jpeg_quality), optimize=True)
+        return out.getvalue()
+    except Exception as exc:
+        logger.debug(f"Selective SoM rendering failed; falling back to unmarked image: {exc}")
+        if max_side and max_side > 0:
+            from artemis.utils.model_image import shrink_for_model
+
+            return shrink_for_model(image_bytes, max_side, jpeg_quality)
+        return image_bytes

@@ -21,6 +21,7 @@ import re
 
 from artemis.workflow.recorder import INPUT_TOOLS
 from artemis.workflow.store import Edge, Workflow
+from artemis.workflow.targets import resolve_slot_value
 
 
 def _substitute_slots(text: str, slot_values: dict[str, str]) -> str:
@@ -150,7 +151,7 @@ def main_path(wf: Workflow) -> list[Edge]:
 
 def format_step(edge: Edge, slot_values: dict[str, str]) -> str:
     """Formats a single edge into a concise human/model instruction."""
-    val = slot_values.get(edge.slot, "") if edge.slot else ""
+    val = resolve_slot_value(edge.slot, slot_values) if edge.slot else ""
     label = _substitute_slots(edge.label, slot_values)
     desc = _substitute_slots(edge.description, slot_values)
     t_text = edge.target.text if edge.target else ""

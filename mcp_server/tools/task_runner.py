@@ -201,6 +201,16 @@ def _normalize_pro_tuning(
     return level, mode
 
 
+def _normalize_workflow_mode(workflow: str | None) -> str | None:
+    """Validates optional per-task Flash workflow mode override (L-048)."""
+    if workflow is None or not str(workflow).strip():
+        return None
+    mode = str(workflow).strip().lower()
+    if mode not in ("off", "record", "replay"):
+        raise ValueError(f"Invalid workflow {workflow!r}. Must be one of: off, record, replay")
+    return mode
+
+
 @mcp.tool()
 def mobile_run_task(
     task_desc: str,
@@ -214,6 +224,7 @@ def mobile_run_task(
     explorer_mode: str | None = None,
     ask_on_choice: bool = True,
     ask_when_stuck: bool = True,
+    workflow: str | None = None,
 ) -> dict[str, Any]:
     """Starts an autonomous mobile UI automation subagent on a connected Android device.
 
@@ -294,6 +305,9 @@ def mobile_run_task(
           user instead of guessing when multiple comparable items appear.
         ask_when_stuck: Flash only (default `True`). When `True`, Flash asks the
           user when stuck instead of tapping at random or failing immediately.
+        workflow: Optional per-task Flash workflow override (`"off"`, `"record"`,
+          or `"replay"`). Pass `"off"` to force AI execution from scratch on
+          this task without changing global config.
     """
     # 0. Validate and normalize model
     if model.lower() not in ("flash", "pro"):
@@ -302,6 +316,7 @@ def mobile_run_task(
     # 0b. Validate the Pro tuning knobs before any trace exists so a typo is a
     # plain tool error rather than a failed trace on disk.
     verification_level, explorer_mode = _normalize_pro_tuning(verification_level, explorer_mode)
+    workflow = _normalize_workflow_mode(workflow)
 
     # 1. Generate a unique trace_id
     trace_id = str(uuid.uuid4())
@@ -344,6 +359,7 @@ def mobile_run_task(
                     explorer_mode=explorer_mode,
                     ask_on_choice=ask_on_choice,
                     ask_when_stuck=ask_when_stuck,
+                    workflow=workflow,
                     base_url=base_url,
                 )
                 if resp and resp.get("status") == "rejected":
@@ -492,8 +508,12 @@ def mobile_run_task(
             cmd.extend(["--explorer-pro-mode", explorer_mode])
         cmd.append("--ask-on-choice" if ask_on_choice else "--no-ask-on-choice")
         cmd.append("--ask-when-stuck" if ask_when_stuck else "--no-ask-when-stuck")
+        if workflow:
+            cmd.extend(["--workflow", workflow])
 
         env = os.environ.copy()
+        if workflow:
+            env["ARTEMIS_WORKFLOW_MODE"] = workflow
         env["ARTEMIS_SESSION_ID"] = trace_id
         env["ARTEMIS_TASK_INGRESS"] = "mcp"
         if conversation_id:

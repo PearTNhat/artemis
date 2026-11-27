@@ -223,6 +223,7 @@ def submit_task_to_daemon(
     explorer_mode: str | None = None,
     ask_on_choice: bool | None = None,
     ask_when_stuck: bool | None = None,
+    workflow: str | None = None,
     base_url: str | None = None,
     timeout: float = 15.0,
 ) -> dict[str, Any] | None:
@@ -253,6 +254,8 @@ def submit_task_to_daemon(
         payload["ask_on_choice"] = ask_on_choice
     if ask_when_stuck is not None:
         payload["ask_when_stuck"] = ask_when_stuck
+    if workflow is not None:
+        payload["workflow"] = workflow
 
     try:
         data = json.dumps(payload).encode("utf-8")

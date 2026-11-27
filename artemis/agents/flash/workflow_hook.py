@@ -32,17 +32,47 @@ import uuid
 
 from langchain_core.messages import HumanMessage
 
+from artemis.core.tool_declaration import ToolDeclaration
 from artemis.workflow.autopilot import REVISIT_NOTICE, Autopilot
 from artemis.workflow.fingerprint import ScreenFingerprint, app_fingerprint, normalize
 from artemis.workflow.playbook import build_playbook, next_playbook_step
 from artemis.workflow.recorder import RawScreen, RecordedStep, record_run
-from artemis.workflow.selector import filter_by_live_screen, select_workflow, select_workflow_fast
+from artemis.workflow.selector import (
+    filter_by_live_screen,
+    goal_deviation_summary,
+    select_workflow,
+    select_workflow_fast,
+)
 from artemis.workflow.store import Workflow, WorkflowStore
 from third_party.mobile_use.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 MODES = ("off", "record", "replay")
+
+WORKFLOW_AUTOPILOT_TOOL = ToolDeclaration(
+    name="workflow_autopilot",
+    description=(
+        "Call ONLY when paused because the current goal includes instructions differing from the "
+        "recorded workflow. Pass decision='proceed' to run the autopilot's planned steps, or "
+        "decision='manual' to execute the task yourself without automatic replay."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "decision": {
+                "type": "string",
+                "enum": ["proceed", "manual"],
+                "description": "'proceed' replays recorded steps; 'manual' keeps full control with you.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Brief note explaining your decision.",
+            },
+        },
+        "required": ["decision"],
+    },
+)
 
 
 _LAUNCHER_RESOLVE_CMD = "cmd package resolve-activity -a android.intent.action.MAIN -c android.intent.category.HOME"
@@ -72,12 +102,13 @@ def _app_names_from_ctx(ctx: Any) -> list[str]:
     return names
 
 
-def resolve_mode(cfg_workflow: Any) -> tuple[str, str | None, int]:
+def resolve_mode(cfg_workflow: Any, ctx: Any = None) -> tuple[str, str | None, int]:
+    ctx_mode = str(getattr(ctx, "workflow_mode", "") or "").strip().lower()
     env = os.environ.get("ARTEMIS_WORKFLOW_MODE", "").strip().lower()
     mode = getattr(cfg_workflow, "mode", None) if cfg_workflow is not None else None
     if isinstance(cfg_workflow, dict):
         mode = cfg_workflow.get("mode")
-    mode = env or str(mode or "off").lower()
+    mode = ctx_mode or env or str(mode or "off").lower()
     if mode not in MODES:
         mode = "off"
     d = os.environ.get("ARTEMIS_WORKFLOW_DIR") or (
@@ -196,8 +227,21 @@ class FlashWorkflowHook:
         self._playbook_sent = False
         self._tried_cross_app = False
         self._end_guard_armed = False
+        self._deviation_reason: str = ""
+        self._deviation_decision: str | None = None
         self.selector_calls = 0
         self._publish_session_workflow()
+
+    def set_deviation_decision(self, decision: str) -> None:
+        """Records the AI's explicit confirmation ('proceed' or 'manual') for prompt deviation (L-048)."""
+        d = str(decision or "").strip().lower()
+        if d in ("proceed", "manual"):
+            self._deviation_decision = d
+
+    def note_ai_manual_override(self) -> None:
+        """Locks out autopilot for the rest of the run if AI chose to act directly after review (L-048)."""
+        if self._deviation_decision == "prompted":
+            self._deviation_decision = "manual"
 
     def _arm_end_guard(self, rep: Any) -> None:
         """Arms executor one-shot guard against restarting after reaching end screen (L-039)."""
@@ -331,12 +375,24 @@ class FlashWorkflowHook:
                 # instead of creating a new file each time.
                 wf = await self._select_for_merge()
             app_names = _app_names_from_ctx(getattr(self.runner, "ctx", None))
+            app_pkg = wf.package if wf is not None else ""
+            if not app_pkg:
+                for st in self.steps:
+                    pre_snap = getattr(st, "pre", None)
+                    if pre_snap is not None and pre_snap.elements:
+                        app_pkg = app_fingerprint(
+                            normalize(pre_snap.elements, width=pre_snap.width, height=pre_snap.height)
+                        ).package
+                        if app_pkg:
+                            break
+            app_version = await self._resolve_app_version(app_pkg) if app_pkg else ""
             built = record_run(
                 self.steps,
                 goal=self.runner.goal,
                 workflow=wf,
                 slot_values=self.slot_values if wf is not None else None,
                 app_names=app_names,
+                app_version=app_version,
             )
             if built is None:
                 return
@@ -419,6 +475,52 @@ class FlashWorkflowHook:
         if wf is not None:
             logger.info(f"Workflow selected: {wf.workflow_id} slots={values}")
 
+    async def _run_adb_shell(self, cmd: str) -> str:
+        """Runs a fast, read-only adb shell query using the active driver or adb client."""
+        ctx = getattr(self.runner, "ctx", None)
+        ctrl = getattr(getattr(getattr(self.runner, "executor", None), "actuator", None), "controller", None)
+        drv = getattr(ctrl, "_driver", None)
+        if drv is not None and callable(getattr(drv, "execute_shell", None)):
+            return str(await drv.execute_shell(cmd) or "")
+        from third_party.mobile_use.controllers.platform_specific_commands_controller import get_adb_device
+
+        adb_dev = get_adb_device(ctx)
+        if adb_dev is not None:
+            return str(await asyncio.to_thread(adb_dev.shell, cmd) or "")
+        return ""
+
+    async def _resolve_app_version(self, package: str) -> str:
+        """Reads Android ``versionName`` via ``dumpsys package``, cached per (device, package) (L-046)."""
+        pkg = str(package or "").strip()
+        ctx = getattr(self.runner, "ctx", None)
+        if ctx is None or not pkg:
+            return ""
+        cache = getattr(ctx, "_workflow_version_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            try:
+                setattr(ctx, "_workflow_version_cache", cache)
+            except Exception:
+                pass
+        dev_id = str(getattr(getattr(ctx, "device", None), "device_id", None) or "default")
+        key = (dev_id, pkg)
+        if key in cache:
+            return cache[key]
+        ver = ""
+        try:
+            from third_party.mobile_use.controllers.platform_specific_commands_controller import get_adb_device
+
+            adb_dev = get_adb_device(ctx)
+            if adb_dev is not None:
+                raw = str(await asyncio.to_thread(adb_dev.shell, f"dumpsys package {pkg}") or "")
+                m = re.search(r"versionName=([^\s]+)", raw)
+                if m:
+                    ver = m.group(1).strip()
+        except Exception as exc:
+            logger.debug(f"Resolve app version failed for {pkg}: {exc}")
+        cache[key] = ver
+        return ver
+
     async def _launcher_package(self) -> str | None:
         """Resolves Android's default HOME launcher package once per device (L-024)."""
         ctx = getattr(self.runner, "ctx", None)
@@ -439,18 +541,8 @@ class FlashWorkflowHook:
             return cache[dev_id]
         pkg: str | None = None
         try:
-            ctrl = getattr(getattr(getattr(self.runner, "executor", None), "actuator", None), "controller", None)
-            drv = getattr(ctrl, "_driver", None)
-            if drv is not None and callable(getattr(drv, "execute_shell", None)):
-                raw = await drv.execute_shell(_LAUNCHER_RESOLVE_CMD)
-                pkg = _parse_launcher_package(str(raw or ""))
-            else:
-                from third_party.mobile_use.controllers.platform_specific_commands_controller import get_adb_device
-
-                adb_dev = get_adb_device(ctx)
-                if adb_dev is not None:
-                    raw = await asyncio.to_thread(adb_dev.shell, _LAUNCHER_RESOLVE_CMD)
-                    pkg = _parse_launcher_package(str(raw or ""))
+            raw = await self._run_adb_shell(_LAUNCHER_RESOLVE_CMD)
+            pkg = _parse_launcher_package(raw)
         except Exception as exc:
             logger.debug(f"Resolve default launcher failed: {exc}")
         cache[dev_id] = pkg
@@ -462,7 +554,7 @@ class FlashWorkflowHook:
         Returns ``(img_bytes, xml_list, notice)`` after at least one replayed
         step, else None (the turn proceeds unchanged).
         """
-        if self.mode != "replay":
+        if self.mode != "replay" or self._deviation_decision == "manual":
             return None
         cur = self.snapshot()
         if cur is None:
@@ -503,6 +595,36 @@ class FlashWorkflowHook:
                             return None
         if self._autopilot is None or self.workflow is None or package != self.workflow.package:
             return None
+        if self._deviation_decision is None:
+            deviation = goal_deviation_summary(
+                self.runner.goal, self.workflow.goal, self.workflow.slots, self.slot_values
+            )
+            if deviation:
+                self._deviation_reason = deviation
+                self._deviation_decision = "prompted"
+                pb = build_playbook(self.workflow, self.slot_values)
+                self._playbook_sent = True
+                lines = [
+                    f"[Workflow Review] {deviation}.",
+                    "Autopilot paused before taking actions so extra instructions in your goal are not overridden by the recorded path.",
+                ]
+                if pb:
+                    lines.append(pb.replace("[Playbook] ", "Planned workflow steps: ", 1))
+                lines.append(
+                    "Decision: call workflow_autopilot(decision='proceed') if these steps match your goal, "
+                    "OR act directly on the screen (or call workflow_autopilot(decision='manual')) "
+                    "and autopilot will not override your run."
+                )
+                return img_bytes, xml_list, "\n".join(lines)
+            self._deviation_decision = "proceed"
+        if self._deviation_decision != "proceed":
+            return None
+        ver = await self._resolve_app_version(package)
+        if self.workflow.apply_app_version(ver):
+            try:
+                self.store.save(self.workflow)
+            except Exception as exc:
+                logger.debug(f"Saving workflow after version update failed: {exc}")
         self._bytes, self._xml = img_bytes, xml_list
         rep = await self._autopilot.run(_Driver(self, state))
         if launched_note:

@@ -137,6 +137,7 @@ async def _flash_ocr_list(
     """
     from artemis.utils.local_ocr import local_ocr_settings, should_run_ocr
     from artemis.utils.visualization import (
+        _keyboard_window_info,
         find_overlay_hidden,
         find_unlisted_bottom_band,
         merge_ocr_into_list,
@@ -187,16 +188,22 @@ async def _flash_ocr_list(
 
     if reads:
         merge_started = time.monotonic()
+        _, kb_box = _keyboard_window_info(xml_hierarchy, width, height)
+        ignore_boxes = [kb_box] if kb_box else None
         if any(r.get("unread") for r in reads):
             # VietOCR mode: only lines the XML does not cover get read (CPU-bound: off the loop).
             from artemis.utils.viet_ocr import make_reader
 
             reader = make_reader(screenshot_bytes, local_ocr_settings(ctx))
-            text, stats = await asyncio.to_thread(merge_ocr_into_list, text, elements, reads, width, height, reader)
+            text, stats = await asyncio.to_thread(
+                merge_ocr_into_list, text, elements, reads, width, height, reader, ignore_boxes
+            )
             timings["ocr_read_s"] = round(time.monotonic() - merge_started, 3)
             timings["ocr_read_lines"] = stats["read"]
         else:
-            text, stats = merge_ocr_into_list(text, elements, reads, width, height)
+            text, stats = merge_ocr_into_list(
+                text, elements, reads, width, height, ignore_boxes=ignore_boxes
+            )
         timings["ocr_added"] = stats["added"]
         timings["ocr_labeled"] = stats["labeled"]
         timings["ocr_dropped_dup"] = stats["duplicate"]

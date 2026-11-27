@@ -204,6 +204,7 @@ def normalize(
                 "visible-to-user": _to_bool(vis_raw, True),
                 "package": str(node.get("package") or "").strip(),
                 "editable": _to_bool(node.get("editable"), False),
+                "password": _to_bool(node.get("password"), False),
                 "text": text,
                 "content-desc": desc,
                 "hint": str(node.get("hint") or node.get("hint_text") or node.get("hintText") or "").strip(),

@@ -568,6 +568,10 @@ class TaskQueueService:
         ask_when_stuck = task_item.get("ask_when_stuck")
         if ask_when_stuck is not None:
             cmd.append("--ask-when-stuck" if ask_when_stuck else "--no-ask-when-stuck")
+        workflow = str(task_item.get("workflow") or "").strip().lower()
+        if workflow in ("off", "record", "replay"):
+            cmd.extend(["--workflow", workflow])
+            env["ARTEMIS_WORKFLOW_MODE"] = workflow
         device_serial = task_item.get("device_serial")
         if device_serial:
             cmd.extend(["--device-serial", str(device_serial)])
@@ -1019,6 +1023,7 @@ class TaskQueueService:
         explorer_mode: str | None = None,
         ask_on_choice: bool | None = None,
         ask_when_stuck: bool | None = None,
+        workflow: str | None = None,
     ) -> dict[str, Any]:
         """Reserve a device slot and build one pending queue item for a goal."""
         sess_id = single_session_id if single_session_id else str(uuid.uuid4())
@@ -1042,6 +1047,7 @@ class TaskQueueService:
             "explorer_mode": explorer_mode,
             "ask_on_choice": ask_on_choice,
             "ask_when_stuck": ask_when_stuck,
+            "workflow": workflow,
             "locked_app_package": locked_app_package,
             "app_path": app_path,
             "device_serial": assigned_serial,
@@ -1071,6 +1077,7 @@ class TaskQueueService:
         explorer_mode: str | None = None,
         ask_on_choice: bool | None = None,
         ask_when_stuck: bool | None = None,
+        workflow: str | None = None,
     ) -> dict[str, Any]:
         """Enqueues one or more goals and wakes up the background worker.
 
@@ -1082,6 +1089,7 @@ class TaskQueueService:
             str(verification_level).strip().lower() or None if verification_level else None
         )
         explorer_mode = str(explorer_mode).strip().lower() or None if explorer_mode else None
+        workflow = str(workflow).strip().lower() or None if workflow else None
         cls.ensure_worker_running()
 
         enqueued_tasks = []
@@ -1126,6 +1134,7 @@ class TaskQueueService:
                 explorer_mode=explorer_mode,
                 ask_on_choice=ask_on_choice,
                 ask_when_stuck=ask_when_stuck,
+                workflow=workflow,
             )
             state.queue_items.append(task_item)
             enqueued_tasks.append(task_item)

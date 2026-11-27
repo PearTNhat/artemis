@@ -143,7 +143,8 @@
       // 🖼️ Screenshot sent to the AI each turn (only the AI's copy)
       "model_image": {
         "max_side": 768, // Qwen-VL image tokens grow with pixels: 768 ≈ 270 tokens vs 1280 ≈ 720, still 13/13 on the reading bench
-        "jpeg_quality": 75
+        "jpeg_quality": 75,
+        "marks": "unlabeled" // 'unlabeled' (draw Set-of-Mark [index] only on unlabeled controls, inputs, OCR gap-fill) | 'off'
       },
       "element_list": "compact", // UI list: 'compact' (lean, lists unlabeled icons) | 'full'
       // 🔤 Local OCR (ONNX, on the host), merged XML-first into the element list:

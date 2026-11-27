@@ -149,10 +149,16 @@ class McpActionExecutor:
         # Values typed by input_text in this run: never overwritten by a typing
         # aimed at a point that is not a field (L-029).
         self._typed_values: list[str] = []
+        # Unfixed input_text value mismatches (L-051): field_key -> {actual, expected, label}.
+        self._unfixed_typed_mismatches: dict[str, dict[str, str]] = {}
+        # Normalized actual text seen on prior mismatch per field (L-055).
+        self._typed_mismatch_history: dict[str, str] = {}
         # One-shot guard armed after workflow reaches end screen (L-039).
         self._workflow_end_guard: dict[str, Any] | None = None
         self._last_elements_signature: str | None = None
         self._last_image_hash: str | None = None
+        # Observed scroll boundary after a blocked directional swipe: (edge, elements_sig) (L-060).
+        self._scroll_edge_hint: tuple[str, str] | None = None
         # dHash distance at or below which two screenshots count as the same
         # screen (calibrated in memory.transcript.similarity_max_distance:
         # same screen <=4, different screens >=7), so a clock tick or a
@@ -338,6 +344,7 @@ class McpActionExecutor:
         ineffective_tap = False
         recovered_screen_changed = False
         recovered_pre_observation: dict[str, Any] | None = None
+        typed_value_mismatch: dict[str, str] | None = None
         with span:
             try:
                 session = await self._session_or_start()
@@ -413,6 +420,11 @@ class McpActionExecutor:
                         and target_coordinates
                         and self.agent_name == "flash"
                     ):
+                        non_field_err = self._non_input_target_error(
+                            args, target_coordinates, state, index_elements
+                        )
+                        if non_field_err is not None:
+                            raise _ArgError(non_field_err)
                         other = self._input_would_go_elsewhere(target_coordinates)
                         if other is not None:
                             recovery = await self._recover_keyboard_hidden_field(
@@ -450,13 +462,19 @@ class McpActionExecutor:
                         clash = self._input_overwrites_typed_field(
                             target_coordinates, str(args.get("text") or "")
                         )
+                        if clash is not None and args.get("clear_exist") is False and self._append_is_in_goal(
+                            clash[1], str(args.get("text") or "")
+                        ):
+                            # Intentional append: held value + new text is what the task asks for (L-056).
+                            clash = None
                         if clash is not None:
                             field_name, prev_val = clash
                             raise _ArgError(
                                 f"input_text refused: field {field_name!r} already holds {prev_val!r}"
                                 " typed earlier in this run, and the new text is not editing that value."
                                 " To fill a different field, pass that field's index from the element list"
-                                " (hide the keyboard or scroll first if it is not shown)."
+                                " (hide the keyboard or scroll first if it is not shown). To change this"
+                                " field's value, type the whole new value with clear_exist=true."
                             )
                     if raw_name == "input_text" and not target_coordinates and self.agent_name == "flash":
                         other = self._input_would_go_elsewhere(None)
@@ -511,6 +529,27 @@ class McpActionExecutor:
                     if block_points:
                         await self._guard_commitment_block(session, block_points, state, index_elements)
                 extension = raw_name not in (REQUIRED_ACTIONS | OPTIONAL_ACTIONS)
+                pre_input_field = (
+                    self._locate_live_target_field(target_coordinates, target_semantics)
+                    if raw_name == "input_text"
+                    else None
+                )
+                pre_swipe_elements = (
+                    list(self._index_elements(state, index_elements) or [])
+                    if raw_name == "swipe"
+                    else []
+                )
+                pre_swipe_direction = (
+                    str(args.get("direction") or "").strip().lower()
+                    if raw_name == "swipe"
+                    else ""
+                )
+                pre_input_text = ""
+                if pre_input_field is not None:
+                    raw_pre_text = str(pre_input_field.get("text") or "").strip()
+                    raw_pre_hint = str(pre_input_field.get("hint") or "").strip()
+                    if raw_pre_text and not (raw_pre_hint and raw_pre_text.casefold() == raw_pre_hint.casefold()):
+                        pre_input_text = raw_pre_text
 
                 action_started = time.monotonic()
                 if extension:
@@ -647,6 +686,86 @@ class McpActionExecutor:
                             state.indexed_points = [el["center"] for el in obs.elements]
                             state.indexed_elements = obs.elements
                             state.screen_scrollable = obs.scrollable
+                            if raw_name == "swipe" and res.ok:
+                                message = self._apply_swipe_outcome_feedback(
+                                    base_message=finalize(res) if finalize else res.message,
+                                    pre_elements=pre_swipe_elements,
+                                    post_elements=obs.elements,
+                                    direction=pre_swipe_direction,
+                                    screen_unchanged=screen_unchanged,
+                                    scrollable=obs.scrollable,
+                                    curr_sig=curr_sig,
+                                )
+                            elif not screen_unchanged or obs.scrollable is False:
+                                self._scroll_edge_hint = None
+                            if raw_name == "input_text" and res.ok:
+                                mismatch = self._typed_field_mismatch(
+                                    target_coordinates,
+                                    target_semantics,
+                                    str(args.get("text") or ""),
+                                    pre_text=pre_input_text,
+                                    clear_exist=args.get("clear_exist"),
+                                )
+                                if mismatch is not None:
+                                    verdict, actual_val, expected_val, field_key, field_label, is_pw = mismatch
+                                    if verdict == "fail":
+                                        typed_value_mismatch = {
+                                            "actual": actual_val,
+                                            "expected": expected_val,
+                                        }
+                                        if not hasattr(self, "_unfixed_typed_mismatches"):
+                                            self._unfixed_typed_mismatches = {}
+                                        self._unfixed_typed_mismatches[field_key] = {
+                                            "actual": actual_val,
+                                            "expected": expected_val,
+                                            "label": field_label,
+                                        }
+                                        if not hasattr(self, "_typed_mismatch_history"):
+                                            self._typed_mismatch_history = {}
+                                        from artemis.workflow.targets import normalize_field_value
+
+                                        self._typed_mismatch_history[field_key] = normalize_field_value(actual_val)
+                                        clear_hint = (
+                                            "Clear it (clear_exist=true) and type again, or explain why"
+                                            f" {actual_val!r} is intended."
+                                        )
+                                        fail_msg = (
+                                            f"input_text failed: password field holds {len(actual_val)} masked"
+                                            f" characters, requested {expected_val}. {clear_hint}"
+                                            if is_pw
+                                            else f"input_text failed: field holds '{actual_val}', requested"
+                                            f" '{expected_val}'. {clear_hint}"
+                                        )
+                                        res = ActionResult.failure(
+                                            raw_name, fail_msg, code=ActionCode.INVALID_ARGS
+                                        )
+                                        message = fail_msg
+                                    else:
+                                        self._clear_fixed_typed_mismatch(
+                                            target_coordinates,
+                                            target_semantics,
+                                            str(args.get("text") or ""),
+                                        )
+                                        note = (
+                                            f" Note: field holds '{actual_val}'"
+                                            f" (app formatted; requested '{expected_val}')."
+                                        )
+                                        message += note
+                                        res = res.model_copy(update={"message": res.message + note})
+                                else:
+                                    self._clear_fixed_typed_mismatch(
+                                        target_coordinates,
+                                        target_semantics,
+                                        str(args.get("text") or ""),
+                                    )
+                                    post_field = self._locate_live_target_field(
+                                        target_coordinates, target_semantics
+                                    )
+                                    if post_field is not None and not post_field.get("password"):
+                                        post_val = str(post_field.get("text") or "").strip().casefold()
+                                        if post_val and hasattr(self, "_typed_values") and post_val not in self._typed_values:
+                                            self._typed_values.append(post_val)
+                                            del self._typed_values[:-20]
 
                         # Reset or update _last_point_action and ineffective taps memory
                         if raw_name in _POINT_TARGET_ACTIONS and target_coordinates:
@@ -736,6 +855,7 @@ class McpActionExecutor:
                 "observe_detail": observe_detail or None,
                 **({"recovered_screen_changed": True} if recovered_screen_changed else {}),
                 **({"recovered_pre_observation": recovered_pre_observation} if recovered_pre_observation else {}),
+                **({"typed_value_mismatch": typed_value_mismatch} if typed_value_mismatch else {}),
             },
         )
 
@@ -815,6 +935,19 @@ class McpActionExecutor:
                 return v
         return None
 
+    def _is_session_typed_text(self, text: str) -> bool:
+        """True when ``text`` matches a value typed earlier by this run (L-055)."""
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        from artemis.workflow.targets import normalize_field_value
+
+        target_norm = normalize_field_value(raw)
+        typed = [str(v or "") for v in getattr(self, "_typed_values", []) if str(v or "").strip()]
+        if any(normalize_field_value(v) == target_norm for v in typed):
+            return True
+        return self._matching_typed_value(raw.casefold()) is not None
+
     def _normalized_fields(self) -> list[dict[str, Any]]:
         raw = getattr(self.ctx, "last_raw_observation", None)
         if not isinstance(raw, dict) or not raw.get("elements"):
@@ -827,6 +960,311 @@ class McpActionExecutor:
         except Exception:
             return []
         return [n for n in visible_app_nodes(norm) if is_editable(n)]
+
+    def _locate_live_target_field(
+        self,
+        target_point: list[int] | tuple[int, int] | None,
+        target_semantics: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        fields = self._normalized_fields()
+        if not fields:
+            return None
+        from artemis.workflow.targets import fold, node_label
+
+        if target_point is not None:
+            x, y = int(target_point[0]), int(target_point[1])
+            margin = 10
+            hits = [
+                f
+                for f in fields
+                if f["bounds"][0] - margin <= x <= f["bounds"][2] + margin
+                and f["bounds"][1] - margin <= y <= f["bounds"][3] + margin
+            ]
+            if hits:
+                return min(
+                    hits,
+                    key=lambda f: (f["bounds"][2] - f["bounds"][0]) * (f["bounds"][3] - f["bounds"][1]),
+                )
+        if isinstance(target_semantics, dict):
+            rid = str(target_semantics.get("target_resource_id") or "").strip()
+            if rid:
+                rid_hits = [f for f in fields if str(f.get("resource-id") or "").strip() == rid]
+                if len(rid_hits) == 1:
+                    return rid_hits[0]
+            hint_or_txt = fold(str(target_semantics.get("target_text") or ""))
+            if hint_or_txt:
+                label_hits = [
+                    f
+                    for f in fields
+                    if fold(str(f.get("hint") or "")) == hint_or_txt or fold(node_label(f)) == hint_or_txt
+                ]
+                if len(label_hits) == 1:
+                    return label_hits[0]
+        focused = [f for f in fields if f.get("focused")]
+        return focused[0] if len(focused) == 1 else None
+
+    @staticmethod
+    def _field_mismatch_key(
+        target_field: dict[str, Any] | None,
+        target_point: list[int] | tuple[int, int] | None,
+        target_semantics: dict[str, Any],
+    ) -> tuple[str, str]:
+        from artemis.workflow.targets import node_label
+
+        if target_field is not None:
+            rid = str(target_field.get("resource-id") or "").strip()
+            hint = str(target_field.get("hint") or "").strip()
+            label = hint or node_label(target_field) or rid or "input field"
+            key = f"rid:{rid}|hint:{hint}" if (rid or hint) else f"bounds:{tuple(target_field.get('bounds') or ())}"
+            return key, label
+        rid_s = str((target_semantics or {}).get("target_resource_id") or "").strip()
+        txt_s = str((target_semantics or {}).get("target_text") or "").strip()
+        key = f"rid:{rid_s}|hint:{txt_s}" if (rid_s or txt_s) else f"pt:{tuple(target_point or ())}"
+        return key, (txt_s or rid_s or "input field")
+
+    def _clear_fixed_typed_mismatch(
+        self,
+        target_point: list[int] | tuple[int, int] | None,
+        target_semantics: dict[str, Any],
+        expected_text: str,
+    ) -> None:
+        mismatches = getattr(self, "_unfixed_typed_mismatches", None)
+        if not mismatches:
+            return
+        field = self._locate_live_target_field(target_point, target_semantics)
+        field_key, _ = self._field_mismatch_key(field, target_point, target_semantics)
+        mismatches.pop(field_key, None)
+        exp = str(expected_text or "").strip()
+        if exp:
+            for k in [k for k, v in mismatches.items() if v.get("expected") == exp]:
+                mismatches.pop(k, None)
+
+    def scroll_edge_state(self) -> str | None:
+        """Returns ``'top'`` or ``'bottom'`` when a directional swipe on the
+        current screen hit no visible change (L-060), else ``None``."""
+        hint = getattr(self, "_scroll_edge_hint", None)
+        if not isinstance(hint, tuple) or len(hint) != 2:
+            return None
+        edge, sig = hint
+        if sig and self._last_elements_signature and sig != self._last_elements_signature:
+            return None
+        return edge if edge in ("top", "bottom") else None
+
+    @staticmethod
+    def _swipe_element_labels(elements: list[dict[str, Any]] | None) -> tuple[list[tuple[str, str]], set[str]]:
+        """Extracts deduplicated ``(key, display)`` pairs for UI diffing across a swipe."""
+        pairs: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for el in elements or ():
+            if not isinstance(el, dict) or el.get("is_keyboard"):
+                continue
+            txt = str(el.get("text") or el.get("hint") or el.get("nearby_label") or "").strip()
+            if txt:
+                key = f"txt:{txt.casefold()}"
+                disp = '"' + txt[:40].replace('"', "'") + '"'
+            elif el.get("is_icon"):
+                cls = str(el.get("class") or "")
+                kind = (
+                    "input field"
+                    if ("EditText" in cls or str(el.get("editable") or "").lower() == "true")
+                    else ("icon" if "Image" in cls else "button")
+                )
+                rid = str(el.get("resource_id") or "").strip()
+                key = f"icon:{kind}:{rid or tuple(el.get('bounds') or ())}"
+                disp = f"({kind})"
+            else:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append((key, disp))
+        return pairs, seen
+
+    def _apply_swipe_outcome_feedback(
+        self,
+        *,
+        base_message: str,
+        pre_elements: list[dict[str, Any]],
+        post_elements: list[dict[str, Any]],
+        direction: str,
+        screen_unchanged: bool,
+        scrollable: bool | None,
+        curr_sig: str,
+    ) -> str:
+        """Formats clear finger-vs-page swipe movement, New/Hidden elements, and
+        edge hints when a directional swipe had no visible effect (L-060)."""
+        if screen_unchanged:
+            if not direction:
+                return f"{base_message} (no visible change)"
+            if scrollable is False:
+                self._scroll_edge_hint = None
+                return f"No visible change after swiping {direction}: this screen has no scrollable container."
+            if direction == "down":
+                self._scroll_edge_hint = ("top", curr_sig)
+                return (
+                    "No visible change after swiping down (finger down): already at the TOP edge — "
+                    "content further DOWN needs direction='up'."
+                )
+            if direction == "up":
+                self._scroll_edge_hint = ("bottom", curr_sig)
+                return (
+                    "No visible change after swiping up (finger up): already at the BOTTOM edge — "
+                    "content further UP needs direction='down'."
+                )
+            self._scroll_edge_hint = None
+            opposite = "right" if direction == "left" else ("left" if direction == "right" else "")
+            hint = f" try direction='{opposite}'." if opposite else ""
+            return f"No visible change after swiping {direction} (finger {direction}): already at that edge.{hint}"
+
+        self._scroll_edge_hint = None
+        dir_lead = {
+            "down": "Swiped down (finger down): the page moved toward its TOP.",
+            "up": "Swiped up (finger up): the page moved toward its BOTTOM.",
+            "left": "Swiped left (finger left): the view scrolled RIGHT.",
+            "right": "Swiped right (finger right): the view scrolled LEFT.",
+        }.get(direction, base_message)
+
+        pre_pairs, pre_keys = self._swipe_element_labels(pre_elements)
+        post_pairs, post_keys = self._swipe_element_labels(post_elements)
+        new_items = [disp for k, disp in post_pairs if k not in pre_keys][:6]
+        hidden_items = [disp for k, disp in pre_pairs if k not in post_keys][:6]
+
+        parts = [dir_lead]
+        if new_items:
+            parts.append("New: " + ", ".join(new_items) + ".")
+        if hidden_items:
+            parts.append("Hidden: " + ", ".join(hidden_items) + ".")
+        return " ".join(parts)
+
+    def consume_unfixed_typed_mismatches(self) -> list[dict[str, str]]:
+        """Returns any unfixed typed-value mismatches once and clears them (L-051)."""
+        mismatches = getattr(self, "_unfixed_typed_mismatches", None)
+        if not mismatches:
+            return []
+        items = list(mismatches.values())
+        mismatches.clear()
+        return items
+
+    def _non_input_target_error(
+        self,
+        args: dict[str, Any],
+        target_point: list[int] | tuple[int, int],
+        state: Any,
+        index_elements: list[dict[str, Any]] | None,
+    ) -> str | None:
+        """Refuses ``input_text(target=i)`` when element ``i`` is clearly a non-input
+        control (e.g. a button/icon) and no editable input field covers that point (L-050)."""
+        if args.get("target_text"):
+            return None
+        raw_target = args.get("target") or args.get("coordinates")
+        norm_target = normalize_coordinate_target(raw_target)
+        if isinstance(norm_target, bool) or not isinstance(norm_target, (int, float)):
+            return None
+        elements = self._index_elements(state, index_elements)
+        idx = int(norm_target)
+        if not 1 <= idx <= len(elements):
+            return None
+        el = elements[idx - 1]
+        if el.get("is_ocr") or el.get("is_hint") or el.get("hint"):
+            return None
+        cls = str(el.get("class") or "")
+        editable_flag = str(el.get("editable") or "").strip().lower() == "true" or bool(el.get("editable") is True)
+        if "EditText" in cls or "AutoCompleteTextView" in cls or editable_flag:
+            return None
+        x, y = int(target_point[0]), int(target_point[1])
+        margin = 10
+        for f in self._normalized_fields():
+            l, t, r, b = f["bounds"]
+            if l - margin <= x <= r + margin and t - margin <= y <= b + margin:
+                return None
+        short_cls = cls.rsplit(".", 1)[-1] if cls else ""
+        if el.get("is_icon"):
+            if "Image" in short_cls:
+                role = "icon"
+            elif any(k in short_cls for k in ("Switch", "CheckBox", "RadioButton", "ToggleButton")):
+                role = "toggle"
+            else:
+                role = "button"
+        else:
+            role = short_cls or "element"
+        lbl = str(el.get("text") or "").strip()
+        desc = f"{lbl!r} ({role})" if lbl else f"({role})"
+        return (
+            f"input_text refused: element [{idx}] {desc} is not an input field, "
+            "and no input field contains that point (typing at it would tap a control). "
+            "Pass the index of an input field, or if the cursor is already blinking inside the "
+            "target field, call input_text(text=...) without target."
+        )
+
+    def _typed_field_mismatch(
+        self,
+        target_point: list[int] | tuple[int, int] | None,
+        target_semantics: dict[str, Any],
+        expected_text: str,
+        *,
+        pre_text: str = "",
+        clear_exist: Any = None,
+    ) -> tuple[str, str, str, str, str, bool] | None:
+        """After ``input_text``, classifies any value difference in the live target
+        field (L-045, L-049, L-051, L-055):
+
+        Returns ``(verdict, actual, expected, field_key, field_label, is_pw)`` or
+        ``None`` when matched/unverifiable/intentional append:
+        - Intentional append (``clear_exist=False`` on session-typed text): ``None``.
+        - ``verdict == "fail"`` only for untyped prefill concatenation
+          (``actual == pre_text + expected``, e.g. ``+1``), accent drops, or
+          password mask length mismatch — and never when ``clear_exist=True``
+          already repeated the exact same mismatch (app auto-formatting -> ``"warn"``).
+        """
+        raw_expected = str(expected_text or "")
+        expected = raw_expected.strip()
+        if not expected:
+            return None
+        target_field = self._locate_live_target_field(target_point, target_semantics)
+        if target_field is None:
+            return None
+        from artemis.workflow.targets import check_field_value, fold, normalize_field_value
+
+        matched, verifiable, actual = check_field_value(target_field, expected)
+        if not verifiable or matched:
+            return None
+        # Rule 2 (L-055): intentional append onto text typed earlier in this run.
+        if clear_exist is False and pre_text and self._is_session_typed_text(pre_text):
+            if (
+                check_field_value(target_field, f"{pre_text}{raw_expected}")[0]
+                or check_field_value(target_field, f"{pre_text} {expected}")[0]
+            ):
+                return None
+
+        field_key, field_label = self._field_mismatch_key(target_field, target_point, target_semantics)
+        is_pw = bool(target_field.get("password"))
+        actual_norm = normalize_field_value(actual)
+        exp_norm = normalize_field_value(expected)
+        prev_actual_norm = getattr(self, "_typed_mismatch_history", {}).get(field_key)
+
+        is_untyped_prefill_concat = bool(
+            not is_pw
+            and pre_text
+            and not self._is_session_typed_text(pre_text)
+            and actual_norm in (
+                normalize_field_value(f"{pre_text}{raw_expected}"),
+                normalize_field_value(f"{expected}{pre_text}"),
+            )
+        )
+        is_accent_drop = bool(
+            not is_pw and fold(actual) == fold(expected) and actual_norm != exp_norm
+        )
+
+        if clear_exist is True and prev_actual_norm is not None and prev_actual_norm == actual_norm:
+            verdict = "warn"
+        elif is_untyped_prefill_concat or is_accent_drop or is_pw:
+            verdict = "fail"
+        else:
+            verdict = "warn"
+
+        if is_pw:
+            return verdict, actual, f"{len(expected)} masked characters", field_key, field_label, True
+        return verdict, actual, expected, field_key, field_label, False
 
     def _input_would_go_elsewhere(self, target_point: list[int] | tuple[int, int] | None) -> str | None:
         """Before ``input_text`` aimed at ``target_point`` (0-1000), on the screen
@@ -1089,6 +1527,19 @@ class McpActionExecutor:
             obs=obs,
             obs_bytes=obs_bytes,
         )
+
+    def _append_is_in_goal(self, held: str, new_text: str) -> bool:
+        """True when appending ``new_text`` to ``held`` gives text the task goal
+        itself contains (spaces/case ignored): only then is a clear_exist=False
+        typing onto a value typed earlier in this run an intentional append and
+        not two separate values merged into one field ("Son" + "Dao") (L-056)."""
+        goal = str(getattr(self, "task_goal", "") or "")
+        if not goal:
+            return False
+        from artemis.workflow.targets import normalize_field_value
+
+        combined = normalize_field_value(f"{held}{new_text}")
+        return bool(combined) and combined in normalize_field_value(goal)
 
     def _input_overwrites_typed_field(
         self, target_point: list[int] | tuple[int, int], new_text: str

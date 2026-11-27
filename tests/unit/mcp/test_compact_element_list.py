@@ -114,7 +114,7 @@ def test_compact_skips_large_unlabeled_banner_but_keeps_wide_input():
     ]
     text, elements, _ = format_minimal_list_with_elements([dict(n) for n in nodes], W, H, compact=True)
     assert [tuple(el["bounds"]) for el in elements if el.get("is_icon")] == [(50, 800, 950, 900)]
-    assert "(input)" in text
+    assert "(input field)" in text
 
 
 def test_compact_shortens_overlap_warning():

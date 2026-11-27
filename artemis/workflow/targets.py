@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import hashlib
+import re
 from typing import Any, Iterable
 
 from artemis.utils.screen_diff import flatten_hierarchy
@@ -74,6 +75,121 @@ def fold(text: str) -> str:
 
     t = unicodedata.normalize("NFKD", (text or "").replace("đ", "d").replace("Đ", "D"))
     return "".join(c for c in t if not unicodedata.combining(c)).casefold().strip()
+
+
+_FIELD_NOISE_RE = re.compile(r"[\s\-().]+")
+_THOUSANDS_NUM_RE = re.compile(r"^\s*[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*$")
+_PASSWORD_MASK_CHARS = frozenset("•*●◦▪▫∙")
+
+
+def normalize_field_value(text: str) -> str:
+    """Canonical field-value comparison key: keeps accents (NFC), casefolds,
+    strips whitespace and '-', '(', ')', '.', and ignores thousands ',' when the
+    whole value is numeric (L-045, L-049, L-055)."""
+    import unicodedata
+
+    nfc = unicodedata.normalize("NFC", text or "")
+    if _THOUSANDS_NUM_RE.match(nfc):
+        nfc = nfc.replace(",", "")
+    return _FIELD_NOISE_RE.sub("", nfc).casefold()
+
+
+_DOUBLE_QUOTED_RE = re.compile(r'"([^"\n]{2,80})"|“([^”\n]{2,80})”')
+_SINGLE_QUOTED_RE = re.compile(r"(?<!\w)'([^'\n]{2,80})'(?!\w)")
+_EMAIL_LITERAL_RE = re.compile(r"(?<!\w)([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})(?!\w)")
+_NUMBER_LITERAL_RE = re.compile(
+    r"(?<!\w)(\d[\d,]{1,}\d|\d{3,})(?!\w)(?!\s*(?:ms|s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|giay|giây|phut|phút|gio|giờ|px|dp|%)\b)",
+    re.IGNORECASE,
+)
+
+
+def extract_requested_literals(goal: str, *, include_quoted: bool = False) -> list[str]:
+    """Extracts explicit data literals (emails, >=3-digit numbers that are not
+    duration/size units; quoted strings only with ``include_quoted``) from a task
+    goal, in order of appearance (L-057, L-058, L-059).
+
+    Quoted strings are excluded by default (L-061): goals quote UI labels and
+    instructions as often as data ("do not tap 'Place Order'", confirm "Yes"),
+    so requiring them on the final screen would push the model toward the very
+    control the task forbids. Quoted values the run actually types are tracked
+    from the typing history instead."""
+    text = str(goal or "").strip()
+    if not text:
+        return []
+    candidates: list[tuple[int, str]] = []
+    for m in (_DOUBLE_QUOTED_RE.finditer(text) if include_quoted else ()):
+        val = (m.group(1) or m.group(2) or "").strip()
+        if val:
+            candidates.append((m.start(), val))
+    for m in (_SINGLE_QUOTED_RE.finditer(text) if include_quoted else ()):
+        val = m.group(1).strip()
+        if val:
+            candidates.append((m.start(), val))
+    for m in _EMAIL_LITERAL_RE.finditer(text):
+        val = m.group(1).strip()
+        if val:
+            candidates.append((m.start(), val))
+    for m in _NUMBER_LITERAL_RE.finditer(text):
+        val = m.group(1).strip().strip(",")
+        if sum(ch.isdigit() for ch in val) >= 3:
+            candidates.append((m.start(), val))
+
+    candidates.sort(key=lambda item: item[0])
+    out: list[str] = []
+    seen_norms: list[str] = []
+    for _, val in candidates:
+        norm = normalize_field_value(val)
+        if not norm:
+            continue
+        if any(norm == s or norm in s for s in seen_norms):
+            continue
+        seen_norms.append(norm)
+        out.append(val)
+    return out
+
+
+def check_field_value(node: dict[str, Any], expected_text: str) -> tuple[bool, bool, str]:
+    """Compares a live editable node's content against ``expected_text`` (L-045, L-049).
+
+    Returns ``(matched, verifiable, actual_display)``:
+    - Normal fields: compares ``normalize_field_value`` (case-insensitive,
+      whitespace/`-().` ignored, accents preserved). ``verifiable`` is False when
+      empty or still only showing its placeholder hint.
+    - ``password=True`` fields: never compares text content (Android masks it as
+      '••••' or hides it). If all characters in the field are mask glyphs,
+      checks masked length == ``len(expected_text.strip())`` (``verifiable=True``);
+      otherwise returns ``(False, False, "")`` so no false mismatch is reported.
+    """
+    expected = str(expected_text or "").strip()
+    actual = str(node.get("text") or "").strip()
+    if not expected:
+        return False, False, actual
+    if node.get("password"):
+        if actual and all(ch in _PASSWORD_MASK_CHARS for ch in actual):
+            return len(actual) == len(expected), True, actual
+        return False, False, ""
+    if not actual:
+        return False, False, ""
+    hint_raw = str(node.get("hint") or "").strip()
+    if hint_raw and fold(actual) == fold(hint_raw) and normalize_field_value(actual) != normalize_field_value(expected):
+        return False, False, ""
+    return normalize_field_value(actual) == normalize_field_value(expected), True, actual
+
+
+def slot_parts(slot: str) -> tuple[str, ...]:
+    """Splits a single or composite slot key (``'slot1+slot2'`` -> ``('slot1', 'slot2')``) (L-047)."""
+    return tuple(p for p in (slot or "").split("+") if p)
+
+
+def resolve_slot_value(slot: str, slot_values: dict[str, str]) -> str:
+    """Resolves a single or composite slot key into the string value to type or display (L-047)."""
+    parts = slot_parts(slot)
+    if not parts:
+        return ""
+    vals = [str(slot_values.get(p) or "").strip() for p in parts]
+    if any(not v for v in vals):
+        return ""
+    return " ".join(vals)
 
 
 _LIST_CONTAINER_CLASSES = ("RecyclerView", "ListView", "GridView")

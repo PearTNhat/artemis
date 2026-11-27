@@ -58,7 +58,7 @@ from langchain_core.messages import (
 from artemis.core.tool_declaration import ToolDeclaration
 from artemis.agents.flash.summarizer import VisualStepSummarizer, build_focus_context
 from artemis.agents.flash.loop_guard import LoopGuard
-from artemis.agents.flash.workflow_hook import FlashWorkflowHook
+from artemis.agents.flash.workflow_hook import FlashWorkflowHook, WORKFLOW_AUTOPILOT_TOOL
 from artemis.agents.flash.workflow_hook import resolve_mode as resolve_workflow_mode
 from artemis.agents.flash.user_choice import (
     ASK_USER_CHOICE_TOOL,
@@ -121,6 +121,7 @@ from artemis.services.llm import (
 from artemis.tools.history import history_tool_declarations
 from artemis.tools.tool_wrapper import tool_result_messages
 from artemis.utils.model_image import shrink_for_model
+from artemis.utils.visualization import draw_som_marks
 from artemis.utils.screen_diff import COMMITMENT_PATTERN
 
 
@@ -379,7 +380,7 @@ class FlashRunner:
         self._user_choice_poll_interval_s = 0.5
         self._reset_user_choice_state()
         # App workflow: record successful runs, replay verified steps (off by default).
-        wf_mode, wf_dir, wf_max_steps = resolve_workflow_mode(wf_cfg)
+        wf_mode, wf_dir, wf_max_steps = resolve_workflow_mode(wf_cfg, ctx=self.ctx)
         self._wf = FlashWorkflowHook(self, wf_mode, wf_dir, wf_max_steps)
         # Stops a run that keeps redoing the same action on the same screen.
         self._loop_guard = LoopGuard()
@@ -402,6 +403,9 @@ class FlashRunner:
         # ``agent_name="flash"`` makes ask_explorer follow ``explorer.flash_mode``
         # (the Flash profile knob) instead of the Pro profile's tier.
         self.executor = McpActionExecutor(ctx, self.controller, agent_name="flash")
+        self.executor.task_goal = goal
+        self._typed_field_history: list[dict[str, str]] = []
+        self._reminded_missing_literals: bool = False
         self.summarizer = (
             VisualStepSummarizer(
                 ctx,
@@ -479,6 +483,8 @@ class FlashRunner:
             tools.append(LOOK_AT_SCREEN_TOOL)
         if getattr(self, "user_choice_enabled", False):
             tools.append(ASK_USER_CHOICE_TOOL)
+        if getattr(getattr(self, "_wf", None), "mode", "off") == "replay":
+            tools.append(WORKFLOW_AUTOPILOT_TOOL)
         tools.append(REPORT_TASK_STATUS_TOOL)
         # With an actuator installed, drop declarations for device actions the
         # backend does not implement (and append its extension tools); without
@@ -621,6 +627,7 @@ class FlashRunner:
         is_final: bool = False,
         previous_turn_silent: bool = False,
         scrollable: bool | None = None,
+        elements: list[dict] | None = None,
     ) -> HumanMessage:
         """Builds this turn's observation tail (Pro observation shape).
 
@@ -638,13 +645,23 @@ class FlashRunner:
         # on every turn.
         obs_header = f"# CURRENT OBSERVATION [{ledger.elapsed_label()}]"
         if scrollable is True:
-            obs_header += "\n[Scroll: scrollable container detected]"
+            edge_fn = getattr(getattr(self, "executor", None), "scroll_edge_state", None)
+            edge = edge_fn() if callable(edge_fn) else None
+            if edge == "top":
+                obs_header += "\n[Scroll: hit TOP edge (swipe down had no effect) — use direction='up' to scroll DOWN]"
+            elif edge == "bottom":
+                obs_header += "\n[Scroll: hit BOTTOM edge (swipe up had no effect) — use direction='down' to scroll UP]"
+            else:
+                obs_header += "\n[Scroll: scrollable container detected]"
         elif scrollable is False:
             has_xml = bool(xml_list and xml_list.strip() and "Not available" not in xml_list)
             if has_xml:
                 obs_header += "\n[Scroll: fixed layout (no scrollable container — scrolling is unlikely to reveal anything)]"
             else:
                 obs_header += "\n[Scroll: unknown]"
+        progress_line = self._typed_progress_line(elements)
+        if progress_line:
+            obs_header += f"\n{progress_line}"
 
         blocks: list[dict] = [
             {"type": "text", "text": obs_header}
@@ -653,10 +670,15 @@ class FlashRunner:
             img_bytes = None
             blocks.append({"type": "text", "text": TEXT_ONLY_NOTE})
         if img_bytes:
-            # Only the model's copy shrinks; OCR, guards and traces keep the original.
+            # Only the model's copy gets SoM marks and shrinks; OCR, guards and traces keep the original.
             image_cfg = getattr(self, "model_image_cfg", None)
-            if image_cfg is not None and getattr(image_cfg, "max_side", 0):
-                img_bytes = shrink_for_model(img_bytes, image_cfg.max_side, image_cfg.jpeg_quality)
+            max_side = getattr(image_cfg, "max_side", 0) if image_cfg is not None else 0
+            jpeg_q = getattr(image_cfg, "jpeg_quality", 75) if image_cfg is not None else 75
+            marks_mode = getattr(image_cfg, "marks", "unlabeled") if image_cfg is not None else "unlabeled"
+            if marks_mode == "unlabeled" and elements:
+                img_bytes = draw_som_marks(img_bytes, elements, max_side=max_side, jpeg_quality=jpeg_q)
+            elif max_side:
+                img_bytes = shrink_for_model(img_bytes, max_side, jpeg_q)
             img_b64 = base64.b64encode(img_bytes).decode("utf-8")
             blocks.append({"type": "text", "text": "--- Current Screenshot ---"})
             blocks.append(self._image_block(img_b64))
@@ -1203,11 +1225,20 @@ class FlashRunner:
         if wf_hook is not None and getattr(wf_hook, "_in_autopilot", False):
             loop_guard = None  # the autopilot only moves forward on its own
         loop_pre = getattr(self.ctx, "last_raw_observation", None) if loop_guard is not None else None
+        pre_raw_obs = getattr(self.ctx, "last_raw_observation", None)
         try:
             exec_result = await self.executor.execute(
                 name, args, tc_id, state, index_elements=index_elements, skip_observe=skip_observe,
                 verify_live_target=verify_live_target,
             )
+            if name == "input_text" and getattr(exec_result, "status", "") == "success":
+                self._record_typed_field_entry(
+                    args,
+                    index_elements=index_elements,
+                    state=state,
+                    pre_raw=loop_pre or pre_raw_obs,
+                    exec_result=exec_result,
+                )
             turn.last_recovered_screen_changed = bool(
                 (getattr(exec_result, "metadata", None) or {}).get("recovered_screen_changed")
             )
@@ -1600,6 +1631,51 @@ class FlashRunner:
                     )
                 return None, pre_screenshot_bytes, xml_list, action_sequence
 
+            if name == "workflow_autopilot":
+                wf_hook = getattr(self, "_wf", None)
+                decision = str(args.get("decision") or "").strip().lower()
+                if wf_hook is None or decision not in ("proceed", "manual"):
+                    messages.append(
+                        ToolMessage(
+                            tool_call_id=tc_id,
+                            name=name,
+                            content="Invalid workflow_autopilot decision. Use 'proceed' or 'manual'.",
+                            status="error",
+                        )
+                    )
+                    continue
+                wf_hook.set_deviation_decision(decision)
+                if decision == "proceed":
+                    messages.append(
+                        ToolMessage(
+                            tool_call_id=tc_id,
+                            name=name,
+                            content="Workflow autopilot approved; resuming recorded steps on the next check.",
+                            status="success",
+                        )
+                    )
+                    for rem_tc in tool_calls[idx + 1:]:
+                        rem_id = rem_tc.get("id") or str(uuid.uuid4())
+                        rem_name = rem_tc.get("name", "").split(":")[-1]
+                        messages.append(
+                            ToolMessage(
+                                tool_call_id=rem_id,
+                                name=rem_name,
+                                content="Action skipped: handing over immediately to approved workflow autopilot.",
+                                status="error",
+                            )
+                        )
+                    return None, pre_screenshot_bytes, xml_list, action_sequence
+                messages.append(
+                    ToolMessage(
+                        tool_call_id=tc_id,
+                        name=name,
+                        content="Workflow autopilot disabled for this run; continuing in manual AI mode.",
+                        status="success",
+                    )
+                )
+                continue
+
             if name == "ask_user_choice":
                 ended_turn, pre_screenshot_bytes, xml_list = await self._handle_ask_user_choice(
                     args=args,
@@ -1638,6 +1714,68 @@ class FlashRunner:
 
             if name == "report_task_status" and self._reject_completion_with_open_choice(args, tc_id, tool_calls, idx, messages):
                 return None, pre_screenshot_bytes, xml_list, action_sequence
+
+            if name == "report_task_status" and str(args.get("status", "")).lower() == "completed":
+                consume_mm = getattr(self.executor, "consume_unfixed_typed_mismatches", None)
+                unfixed = consume_mm() if callable(consume_mm) else []
+                if unfixed:
+                    details = "; ".join(
+                        f"field '{m.get('label') or 'input'}' holds '{m['actual']}' instead of '{m['expected']}'"
+                        for m in unfixed
+                    )
+                    messages.append(
+                        ToolMessage(
+                            tool_call_id=tc_id,
+                            name="report_task_status",
+                            content=(
+                                f"Completion not accepted yet (L-051): {details}. "
+                                "Fix the field by clearing it (clear_exist=true) and typing the right value, "
+                                "or explain why the current value is intended and report again."
+                            ),
+                            status="error",
+                        )
+                    )
+                    for rem_tc in tool_calls[idx + 1:]:
+                        rem_id = rem_tc.get("id") or str(uuid.uuid4())
+                        rem_name = rem_tc.get("name", "").split(":")[-1]
+                        messages.append(
+                            ToolMessage(
+                                tool_call_id=rem_id,
+                                name=rem_name,
+                                content="Action skipped: fix or confirm the mismatched field before completing.",
+                                status="error",
+                            )
+                        )
+                    return None, pre_screenshot_bytes, xml_list, action_sequence
+
+                missing_literals = self._consume_missing_requested_literals(state, xml_list)
+                if missing_literals:
+                    missing_desc = ", ".join(repr(v) for v in missing_literals[:4])
+                    first_missing = missing_literals[0]
+                    messages.append(
+                        ToolMessage(
+                            tool_call_id=tc_id,
+                            name="report_task_status",
+                            content=(
+                                f"Completion not accepted yet (L-058): the task asks for '{first_missing}' "
+                                f"(missing: {missing_desc}) which is not on the screen and was never typed; "
+                                "finish entering it or explain why it is not needed and report again."
+                            ),
+                            status="error",
+                        )
+                    )
+                    for rem_tc in tool_calls[idx + 1:]:
+                        rem_id = rem_tc.get("id") or str(uuid.uuid4())
+                        rem_name = rem_tc.get("name", "").split(":")[-1]
+                        messages.append(
+                            ToolMessage(
+                                tool_call_id=rem_id,
+                                name=rem_name,
+                                content="Action skipped: complete or explain missing requested data before finishing.",
+                                status="error",
+                            )
+                        )
+                    return None, pre_screenshot_bytes, xml_list, action_sequence
 
             if name == "report_task_status":
                 probed = await self._probe_unseen_content(
@@ -1724,6 +1862,9 @@ class FlashRunner:
                     break
             elif name in action_names:
                 actions_executed_in_burst += 1
+                wf_hook = getattr(self, "_wf", None)
+                if wf_hook is not None and hasattr(wf_hook, "note_ai_manual_override"):
+                    wf_hook.note_ai_manual_override()
                 if args.get("target_text") or getattr(turn, "last_recovered_screen_changed", False):
                     # target_text or L-043 keyboard dismissal altered the screen;
                     # mark has_waited so subsequent actions with stale indices/coords stop.
@@ -1875,6 +2016,294 @@ class FlashRunner:
             )
         )
         return new_bytes, new_xml, new_sequence
+
+    def _record_typed_field_entry(
+        self,
+        args: dict,
+        *,
+        index_elements: list[dict] | None = None,
+        state: State | None = None,
+        pre_raw: dict | None = None,
+        exec_result: Any = None,
+    ) -> None:
+        """Records ``(field_label, typed_text)`` after a successful ``input_text`` (L-059)."""
+        raw_val = str((args or {}).get("text") or "").strip()
+        if not raw_val:
+            return
+        from artemis.workflow.fingerprint import normalize
+        from artemis.workflow.targets import fold, is_editable, node_label, normalize_field_value, visible_app_nodes
+
+        meta = getattr(exec_result, "metadata", None) or {}
+        pts = meta.get("target_coordinates")
+        sem = meta.get("target_semantics") or {}
+
+        label = ""
+        field_key = ""
+        els = index_elements if index_elements is not None else getattr(state, "indexed_elements", None)
+        raw_target = (args or {}).get("target")
+        target_el: dict | None = None
+        if isinstance(raw_target, (int, str)) and str(raw_target).isdigit() and isinstance(els, list):
+            t_idx = int(raw_target)
+            if 1 <= t_idx <= len(els):
+                target_el = els[t_idx - 1]
+                cand_lbl = str(
+                    target_el.get("nearby_label") or target_el.get("hint") or target_el.get("text") or ""
+                ).strip()
+                if cand_lbl and cand_lbl != "input field" and fold(cand_lbl) != fold(raw_val):
+                    label = cand_lbl
+
+        if not label and sem.get("target_text"):
+            cand_s = str(sem.get("target_text")).strip()
+            if cand_s and fold(cand_s) != fold(raw_val):
+                label = cand_s
+
+        def _locate_in_raw(raw_obs: dict | None) -> dict | None:
+            if not isinstance(raw_obs, dict) or not raw_obs.get("elements"):
+                return None
+            norm = normalize(raw_obs["elements"], width=raw_obs.get("width"), height=raw_obs.get("height"))
+            fields = [n for n in visible_app_nodes(norm) if is_editable(n)]
+            if not fields:
+                return None
+            if isinstance(pts, (list, tuple)) and len(pts) == 2:
+                x, y = int(pts[0]), int(pts[1])
+                hits = [
+                    f for f in fields
+                    if f["bounds"][0] - 10 <= x <= f["bounds"][2] + 10 and f["bounds"][1] - 10 <= y <= f["bounds"][3] + 10
+                ]
+                if hits:
+                    return min(hits, key=lambda f: (f["bounds"][2] - f["bounds"][0]) * (f["bounds"][3] - f["bounds"][1]))
+            if target_el and isinstance(target_el.get("center"), (list, tuple)) and len(target_el["center"]) == 2:
+                w = raw_obs.get("width") or 1000
+                h = raw_obs.get("height") or 1000
+                cx = int(target_el["center"][0] * 1000.0 / w)
+                cy = int(target_el["center"][1] * 1000.0 / h)
+                hits = [
+                    f for f in fields
+                    if f["bounds"][0] - 10 <= cx <= f["bounds"][2] + 10 and f["bounds"][1] - 10 <= cy <= f["bounds"][3] + 10
+                ]
+                if hits:
+                    return min(hits, key=lambda f: (f["bounds"][2] - f["bounds"][0]) * (f["bounds"][3] - f["bounds"][1]))
+            focused = [f for f in fields if f.get("focused")]
+            return focused[0] if len(focused) == 1 else (fields[0] if len(fields) == 1 else None)
+
+        post_raw = getattr(getattr(self, "ctx", None), "last_raw_observation", None)
+        live_node = _locate_in_raw(post_raw) or _locate_in_raw(pre_raw)
+        is_pw = bool(live_node and live_node.get("password"))
+        stored_text = raw_val
+        if live_node is not None:
+            rid = str(live_node.get("resource-id") or "").strip()
+            hint = str(live_node.get("hint") or "").strip()
+            nl = str(node_label(live_node) or "").strip()
+            if not label:
+                label = hint or (nl if fold(nl) != fold(raw_val) else "") or (rid.rsplit("/", 1)[-1] if rid else "")
+            field_key = f"rid:{rid}|hint:{hint}" if (rid or hint) else f"bounds:{tuple(live_node.get('bounds') or ())}"
+            if not is_pw:
+                live_txt = str(live_node.get("text") or "").strip()
+                if live_txt and (not hint or fold(live_txt) != fold(hint)):
+                    stored_text = live_txt
+        elif target_el is not None:
+            rid = str(target_el.get("resource_id") or "").strip()
+            field_key = f"idx:{rid or label or tuple(target_el.get('bounds') or ())}"
+        if not label:
+            label = "input"
+        if not field_key:
+            field_key = f"lbl:{label}|{normalize_field_value(raw_val)}"
+
+        history = getattr(self, "_typed_field_history", None)
+        if not isinstance(history, list):
+            history = []
+            self._typed_field_history = history
+        entry = {"key": field_key, "label": label, "text": stored_text, "password": "1" if is_pw else ""}
+        replaced = False
+        for i, prev in enumerate(history):
+            if prev.get("key") == field_key:
+                history[i] = entry
+                replaced = True
+                break
+        if not replaced:
+            history.append(entry)
+            del history[:-12]
+
+    @staticmethod
+    def _literal_in_blob(expected: str, blob: str) -> bool:
+        from artemis.workflow.targets import normalize_field_value
+
+        exp_norm = normalize_field_value(expected)
+        if not exp_norm or not blob:
+            return False
+        if exp_norm in blob:
+            return True
+        if exp_norm.isdigit() and exp_norm.startswith("0") and len(exp_norm) >= 8:
+            return exp_norm[1:] in blob
+        return False
+
+    def _screen_text_blob(self, state: State | None, xml_list: str | None = None, *, editable_ok: bool = True) -> str:
+        from artemis.workflow.targets import normalize_field_value
+
+        parts: list[str] = []
+        els = getattr(state, "indexed_elements", None) if state is not None else None
+        if isinstance(els, list):
+            for el in els:
+                if not isinstance(el, dict) or el.get("is_keyboard"):
+                    continue
+                if not editable_ok and (
+                    "EditText" in str(el.get("class") or "")
+                    or str(el.get("editable") or "").lower() == "true"
+                ):
+                    continue
+                for k in ("text", "hint", "nearby_label"):
+                    v = str(el.get(k) or "").strip()
+                    if v:
+                        parts.append(normalize_field_value(v))
+        raw_obs = getattr(getattr(self, "ctx", None), "last_raw_observation", None)
+        if isinstance(raw_obs, dict) and isinstance(raw_obs.get("elements"), list):
+            for n in raw_obs["elements"]:
+                if not isinstance(n, dict):
+                    continue
+                if not editable_ok and ("EditText" in str(n.get("class") or "") or str(n.get("editable") or "").lower() == "true"):
+                    continue
+                for k in ("text", "content-desc"):
+                    v = str(n.get(k) or "").strip()
+                    if v:
+                        parts.append(normalize_field_value(v))
+        if xml_list:
+            parts.append(normalize_field_value(xml_list))
+        return "".join(p for p in parts if p)
+
+    def _consume_missing_requested_literals(self, state: State | None, xml_list: str | None) -> list[str]:
+        """Checks once before ``completed`` whether any explicit numeric/quoted
+        literal from the goal was neither typed nor visible on screen (L-058)."""
+        if getattr(self, "_reminded_missing_literals", False):
+            return []
+        from artemis.workflow.targets import extract_requested_literals, normalize_field_value, resolve_slot_value
+
+        literals = extract_requested_literals(getattr(self, "goal", "") or "")
+        if not literals:
+            return []
+
+        screen_blob = self._screen_text_blob(state, xml_list, editable_ok=True)
+        typed_items: list[str] = [
+            str(v or "") for v in getattr(getattr(self, "executor", None), "_typed_values", []) or []
+        ]
+        typed_items.extend(
+            str(e.get("text") or "") for e in getattr(self, "_typed_field_history", []) or []
+        )
+        wf_hook = getattr(self, "_wf", None)
+        ap = getattr(wf_hook, "_autopilot", None) if wf_hook is not None else None
+        if ap is not None and getattr(wf_hook, "slot_values", None):
+            for s in getattr(ap, "_typed_ok", ()) or ():
+                sv = resolve_slot_value(s, wf_hook.slot_values)
+                if sv:
+                    typed_items.append(sv)
+        typed_norms = [normalize_field_value(v) for v in typed_items if v]
+        typed_blob = "".join(n for n in typed_norms if n)
+
+        missing: list[str] = []
+        for lit in literals:
+            lit_norm = normalize_field_value(lit)
+            if not lit_norm:
+                continue
+            in_screen = self._literal_in_blob(lit, screen_blob)
+            in_typed = any(lit_norm == tn or lit_norm in tn for tn in typed_norms) or (
+                bool(typed_blob) and lit_norm in typed_blob
+            )
+            if not in_screen and not in_typed:
+                missing.append(lit)
+
+        if missing:
+            self._reminded_missing_literals = True
+        return missing
+
+    def _typed_progress_line(self, elements: list[dict] | None = None) -> str:
+        """Builds a compact status line of typed fields and requested literals
+        for the current turn's observation header (L-059)."""
+        from artemis.workflow.targets import extract_requested_literals, fold, normalize_field_value
+
+        literals = extract_requested_literals(getattr(self, "goal", "") or "")
+        history = list(getattr(self, "_typed_field_history", None) or ())
+        if not literals and not history:
+            return ""
+
+        # Refresh recorded field values against live editable nodes when still on a form.
+        live_by_key: dict[str, str] = {}
+        raw_obs = getattr(getattr(self, "ctx", None), "last_raw_observation", None)
+        if isinstance(raw_obs, dict) and raw_obs.get("elements"):
+            try:
+                from artemis.workflow.fingerprint import normalize
+                from artemis.workflow.targets import is_editable, visible_app_nodes
+
+                norm = normalize(raw_obs["elements"], width=raw_obs.get("width"), height=raw_obs.get("height"))
+                for n in visible_app_nodes(norm):
+                    if not is_editable(n) or n.get("password"):
+                        continue
+                    rid = str(n.get("resource-id") or "").strip()
+                    hint = str(n.get("hint") or "").strip()
+                    fk = f"rid:{rid}|hint:{hint}" if (rid or hint) else f"bounds:{tuple(n.get('bounds') or ())}"
+                    txt = str(n.get("text") or "").strip()
+                    if hint and fold(txt) == fold(hint):
+                        txt = ""
+                    live_by_key[fk] = txt
+            except Exception:
+                pass
+
+        active_entries: list[dict[str, str]] = []
+        for entry in history:
+            fk = entry.get("key") or ""
+            item = dict(entry)
+            if fk in live_by_key and not item.get("password"):
+                if not live_by_key[fk]:
+                    continue  # field on current form was cleared
+                item["text"] = live_by_key[fk]
+            active_entries.append(item)
+
+        if not literals and not active_entries:
+            return ""
+
+        sections: list[str] = []
+        if active_entries:
+            typed_parts = [
+                f"{'\"••••\"' if e.get('password') else repr(e['text'])} → {e.get('label') or 'input'}"
+                for e in active_entries[-6:]
+            ]
+            sections.append("Typed so far: " + " · ".join(typed_parts))
+
+        if literals:
+            # Build screen non-editable text from elements / raw_obs for "✓ on screen"
+            disp_parts: list[str] = []
+            if isinstance(elements, list):
+                for el in elements:
+                    if not isinstance(el, dict) or el.get("is_keyboard"):
+                        continue
+                    v = str(el.get("text") or "").strip()
+                    if v:
+                        disp_parts.append(normalize_field_value(v))
+            disp_blob = "".join(p for p in disp_parts if p)
+
+            lit_parts: list[str] = []
+            for lit in literals[:6]:
+                lit_norm = normalize_field_value(lit)
+                matched_entry = next(
+                    (
+                        e for e in active_entries
+                        if not e.get("password")
+                        and (
+                            lit_norm in normalize_field_value(e.get("text") or "")
+                            or normalize_field_value(e.get("text") or "") == lit_norm
+                        )
+                    ),
+                    None,
+                )
+                if matched_entry is not None:
+                    lit_parts.append(f'"{lit}" ✓ typed ({matched_entry.get("label") or "input"})')
+                elif any(e.get("password") and normalize_field_value(e.get("text") or "") == lit_norm for e in active_entries):
+                    lit_parts.append(f'"{lit}" ✓ typed (password)')
+                elif disp_blob and self._literal_in_blob(lit, disp_blob):
+                    lit_parts.append(f'"{lit}" ✓ on screen')
+                else:
+                    lit_parts.append(f'"{lit}" ✗ not entered yet')
+            sections.append("Requested values: " + " · ".join(lit_parts))
+
+        return "[" + " | ".join(sections) + "]"
 
     def _consume_turn_timing(self) -> dict[str, Any]:
         """Returns the current turn's model/prep timing once, marking it consumed."""
@@ -2721,6 +3150,7 @@ class FlashRunner:
                     # call (or thinking only) earns a one-line reminder, no bounce.
                     previous_turn_silent=previous_turn_silent,
                     scrollable=getattr(state, "screen_scrollable", None),
+                    elements=getattr(state, "indexed_elements", None),
                 )
                 turn_notices = [n for n in pending_notices if n != _MALFORMED_REPLY_NOTICE]
                 pending_notices = []

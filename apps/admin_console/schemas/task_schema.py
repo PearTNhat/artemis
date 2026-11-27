@@ -37,6 +37,7 @@ class RunRequest(BaseModel):
     previous_session_id: str | None = None
     ask_on_choice: bool | None = None
     ask_when_stuck: bool | None = None
+    workflow: str | None = None
 
 
 class ReplayRequest(BaseModel):

@@ -191,6 +191,7 @@ async def run_task(request: RunRequest):
         explorer_mode=request.explorer_mode,
         ask_on_choice=request.ask_on_choice,
         ask_when_stuck=request.ask_when_stuck,
+        workflow=request.workflow,
         locked_app_package=request.locked_app_package,
         app_path=request.app_path,
         device_serial=target_serial,

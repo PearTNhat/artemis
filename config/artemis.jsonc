@@ -7,11 +7,11 @@
   // 1. Global Default Model (Applied to all sub-agents unless overridden below)
   // ------------------------------------------------------------------------------
   "default": {
-    "provider": "google",
-    "model": "gemini-3.1-flash-lite",
+    "provider": "openai",
+    "model": "qwen3-vl:8b-32k",
     "fallback": {
-      "provider": "google",
-      "model": "gemini-3.1-flash-lite"
+      "provider": "openai",
+      "model": "qwen3-vl:8b-32k"
     }
   },
 
@@ -36,7 +36,7 @@
     },
     "cost-saving": {
       "provider": "google",
-      "model": "gemini-3.1-flash-lite",
+      "model": "gemini-3.5-flash-lite",
       "fallback": { "provider": "google", "model": "gemini-3.1-flash-lite" }
     },
     "local-ollama": {
@@ -73,11 +73,11 @@
     // To achieve accurate [x, y] point and bounding box localization, this node MUST use specialized Gemini ER (Embodied Reasoning / Robotics) models:
     // e.g., "gemini-robotics-er-2-preview". Non-ER models will fail spatial coordinate detection.
     "object_detector": {
-      "provider": "google",
-      "model": "gemini-3.1-flash-lite",
+      "provider": "openai",
+      "model": "qwen3-vl:8b-32k",
       "fallback": {
-        "provider": "google",
-        "model": "gemini-3.1-flash-lite"
+        "provider": "openai",
+        "model": "qwen3-vl:8b-32k"
       }
     },
 
@@ -94,11 +94,11 @@
 
     // 🔽 Hopper: Fast lightweight package name locator
     "hopper": {
-      "provider": "google",
-      "model": "gemini-3.1-flash-lite",
+      "provider": "openai",
+      "model": "qwen3-vl:8b-32k",
       "fallback": {
-        "provider": "google",
-        "model": "gemini-3.1-flash-lite"
+        "provider": "openai",
+        "model": "qwen3-vl:8b-32k"
       }
     },
 
@@ -138,13 +138,13 @@
     // Best for: Simple, fast, deterministic tasks; runs unbounded by default.
     // Execution: Observe-Think-Act single LLM reactive loop without graph overhead.
     "flash": {
-      "workflow": {"mode": "off", "dir": "/tmp/claude-1000/-home-nhat-Workspace-artemis/cd939204-882f-4177-ad1c-38c6abb977b3/scratchpad/wf_gem"},
       "max_turns": 0, // Maximum reactive turns before stopping (0 = unlimited; history is bounded by transcript compression, not by a turn cap)
       "explorer_mode": "flash", // Explorer tier for the Flash runner: 'flash' | 'pro' | 'ultra' (see top-level "explorer")
       // 🖼️ Screenshot sent to the AI each turn (only the AI's copy)
       "model_image": {
         "max_side": 768, // Qwen-VL image tokens grow with pixels: 768 ≈ 270 tokens vs 1280 ≈ 720, still 13/13 on the reading bench
-        "jpeg_quality": 75
+        "jpeg_quality": 75,
+        "marks": "unlabeled" // 'unlabeled' (draw Set-of-Mark [index] only on unlabeled controls, inputs, OCR gap-fill) | 'off'
       },
       "element_list": "compact", // UI list: 'compact' (lean, lists unlabeled icons) | 'full'
       // 🔤 Local OCR (ONNX, on the host), merged XML-first into the element list:
@@ -166,7 +166,7 @@
       // replacing images only after strictly objective, high-density summaries are ready.
       "step_summarizer": {
         "enabled": false, // Whether background step summarization is active (Gemini-only)
-        "model": "gemini-3.1-flash-lite", // Lightweight model for fast background inference
+        "model": "gemini-3.5-flash-lite", // Lightweight model for fast background inference
         "prune_history_xml": true // Prune outdated heavy XML trees from historical steps
       },
       // 🙋 AI asks the user (pick among comparable items, or when stuck) instead of guessing.

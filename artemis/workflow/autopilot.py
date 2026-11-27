@@ -34,6 +34,7 @@ from artemis.workflow.store import Edge, Workflow
 from third_party.mobile_use.utils.logger import get_logger
 from artemis.workflow.targets import (
     anchors_present,
+    check_field_value,
     editable_field_keys,
     field_has_value,
     field_target_matches,
@@ -42,9 +43,12 @@ from artemis.workflow.targets import (
     keyboard_box,
     keyboard_covers,
     node_label,
+    normalize_field_value,
     other_window_boxes,
     resolve,
+    resolve_slot_value,
     safe_swipe_in_norm,
+    slot_parts,
     typed_slots,
     visible_app_nodes,
 )
@@ -300,7 +304,7 @@ class Autopilot:
 
     def _slot_in_own_field(self, slot: str, value: str, node_id: str, norm) -> bool:
         """True only when autopilot itself typed & verified ``slot`` in this run, or
-        the recorded field for ``slot`` (by id / hint) is visible and holds ``value`` (L-036)."""
+        the recorded field for ``slot`` (by id / hint) holds exact normalized ``value`` (L-036, L-045)."""
         if slot in self._typed_ok:
             return True
         targets = [
@@ -314,33 +318,56 @@ class Autopilot:
                 for e in self.wf.edges
                 if e.tool in INPUT_TOOLS and e.slot == slot and e.target is not None
             ]
-        v = fold(value)
+        want = normalize_field_value(value)
+        if not want:
+            return False
         identified = [t for t in targets if not t.focused_editable and (t.resource_id or t.hint)]
         if not identified:
-            return slot in typed_slots(norm, {slot: value})
+            return any(
+                check_field_value(n, value)[0]
+                for n in visible_app_nodes(norm or [])
+                if is_editable(n)
+            )
         for t in identified:
             field = self._field_for_target(t, norm)
-            if field is not None and v in fold(str(field.get("text") or "")):
+            if field is not None and check_field_value(field, value)[0]:
                 return True
         return False
 
     def _held_slots(self, node_id: str, norm) -> set[str]:
-        return {
+        held = {
             slot
             for slot, val in self.slot_values.items()
             if val and self._slot_in_own_field(slot, val, node_id, norm)
         }
+        # Support composite slots such as "slot1+slot2" (L-047) in both directions.
+        composite_slots = {e.slot for e in self.wf.edges if e.slot and "+" in e.slot}
+        for comp in composite_slots:
+            val = resolve_slot_value(comp, self.slot_values)
+            parts = slot_parts(comp)
+            if not val or not parts:
+                continue
+            if self._slot_in_own_field(comp, val, node_id, norm) or all(p in held for p in parts):
+                held.add(comp)
+                held.update(parts)
+        return held
 
     def _all_slots_completed(self) -> bool:
-        """True when the workflow defines slot steps and every active slot has had
-        at least one step completed in this run (L-042)."""
+        """True when the workflow defines slot steps and every active atomic slot
+        has had at least one step completed in this run (L-042, L-047)."""
         active_slots = {
-            e.slot for e in self.wf.edges if e.state == "active" and e.kind == "slot" and e.slot
+            p
+            for e in self.wf.edges
+            if e.state == "active" and e.kind == "slot" and e.slot
+            for p in slot_parts(e.slot)
         }
         if not active_slots:
             return False
         done_slots = {
-            e.slot for e in self.wf.edges if e.id in self._done and e.slot
+            p
+            for e in self.wf.edges
+            if e.id in self._done and e.slot
+            for p in slot_parts(e.slot)
         }
         return active_slots <= done_slots
 
@@ -390,7 +417,7 @@ class Autopilot:
         # exact field recorded for that slot (never in an unrelated field, L-036).
         held = self._held_slots(node_id, norm)
         for e in edges:
-            value = self.slot_values.get(e.slot, "") if e.slot else ""
+            value = resolve_slot_value(e.slot, self.slot_values) if e.slot else ""
             if e.slot and not value:
                 reasons.append(f"value for {e.slot} unknown for this task")
                 continue
@@ -409,9 +436,13 @@ class Autopilot:
                 # Never type over a value this run already typed for another
                 # field (a wrong recording would overwrite it, L-029).
                 held_text = fold(str(el.get("text") or ""))
+                own_parts = set(slot_parts(e.slot))
                 clash = [
                     k for k in self._typed_ok
-                    if k != e.slot and self.slot_values.get(k) and fold(self.slot_values[k]) in held_text
+                    if k != e.slot
+                    and k not in own_parts
+                    and resolve_slot_value(k, self.slot_values)
+                    and fold(resolve_slot_value(k, self.slot_values)) in held_text
                 ]
                 if clash:
                     reasons.append(f"field already holds {', '.join(sorted(clash))} typed in this run")
@@ -465,18 +496,19 @@ class Autopilot:
         if norm is None or fp is None:
             return False
         if edge.tool in INPUT_TOOLS:
-            v = fold(value)
+            if not normalize_field_value(value):
+                return False
             if edge.target is not None and not edge.target.focused_editable:
-                # The value must sit in the recorded field, not just anywhere.
+                # Exact normalized match (or mask length for password fields, L-045/L-049).
                 field = self._field_for_target(edge.target, norm)
                 if field is not None:
-                    return v in fold(str(field.get("text") or ""))
+                    return check_field_value(field, value)[0]
                 if edge.target.resource_id or edge.target.hint:
                     return False
             return any(
-                v in fold(str(n.get("text") or ""))
+                check_field_value(n, value)[0]
                 for n in visible_app_nodes(norm)
-                if n.get("editable") or "EditText" in str(n.get("class") or "")
+                if is_editable(n)
             )
         if fp.package != self.wf.package or not is_matchable(fp):
             return False
@@ -485,7 +517,9 @@ class Autopilot:
         # know which screen should come), and the anchors confirm it.
         m = match_screen(fp, self.wf.node_fps(), tau=self.tau, delta=0.0, min_app_tokens=1)
         anchors = anchors_present(edge.anchors, norm)
-        form_ok = bool(anchors and edge.dst and self._matches_form_fields(edge.dst, norm))
+        # Only fall back to form-field matching when destination anchors exist and
+        # actually match; empty edge.anchors provides no independent transition signal.
+        form_ok = bool(edge.anchors and anchors and edge.dst and self._matches_form_fields(edge.dst, norm))
         logger.info(
             f"Autopilot verify {edge.id}: expect {edge.dst}, best {m.node_id} ({m.score:.2f}),"
             f" anchors={'ok' if anchors else 'missing'}, form={'ok' if form_ok else 'no'},"
@@ -493,9 +527,27 @@ class Autopilot:
         )
         return ((m.matched and m.node_id == edge.dst) or form_ok) and anchors
 
+    def _observed_field_node(self, edge: Edge, norm) -> dict[str, Any] | None:
+        """Returns the live editable node for ``edge`` when uniquely identifiable."""
+        if norm is None or edge.tool not in INPUT_TOOLS:
+            return None
+        field = None
+        if edge.target is not None and not edge.target.focused_editable:
+            field = self._field_for_target(edge.target, norm)
+        if field is None:
+            editable = [n for n in visible_app_nodes(norm) if is_editable(n)]
+            if len(editable) == 1:
+                field = editable[0]
+        return field
+
     def _expected_end_values(self) -> list[str]:
         """Task slot values expected to appear on the workflow's end screen (L-039)."""
-        used_slots = {e.slot for e in self.wf.edges if e.kind == "slot" and e.slot}
+        used_slots = {
+            p
+            for e in self.wf.edges
+            if e.kind == "slot" and e.slot
+            for p in slot_parts(e.slot)
+        }
         out: list[str] = []
         seen: set[str] = set()
         for slot, val in self.slot_values.items():
@@ -675,6 +727,18 @@ class Autopilot:
                     self._typed_ok.add(edge.slot)
                 self.total_steps += 1
                 if not verified:
+                    if edge.tool in INPUT_TOOLS:
+                        field_node = self._observed_field_node(edge, vnorm)
+                        if field_node is not None:
+                            matched, verifiable, actual = check_field_value(field_node, value)
+                            if verifiable and not matched:
+                                if field_node.get("password"):
+                                    msg = f"password field holds {len(actual)} masked characters, expected {len(value.strip())}"
+                                else:
+                                    msg = f"field holds '{actual}', not '{value}'"
+                                rep.stop_detail = msg
+                                rep.stop_reason = f"after '{desc}' {msg}"
+                                break
                     rep.stop_reason = f"after '{desc}' the screen is not the recorded next screen"
                     break
                 rep.ran.append(desc + " -> ok")

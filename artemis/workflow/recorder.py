@@ -45,6 +45,7 @@ from artemis.workflow.targets import (
     anchors_for,
     descriptor_for,
     editable_field_keys,
+    extract_requested_literals,
     field_has_value,
     field_target_matches,
     fold,
@@ -55,7 +56,10 @@ from artemis.workflow.targets import (
     keyboard_box,
     node_at,
     node_label,
+    normalize_field_value,
+    resolve_slot_value,
     screen_content_key,
+    slot_parts,
     typed_slots,
     visible_app_nodes,
 )
@@ -309,11 +313,33 @@ def detect_slots(
     return slots
 
 
-def _slot_for_text(text: str, slot_values: dict[str, str]) -> str:
+def _slot_for_text(text: str, slot_values: dict[str, str], goal: str = "") -> str:
     t = (text or "").strip().casefold()
     for name, value in slot_values.items():
         if value and value.strip().casefold() == t:
             return name
+    if not t or not goal or len(slot_values) < 2:
+        return ""
+    typed_norm = " ".join(fold(text).split())
+    if not typed_norm:
+        return ""
+    g_fold = fold(goal)
+    positioned: list[tuple[int, int, str, str]] = []
+    for idx, (name, val) in enumerate(slot_values.items()):
+        vf = " ".join(fold(val).split())
+        if not vf:
+            continue
+        m = re.search(r"(?<!\w)" + re.escape(vf) + r"(?!\w)", g_fold)
+        pos = m.start() if m is not None else g_fold.find(vf)
+        if pos != -1:
+            positioned.append((pos, idx, name, vf))
+    positioned.sort(key=lambda item: (item[0], item[1]))
+    ordered = [(name, vf) for _, _, name, vf in positioned]
+    n_ord = len(ordered)
+    for start in range(n_ord):
+        for end in range(start + 2, n_ord + 1):
+            if " ".join(vf for _, vf in ordered[start:end]) == typed_norm:
+                return "+".join(name for name, _ in ordered[start:end])
     return ""
 
 
@@ -429,7 +455,7 @@ def _box(action: dict[str, Any]) -> tuple[int, int, int, int] | None:
 
 
 def _classify(
-    st: RecordedStep, pre: _Screen, slot_values: dict[str, str]
+    st: RecordedStep, pre: _Screen, slot_values: dict[str, str], *, goal: str = ""
 ) -> tuple[str, str, TargetDescriptor | None, str]:
     """-> (kind, slot, target, key). kind '' means: not an edge."""
     tool = st.tool
@@ -467,7 +493,7 @@ def _classify(
             return "judgement", "", None, ""
         return "nav", "", desc, ""
     if tool in INPUT_TOOLS:
-        slot = _slot_for_text(str(st.args.get("text") or ""), slot_values)
+        slot = _slot_for_text(str(st.args.get("text") or ""), slot_values, goal=goal)
         if not slot:
             return "judgement", "", None, ""
         # Type into the field itself, never into a hint label laid over it.
@@ -532,9 +558,11 @@ def _step_hints(st: RecordedStep, pre: _Screen, values: dict[str, str]) -> tuple
     return _mask_slots(label, values), _mask_slots(desc, values)
 
 
-def _is_slot_step(st: RecordedStep, pre: _Screen | None, values: dict[str, str]) -> bool:
+def _is_slot_step(
+    st: RecordedStep, pre: _Screen | None, values: dict[str, str], *, goal: str = ""
+) -> bool:
     if st.tool in INPUT_TOOLS:
-        return bool(_slot_for_text(str(st.args.get("text") or ""), values))
+        return bool(_slot_for_text(str(st.args.get("text") or ""), values, goal=goal))
     if st.tool in TAP_TOOLS and pre is not None:
         node = node_at(
             pre.norm,
@@ -553,6 +581,7 @@ def _prune_detour_cycles(
     skip: set[int],
     *,
     package: str,
+    goal: str = "",
 ) -> int:
     """Marks no-op detour cycles n_X -> ... -> n_X in ``skip``; returns pruned count."""
     effective = [
@@ -587,7 +616,7 @@ def _prune_detour_cycles(
             if screen_content_key(st_k.post) != pre_key:
                 continue
             if any(
-                j not in skip and _is_slot_step(screens[j][0], screens[j][1], values)
+                j not in skip and _is_slot_step(screens[j][0], screens[j][1], values, goal=goal)
                 for j in range(i, k + 1)
             ):
                 continue
@@ -635,7 +664,7 @@ def _typed_field_key(st: RecordedStep, pre: _Screen) -> tuple[Any, ...] | None:
     return (d.resource_id, d.hint, d.class_name, d.grid if not (d.resource_id or d.hint) else None)
 
 
-def inconsistent_typing(screens: list, values: dict[str, str]) -> str:
+def inconsistent_typing(screens: list, values: dict[str, str], *, goal: str = "") -> str:
     """Why a run's form filling cannot be trusted, or "" (L-029).
 
     For every task value, its LAST typing must still be in that field when the
@@ -646,7 +675,7 @@ def inconsistent_typing(screens: list, values: dict[str, str]) -> str:
     last: dict[str, int] = {}
     for i, (st, pre, _) in enumerate(screens):
         if st.tool in INPUT_TOOLS and st.ok and not st.autopilot and pre is not None:
-            slot = _slot_for_text(str(st.args.get("text") or ""), values)
+            slot = _slot_for_text(str(st.args.get("text") or ""), values, goal=goal)
             if slot:
                 last[slot] = i
 
@@ -682,10 +711,12 @@ def inconsistent_typing(screens: list, values: dict[str, str]) -> str:
         if key is not None:
             combo = (sub_idx, key)
             prev_slot = seen_field_per_submit.get(combo)
-            if prev_slot is not None and fold(values[prev_slot]) != fold(values[slot]):
+            prev_val = resolve_slot_value(prev_slot, values) if prev_slot else ""
+            cur_val = resolve_slot_value(slot, values)
+            if prev_slot is not None and fold(prev_val) != fold(cur_val):
                 label = key[1] or key[0] or key[2] or "input field"
                 return (
-                    f"'{values[prev_slot]}' ({prev_slot}) and '{values[slot]}' ({slot}) were both typed"
+                    f"'{prev_val}' ({prev_slot}) and '{cur_val}' ({slot}) were both typed"
                     f" into the same field ({label})"
                 )
             seen_field_per_submit[combo] = slot
@@ -718,13 +749,220 @@ def inconsistent_typing(screens: list, values: dict[str, str]) -> str:
             field, _ = resolve(desc, scr.norm)
             if field is None:
                 continue
-            if fold(values[slot]) not in fold(str(field.get("text") or "")):
+            expected_val = resolve_slot_value(slot, values)
+            if fold(expected_val) not in fold(str(field.get("text") or "")):
                 label = desc.hint or desc.resource_id or desc.class_name
                 return (
-                    f"'{values[slot]}' ({slot}) is no longer in its field ({label}) when the form is submitted"
+                    f"'{expected_val}' ({slot}) is no longer in its field ({label}) when the form is submitted"
                     f" (it holds '{field.get('text') or ''}'): a later typing overwrote it"
                 )
             break
+    return ""
+
+
+def _loose_key(text: str) -> str:
+    return re.sub(r"[^0-9a-z]+", "", fold(text))
+
+
+def _normalized_value_matches(expected: str, blob: str, loose_blob: str = "") -> bool:
+    exp_norm = normalize_field_value(expected)
+    if exp_norm and blob and exp_norm in blob:
+        return True
+    # Local phone format ("0916..." displayed as "+84 916..." or dropped leading 0).
+    if exp_norm.isdigit() and exp_norm.startswith("0") and len(exp_norm) >= 8:
+        if exp_norm[1:] in blob or (loose_blob and exp_norm[1:] in loose_blob):
+            return True
+    if loose_blob:
+        exp_loose = _loose_key(expected)
+        if exp_loose and exp_loose in loose_blob:
+            return True
+    return False
+
+
+def _unverified_run_outcome(
+    screens: list,
+    values: dict[str, str],
+    *,
+    goal: str = "",
+    is_merge: bool = False,
+) -> str:
+    """Verifies that all requested task data actually completed cleanly before
+    recording/merging a workflow (L-057).
+
+    Returns ``""`` when ok, or a short reason skipping recording when:
+    1) A requested value (literal in ``goal`` or slot value) was neither acted
+       (typed/tapped) nor shown on the outcome screen, OR the outcome screen
+       echoes saved non-editable values yet drops one non-password value; or
+    2) A kept typed slot/literal landed in a field whose label clashes with
+       another editable field whose label immediately precedes that value in ``goal``.
+    """
+    expected: list[str] = []
+    seen_exp: set[str] = set()
+    for val in list(extract_requested_literals(goal)) + [
+        resolve_slot_value(s, values) for s in (values or {})
+    ]:
+        v = str(val or "").strip()
+        vn = normalize_field_value(v)
+        if v and vn and vn not in seen_exp:
+            seen_exp.add(vn)
+            expected.append(v)
+
+    if not screens:
+        return ""
+
+    g_fold = fold(goal)
+    typed_norms: list[str] = []
+    typed_loose: list[str] = []
+    tapped_norms: list[str] = []
+    tapped_loose: list[str] = []
+    password_typed_norms: set[str] = set()
+    _generic_field_words = frozenset({"text", "input", "search", "field", "value", "enter", "type"})
+
+    for st, pre, _ in screens:
+        if not st.ok or pre is None:
+            continue
+        if st.tool in TAP_TOOLS:
+            pt = _point(st.action)
+            t_node = node_at(
+                pre.norm,
+                point=pt,
+                box=_box(st.action),
+                resource_id=str(st.action.get("target_resource_id") or ""),
+            )
+            tap_lbl = (
+                (node_label(t_node) if t_node is not None else "")
+                or str(st.action.get("target_text") or "").strip()
+            )
+            if not tap_lbl and pt is not None:
+                # Composite tap container: collect labels of child nodes enclosing the tap point.
+                px, py = pt
+                child_lbls = [
+                    node_label(n)
+                    for n in visible_app_nodes(pre.norm)
+                    if node_label(n)
+                    and n["bounds"][0] - 8 <= px <= n["bounds"][2] + 8
+                    and n["bounds"][1] - 8 <= py <= n["bounds"][3] + 8
+                ]
+                tap_lbl = " ".join(child_lbls)
+            tn = normalize_field_value(tap_lbl)
+            tl = _loose_key(tap_lbl)
+            if tn:
+                tapped_norms.append(tn)
+            if tl:
+                tapped_loose.append(tl)
+            continue
+        if st.tool not in INPUT_TOOLS:
+            continue
+        raw_val = str(st.args.get("text") or "").strip()
+        if not raw_val:
+            continue
+        val_norm = normalize_field_value(raw_val)
+        if val_norm:
+            typed_norms.append(val_norm)
+            typed_loose.append(_loose_key(raw_val))
+        fields = [n for n in visible_app_nodes(pre.norm) if is_editable(n)]
+        t_node = node_at(pre.norm, point=_point(st.action), box=_box(st.action))
+        if t_node is None or not is_editable(t_node):
+            t_node = fields[0] if len(fields) == 1 else None
+        if t_node is None:
+            continue
+        if t_node.get("password"):
+            if val_norm:
+                password_typed_norms.add(val_norm)
+        t_lbl_raw = str(t_node.get("hint") or node_label(t_node) or "").strip()
+        t_lbl = fold(t_lbl_raw)
+        val_fold = fold(raw_val)
+        if g_fold and t_lbl and val_fold and len(val_fold) >= 2:
+            val_pat = r"(?<!\w)" + re.escape(val_fold) + r"(?!\w)"
+            val_matches = list(re.finditer(val_pat, g_fold))
+            if val_matches:
+                # Field labels precede their value in English/Vietnamese goals ("last name Le", "phone 0916...").
+                def _precedes_val(lbl_f: str) -> bool:
+                    for vm in val_matches:
+                        before = g_fold[max(0, vm.start() - len(lbl_f) - 8) : vm.start()]
+                        if re.search(r"(?<!\w)" + re.escape(lbl_f) + r"[\s:]*$", before):
+                            return True
+                    return False
+
+                if not _precedes_val(t_lbl) and t_lbl not in _generic_field_words:
+                    for other in fields:
+                        if other is t_node:
+                            continue
+                        o_raw = str(other.get("hint") or node_label(other) or "").strip()
+                        o_lbl = fold(o_raw)
+                        if not o_lbl or len(o_lbl) < 3 or o_lbl == t_lbl or o_lbl in t_lbl or t_lbl in o_lbl:
+                            continue
+                        if o_lbl not in _generic_field_words and _precedes_val(o_lbl):
+                            return f"'{raw_val}' typed into '{t_lbl_raw}' instead of '{o_raw}'"
+
+    if not expected:
+        return ""
+
+    # Gather non-editable outcome text from post-save/final screens.
+    last_commit = None
+    for idx in range(len(screens) - 1, -1, -1):
+        st = screens[idx][0]
+        if st.tool not in INPUT_TOOLS and st.tool not in (
+            "swipe", "wait", "wait_for_screen_change", "wait_for_text", "wait_until_gone", "wait_for_delay"
+        ):
+            last_commit = idx
+            break
+
+    # A single-step snippet merged onto an existing workflow (test fragments)
+    # without a post-input commit step only represents part of a path.
+    if is_merge and len(screens) == 1 and (last_commit is None or not typed_norms):
+        return ""
+
+    outcome_screens = []
+    if last_commit is not None:
+        for _, _, post in screens[last_commit:]:
+            if post is not None:
+                outcome_screens.append(post)
+    if not outcome_screens:
+        last_post = screens[-1][2] or screens[-1][1]
+        if last_post is not None:
+            outcome_screens.append(last_post)
+
+    display_parts: list[str] = []
+    display_loose_parts: list[str] = []
+    for scr in outcome_screens:
+        for n in visible_app_nodes(scr.norm):
+            if is_editable(n):
+                continue
+            for key in ("text", "content-desc"):
+                txt = str(n.get(key) or "").strip()
+                if txt:
+                    display_parts.append(normalize_field_value(txt))
+                    display_loose_parts.append(_loose_key(txt))
+    display_blob = "".join(p for p in display_parts if p)
+    display_loose = "".join(p for p in display_loose_parts if p)
+    joined_typed = "".join(typed_norms)
+    joined_typed_loose = "".join(typed_loose)
+
+    echoed_typed = any(
+        tn not in password_typed_norms and _normalized_value_matches(tn, display_blob, display_loose)
+        for tn in typed_norms
+    )
+
+    for exp_val in expected:
+        exp_norm = normalize_field_value(exp_val)
+        exp_loose = _loose_key(exp_val)
+        if not exp_norm or exp_norm in password_typed_norms:
+            continue
+        shown = _normalized_value_matches(exp_val, display_blob, display_loose)
+        was_typed = (
+            any(exp_norm in tn or tn == exp_norm for tn in typed_norms)
+            or (bool(joined_typed) and exp_norm in joined_typed)
+            or (bool(exp_loose) and any(exp_loose in tl for tl in typed_loose))
+            or (bool(exp_loose) and bool(joined_typed_loose) and exp_loose in joined_typed_loose)
+        )
+        was_tapped = (
+            any(exp_norm in tn or tn == exp_norm for tn in tapped_norms)
+            or (bool(exp_loose) and any(exp_loose in tl for tl in tapped_loose))
+        )
+        if not shown and not was_tapped and (not was_typed or echoed_typed):
+            return f"requested value '{exp_val}' never shown"
+
     return ""
 
 
@@ -736,6 +974,7 @@ def record_run(
     workflow_id: str = "",
     slot_values: dict[str, str] | None = None,
     app_names: Iterable[str] = (),
+    app_version: str = "",
     tau: float = DEFAULT_TAU,
     delta: float = DEFAULT_DELTA,
 ) -> Workflow | None:
@@ -755,12 +994,20 @@ def record_run(
             return None
         package = max(pkgs, key=lambda p: pkgs[p])
         slots = dict(slot_values or detect_slots(steps, goal, app_names=app_names))
-        wf = Workflow(workflow_id=workflow_id or f"{package}__1", package=package, goal=goal, slots=slots)
+        wf = Workflow(
+            workflow_id=workflow_id or f"{package}__1",
+            package=package,
+            goal=goal,
+            slots=slots,
+            app_version=str(app_version or "").strip(),
+        )
         values = slots
     else:
         wf = workflow
+        wf.apply_app_version(app_version)
         values = dict(slot_values or {})
     package = wf.package
+    goal_for_slots = goal or wf.goal
 
     # Drop an action the AI undid right away (next action BACK landing on the
     # screen it started from).
@@ -777,7 +1024,7 @@ def record_run(
             if match_screen(nxt_post.fp, {"pre": [pre.fp]}, tau=tau, delta=0.0, min_app_tokens=1).matched:
                 skip.update({i, i + 1})
 
-    why_inconsistent = inconsistent_typing(screens, values)
+    why_inconsistent = inconsistent_typing(screens, values, goal=goal_for_slots)
     if why_inconsistent:
         _log.warning(f"Workflow recording skipped, inconsistent run: {why_inconsistent}")
         return None
@@ -788,26 +1035,48 @@ def record_run(
     typings: dict[str, list[int]] = {}
     for i, (st, pre, _) in enumerate(screens):
         if st.tool in INPUT_TOOLS and st.ok and not st.autopilot and pre is not None:
-            slot = _slot_for_text(str(st.args.get("text") or ""), values)
+            slot = _slot_for_text(str(st.args.get("text") or ""), values, goal=goal_for_slots)
             if slot:
                 typings.setdefault(slot, []).append(i)
     for slot, idxs in typings.items():
         if len(idxs) < 2:
             continue
-        persisted = [i for i in idxs if _value_persisted(i, screens, values[slot])]
+        persisted = [i for i in idxs if _value_persisted(i, screens, resolve_slot_value(slot, values))]
         keep = persisted[-1] if persisted else idxs[-1]
         skip.update(i for i in idxs if i != keep)
 
+    kept_screens = [screens[i] for i in range(len(screens)) if i not in skip]
+    why_unverified = _unverified_run_outcome(
+        kept_screens, values, goal=goal_for_slots, is_merge=(workflow is not None)
+    )
+    if why_unverified:
+        _log.warning(f"Workflow recording skipped: {why_unverified}")
+        return None
+
     # W1b: prune multi-step detours (n_X -> ... -> n_X) with no slot entered/picked
     # in between and identical screen content & element states upon return.
-    _prune_detour_cycles(screens, values, skip, package=package)
+    _prune_detour_cycles(screens, values, skip, package=package, goal=goal_for_slots)
 
     known = {e.signature(): e for e in wf.edges}
     seen_this_run: set[tuple] = set()
+    matched_node_ids: set[str] = set()
+
+    def _mark_existing(scr: _Screen | None) -> None:
+        if scr is None or scr.fp.package != package:
+            return
+        fps = wf.node_fps()
+        if not fps:
+            return
+        m = match_screen(scr.fp, fps, tau=tau, delta=delta, min_app_tokens=1)
+        if m.matched and m.node_id:
+            matched_node_ids.add(m.node_id)
+
     added = 0
     first_src: str | None = None
     typed_on_screen: dict[str, set[str]] = {}  # node -> slots typed into its fields
     for i, (st, pre, post) in enumerate(screens):
+        _mark_existing(pre)
+        _mark_existing(post)
         merged_dst: str | None = None
         kb_hide = (
             st.tool == "press_key"
@@ -829,6 +1098,7 @@ def record_run(
             # keeps all form states in one node, so steps recorded across
             # scrolls share one node.
             nid = _node_for(wf, pre.fp, tau, delta)
+            matched_node_ids.add(nid)
             if not _conflicts_with_other_node(wf, nid, post.fp, tau, delta):
                 if not match_screen(post.fp, {nid: wf.nodes[nid].fps}, tau=tau, delta=0.0, min_app_tokens=1).matched:
                     wf.nodes[nid].add_fp(post.fp)
@@ -839,10 +1109,11 @@ def record_run(
             continue
         if pre is None or pre.fp.package != package:
             continue
-        kind, slot, target, key = _classify(st, pre, values)
+        kind, slot, target, key = _classify(st, pre, values, goal=goal_for_slots)
         if not kind:
             continue
         src = _node_for(wf, pre.fp, tau, delta)
+        matched_node_ids.add(src)
         if first_src is None:
             first_src = src
         dst = None
@@ -861,6 +1132,7 @@ def record_run(
                         dst = _form_node_for_dest(wf, src, post, kind, st, target, key, tau=tau, delta=delta)
                     if dst is None:
                         dst = _node_for(wf, post.fp, tau, delta)
+            matched_node_ids.add(dst)
             anchors = anchors_for(post.norm, pre.norm, exclude_texts=values.values())
         if kind == "focus":
             if dst is None or dst == src:
@@ -942,6 +1214,11 @@ def record_run(
         for e in wf.edges:
             if e.kind == "nav" and e.state != "disabled":
                 e.state = "active" if e.seen >= 2 else "provisional"
+    else:
+        # Promote provisional nav edges downgraded after an app version upgrade once seen in 2 runs (L-046).
+        for e in wf.edges:
+            if e.kind == "nav" and e.state == "provisional" and e.seen >= 2:
+                e.state = "active"
     if first_src is not None and first_src not in wf.start_nodes:
         wf.start_nodes.append(first_src)
     # The screen the run was reported completed on (after its last action).
@@ -949,7 +1226,10 @@ def record_run(
         last = post if post is not None else pre
         if last is not None and last.fp.package == package:
             end = _node_for(wf, last.fp, tau, delta)
+            matched_node_ids.add(end)
             if end not in wf.end_nodes:
                 wf.end_nodes.append(end)
             break
+    if workflow is not None:
+        wf.record_node_matches_and_prune(matched_node_ids, max_miss=10)
     return wf

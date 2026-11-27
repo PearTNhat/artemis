@@ -508,3 +508,183 @@ và test điền sau.
   (2) thêm `_form_still_open(norm)` (`bool(typed_slots(norm, self.slot_values))`) và yêu cầu `not self._form_still_open(norm)`
   ở cả hai nhánh `_finished=True` của L-042 (`not edges` và `all(e.id in _done for e in edges)`).
 - Test: `test_l044_unsaved_form_with_typed_fields_does_not_confirm_completion`.
+
+### [L-045] Ô nhập có sẵn tiền tố ("+1") → lưu sai "+10916600066"; autopilot cũng sẽ coi là đúng — ĐÃ SỬA (27/11)
+- Triệu chứng (Gemini, Danh bạ bản 4.92, trace b68c6f75 bước 5): ô Phone có sẵn "+1" (cây UI: EditText text='+1');
+  AI gọi `input_text(..., clear_exist=False)` → ô thành "+10916600066", AI báo xong, liên hệ lưu sai số.
+- Nguyên nhân gốc: (1) AI tự đặt `clear_exist=False` trên ô có nội dung KHÔNG phải do lần chạy này gõ, không kiểm lại
+  giá trị ô sau khi gõ (vi phạm AGENTS 2.8); (2) autopilot `_verified` / `_held_slots` kiểm `v in field_text`
+  (chứa), nên "+10916600066" vẫn được coi là đã gõ đúng "0916600066" — kiểm sau gõ không bắt được lỗi này.
+  (Autopilot tự gõ thì đúng vì gửi mặc định clear_exist=True — chỉ phần kiểm bị lỏng.)
+- Cách sửa (`targets.py`, `autopilot.py`, `action_executor.py`, mọi app):
+  (a) `normalize_field_value` bỏ khoảng trắng và `- ( ) .` sau khi gấp dấu/chữ thường; `_verified`, `_slot_in_own_field`
+  và `_held_slots` so khớp đúng (`==`) thay cho kiểm chứa; khi lệch sau bước gõ, `Autopilot.run` dừng và báo rõ
+  `after '...' field holds '...', not '...'`; giữ `typed_slots` ở L-044 (`_form_still_open`) để form đang giữ giá trị
+  lệch chưa lưu vẫn bị coi là form đang mở.
+  (b) `McpActionExecutor._typed_field_mismatch`: sau `input_text` có quan sát (`not skip_observe`), nếu giá trị thực
+  sau chuẩn hoá khác chữ vừa yêu cầu thì nối cảnh báo `Warning: field now holds '...', not '...'.` vào `text_summary`
+  và ghi `metadata["typed_value_mismatch"]`.
+- Test: `test_l045_prefix_remainder_rejected_by_autopilot_and_warned_by_executor`.
+
+### [L-046] Workflow không biết app đã cập nhật; màn/bước cũ không bao giờ được dọn — ĐÃ SỬA (27/11)
+- Hiện trạng (Danh bạ tự cập nhật lên 4.92 ngày 27/11): workflow cũ không khớp (similarity 0.03–0.27) → an toàn,
+  AI làm và nhánh mới được gộp vào (11 màn). Nhưng: (1) không lưu `versionName`, nên bước nav cũ vẫn "active" nếu một
+  màn cũ tình cờ còn khớp; (2) node/edge cũ không bao giờ bị xoá, file phình dần.
+- Cách sửa (`store.py`, `recorder.py`, `workflow_hook.py`):
+  (1) `Workflow.app_version` lưu `versionName` lấy bằng `dumpsys package <pkg>` (cache theo thiết bị + package).
+  Khi đổi version (`Workflow.apply_app_version`), mọi edge `nav` đang `active` hạ về `provisional` và reset `seen = 0`
+  (giữ nguyên edge `slot`); ở `record_run`, mọi edge `nav` `provisional` được thăng lại `active` khi `seen >= 2`
+  trong bất kỳ workflow nào (không chỉ workflow có `commitment`/`judgement`).
+  (2) `Node.miss_count` đếm số lượt chạy thành công liên tiếp không khớp màn đó (tính cả các màn đi qua bởi bước
+  `autopilot`, tránh xoá oan màn chạy tự động). Khi `miss_count > 10` (`Workflow.record_node_matches_and_prune`),
+  xoá node cùng mọi edge gắn vào nó (`src` hoặc `dst`), giữ nguyên `start_nodes` và `end_nodes`.
+- Test: `test_l046_app_version_change_downgrades_nav_and_prunes_stale_nodes`.
+
+### [L-047] Ô "Họ tên" gộp nhiều giá trị của yêu cầu luôn bị coi là judgement → lần nào cũng hỏi AI — ĐÃ SỬA (27/11)
+- Hiện trạng (Danh bạ 4.92, trace c8e82b72): form mới có 1 ô Name; AI gõ "Nam Kha" (= first + last name).
+  Recorder không tìm thấy "Nam Kha" nguyên văn trong yêu cầu → edge `judgement` → autopilot dừng, AI làm (tốn 2–3 lượt).
+- Cách sửa (`targets.py`, `recorder.py`, `autopilot.py`, `playbook.py`):
+  - `recorder._slot_for_text(..., goal=...)`: khi chữ gõ không khớp 1 slot đơn nhưng bằng đúng ≥ 2 slot của yêu cầu nối
+    bằng đúng `" "` theo thứ tự xuất hiện trong `goal`, ghi thành slot ghép `slot1+slot2` (không đoán hoán vị hay ký tự nối khác).
+  - `slot_parts` + `resolve_slot_value` (`targets.py`) dùng chung trong `autopilot.py` (`_pick`, `_held_slots`,
+    `_slot_in_own_field`, `_all_slots_completed`, `_expected_end_values`, kiểm đụng hàng L-029), `recorder.py`
+    (`inconsistent_typing`, deduplicate gõ lặp) và `playbook.py` (`format_step`).
+- Test: `test_l047_composite_slot_recorded_and_replayed_in_goal_order`.
+
+### [L-048] Cho phép prompt can thiệp vào workflow khi có yêu cầu khác mẫu & tắt workflow theo từng task — ĐÃ SỬA (27/11)
+- Vấn đề: Autopilot chạy trước mỗi turn và không đọc prompt (ngoài rút slot), nên nếu prompt có lưu ý/yêu cầu mới ngoài khung đã ghi (vd `"save to SIM"`, `"remove +1"`, `"don't..."`) mà bước cũ đã `active`, autopilot vẫn chạy theo khuôn mẫu cũ. Đồng thời chưa có cách tắt workflow riêng cho 1 task qua `mobile_run_task` / CLI mà không sửa `config/artemis.jsonc`.
+- Cách sửa:
+  (1) Can thiệp khi prompt lệch khung (`selector.goal_deviation_summary`, `workflow_hook.maybe_autopilot`, `flash/runner.py`): khi prompt mới không khớp 100% khung tĩnh sau khi che slot (`match_goal_template is None`), autopilot **tạm dừng không bấm máy**, gửi notice `[Workflow Review]` kèm phần chỉ dẫn sai lệch và danh sách bước dự kiến (`Planned workflow steps:`). AI có thể gọi `workflow_autopilot(decision='proceed')` để duyệt cho autopilot chạy tiếp, hoặc thao tác trực tiếp trên màn hình / gọi `workflow_autopilot(decision='manual')` để khoá autopilot và tự làm toàn bộ lượt còn lại.
+  (2) Ghi đè workflow theo từng task: thêm tham số `workflow: "off" | "record" | "replay"` trên `mobile_run_task` (`mcp_server/tools/task_runner.py`), `--workflow` trên CLI (`cli/commands/run.py`, `mcp_server/background/task_runner.py`), REST payload `/api/run` (`daemon_client.py`, `task_schema.py`, `task_queue_service.py`) và `ctx.workflow_mode` trong `resolve_mode`.
+- Test: `test_l048_prompt_deviation_pauses_autopilot_for_ai_confirmation_and_supports_manual_or_proceed`, `test_l048_per_task_workflow_override_in_mcp_and_resolve_mode`.
+
+### [L-049] Kiểm giá trị sau gõ (L-045) sai với ô mật khẩu và bỏ qua mất dấu tiếng Việt — ĐÃ SỬA (27/11)
+- Nguyên nhân gốc: `normalize_field_value` dùng `fold()` (bỏ dấu + chữ thường) và không xét thuộc tính `password`.
+  (1) Ô mật khẩu: cây UI có `password=true`, text là ký tự che ("••••") hoặc rỗng → executor cảnh báo sai
+  "field now holds '••••', not '<mật khẩu>'" (AI dễ gõ lại mãi), autopilot không bao giờ xác nhận được bước gõ mật khẩu.
+  (2) Gõ "Hà Nội" mà bàn phím ADB làm rơi dấu thành "Ha Noi" → vẫn coi là khớp (kiểm thử: `normalize_field_value('Hà Nội') == normalize_field_value('Ha Noi')` → True).
+- Cách sửa (`fingerprint.py`, `targets.py`, `autopilot.py`, `action_executor.py`):
+  (1) `fingerprint.normalize` giữ thuộc tính `"password"`; hàm dùng chung `targets.check_field_value` kiểm tra riêng ô `password=True`:
+      không so nội dung chữ, chỉ so độ dài chuỗi ký tự che (`•*●...`) == `len(expected)` (nếu text không phải chuỗi che thì coi là
+      "không kiểm được" — executor không cảnh báo, autopilot không tính verified và không báo lệch).
+  (2) `targets.normalize_field_value`: chuẩn hoá Unicode NFC + `casefold()` + bỏ khoảng trắng/`-().`, **giữ nguyên dấu tiếng Việt**.
+- Test: `test_l049_password_field_masks_and_accent_preservation`.
+
+### [L-050] Ô nhập không có nhãn trong cây UI bị bỏ khỏi danh sách gửi AI → AI gõ vào nút ảnh đại diện — ĐÃ SỬA (27/11)
+- Triệu chứng (Gemini, Danh bạ 4.92, trace 325ba852, task FAILED): màn "Create contact" có ô Name (chữ "Name" chỉ là nhãn
+  nổi vẽ trên khung, OCR đọc được). Danh sách gửi AI không có ô Name; AI chọn `[47] (button)` (ảnh đại diện) làm
+  "Name input field" → mở màn "Choose picture", lặp 5 lần BACK/gõ lại → loop guard dừng. Ở 8db2bee1/54fa6897 AI dùng
+  index không tồn tại (133) rồi toạ độ.
+- Nguyên nhân gốc: (1) ô Name đang focus là `View` (Compose) chưa lộ `EditText`; ô `EditText` không nhãn (Company) lại bị
+  `_unlabeled_controls` bỏ vì nhãn `TextView` nằm bên trong box của nó; (2) phần tử không nhãn chỉ in "(button)" / "(input)",
+  còn executor vẫn cho `input_text(target=47)` bấm nhầm vào `Button`.
+- Cách sửa (`visualization.py`, `action_executor.py`, `flash_runner.md`, mọi app):
+  (a) `McpActionExecutor._non_input_target_error`: từ chối `input_text(target=i)` khi phần tử `i` không phải `EditText`/`editable`,
+      không phải `ocr`/`hint` và không có ô `EditText` nào bao điểm đó, nói rõ không phải ô nhập và gợi ý nếu con trỏ đang
+      nhấp nháy trong ô thì gọi `input_text(text=...)` không kèm `target`.
+  (b) `visualization.py`: đổi loại control ô nhập thành `(input field)`, không bỏ qua `EditText` chỉ vì bên trong chứa `TextView` nhãn tĩnh,
+      và gắn nhãn gần nhất lấy từ text XML/OCR (`_nearest_input_label`) thành `[n] (input field: "<nhãn>")`.
+- Test: `test_l050_executor_refuses_input_text_on_non_field_and_labels_unlabeled_inputs`.
+
+### [L-051] Cảnh báo lệch giá trị (L-045) bị AI bỏ qua → vẫn lưu "+10913400134" — ĐÃ SỬA (27/11)
+- Triệu chứng (b57e57b3, prompt có thêm "label Work"): AI gõ `clear_exist=False` 2 lần, cả 2 lần nhận
+  "Warning: field now holds '+10913400134', not '0913400134'" nhưng vẫn bấm Save và báo xong với số sai.
+- Nguyên nhân gốc: lệch chỉ là cảnh báo nối vào kết quả "thành công".
+- Cách sửa (`action_executor.py`, `agents/flash/runner.py`):
+  - Sau khi `observe()` lấy xong ảnh/XML mới, nếu ô nhập lệch giá trị (trừ trường hợp ô mật khẩu không đọc được ở L-049),
+    `input_text` trả về kết quả lỗi (`status="error"`, ngắt burst sau đó) kèm thông điệp yêu cầu xoá (`clear_exist=true`)
+    và gõ lại (hoặc giải thích nếu cố ý), và ghi nhận vào `_unfixed_typed_mismatches`. Khi AI sửa khớp thì tự xoá khỏi danh sách.
+  - Khi AI gọi `report_task_status(completed)` mà vẫn còn ô lệch chưa sửa, `FlashRunner` từ chối nhắc lại đúng 1 lần
+    (`consume_unfixed_typed_mismatches`).
+- Test: `test_l051_typed_mismatch_fails_and_reminds_once_on_report_completion`.
+
+### [L-052] Bản app có ô đang focus không có trong cây UI → recorder bỏ ghi mãi (an toàn, nhưng không học được) — GHI NHẬN
+- 8db2bee1/54fa6897: "Workflow recording skipped, inconsistent run: 'Phuc Ly' (slot1+slot2) ... holds ''": recorder kiểm
+  nhầm sang ô Company vì ô Name không có trong cây. Đúng hướng an toàn (không ghi workflow sai). Phụ thuộc L-050;
+  sau L-050 xem lại: ô slot không tìm thấy trong cây → đánh dấu "không kiểm được" thay vì "không nhất quán".
+
+### [L-053] Bàn phím chiếm ~39 dòng đầu danh sách gửi AI, đẩy phần tử app xuống cuối — ĐÃ SỬA (27/11)
+- Hiện trạng (325ba852, lượt 1): `[1]..[39]` là phím (Q, W, E…, Done, Back), phần tử app ở `[40]..[49]`; model nhẹ chọn `[47] (button)` cho "Name input field" mà không viết ghi chú suy luận (39 token output).
+- Cách sửa (`visualization.py`, `mcp/observation.py`, mọi app): `_keyboard_window_info` phát hiện cửa sổ IME tổng quát ở phần dưới màn hình (không hardcode tên bàn phím, chỉ cần khác app foreground và có ≥6 phím/cụm IME), `_is_ime_action_key` giữ riêng các phím hành động (`Done`/`Next`/`Search`/`Enter`/`Hide keyboard`…); `format_minimal_list_with_elements(..., compact=True)` in phần tử app TRƯỚC, gộp phím chữ/số thành 1 dòng `(keyboard open ...: N keys folded)` và đánh index liên tục cho các phím hành động giữ lại (`is_keyboard=True`); `observation.py` truyền `ignore_boxes` cho `merge_ocr_into_list` để không gộp lại chữ phím từ OCR.
+- Test: `test_l053_compact_list_folds_keyboard_keys_keeps_action_keys_and_orders_app_first`.
+
+### [L-054] Đánh số phần tử không nhãn lên ảnh gửi AI (Set-of-Mark có chọn lọc) — ĐÃ SỬA (27/11)
+- Lý do: 325ba852 — model nhẹ chọn `[47] (button)` (ảnh đại diện) làm ô Name; số 47 vẽ trên ảnh đại diện sẽ lộ nhầm ngay.
+- Số đo đã có (KE_HOACH_TOI_UU_ARTEMIS.md, benchmarks/payload_grounding, 52–56 bài): list gọn + ảnh thật đánh số phần tử không nhãn `compact_somU` 49/52 (Qwen) / 50/52 (Gemini Flash-Lite) > ảnh + list gọn 48/52 / 46/52; bản v2 + lấp chỗ trống OCR 51/56 (tốt nhất, bắt được 3/4 phần tử ngoài cây). Flash HIỆN CHƯA dùng — không cần A/B lại.
+- Cách sửa (`visualization.py`, `agents/flash/{runner.py,flash_runner.md}`, `config/{agent.py,artemis.jsonc}`, mọi app): port `som_image_v2` vào `visualization.py` (`select_som_elements`, `draw_som_marks`): khung đỏ `(230,20,20)`, nhãn đỏ chữ trắng viền trắng `W//55` đặt ngoài khung (trên → trái → dưới → phải → trong) không đè nhãn khác, gộp khung chồng `>60%` giữ khung nhỏ; vẽ trên ảnh gốc rồi mới resize về `max_side` và lưu JPEG 1 lượt (`< 50 ms`/màn). Chỉ đánh dấu phần tử không nhãn, ô nhập và dòng `ocr`, bỏ qua phần tử XML có nhãn và phím bàn phím; cấu hình `flash.model_image.marks: "unlabeled" | "off"` (mặc định `"unlabeled"`).
+- Test: `test_l054_selective_som_draws_only_unlabeled_inputs_and_ocr_within_budget`. Cần test máy Danh bạ + 1 app khác.
+
+### [L-055] L-051 báo "thất bại" sai khi app tự định dạng giá trị hoặc khi AI cố ý gõ nối — ĐÃ SỬA (27/11)
+- Nguyên nhân gốc: sau L-051, mọi lệch giá trị (không phải password) đều trả `failure`. `normalize_field_value` chỉ bỏ khoảng trắng và `-().` nên `'1,000,000'` vs `'1000000'`, `'+84 912 345 678'` vs `'0912345678'`, `"100.000 đ"`, ô ngày, hoặc gõ nối có chủ ý (`clear_exist=False`) đều thành lệch và lặp tới loop guard.
+- Cách sửa (`workflow/targets.py`, `mcp/action_executor.py`, mọi app):
+  (1) `McpActionExecutor._typed_field_mismatch`: chỉ trả `status="error"` khi là nội dung có sẵn không do lần chạy gõ dính vào chữ vừa gõ (`actual == pre_text + expected`, vd `"+1"`), mất dấu tiếng Việt (L-049) hoặc sai độ dài mặt nạ mật khẩu;
+  (2) Gõ nối có chủ ý (`clear_exist=False` trên chữ đã gõ trong lượt/phiên, bỏ qua guard L-037 khi `clear_exist is False`) so với `pre_text + expected`, không tính lệch;
+  (3) Nếu `clear_exist=True` gõ lại mà ô vẫn giữ nguyên giá trị lệch như cũ (`_typed_mismatch_history`) hoặc app tự định dạng (`+84...`, `100.000 đ`), hạ xuống ghi chú mềm (`status="success"`), xoá khỏi `_unfixed_typed_mismatches`, không nhắc khi `report_task_status(completed)`;
+  (4) `targets.normalize_field_value`: bỏ dấu `,` phân cách nghìn khi toàn bộ giá trị là số (`1,000,000` == `1000000`).
+- Test: `test_l055_numeric_commas_auto_format_retry_append_and_prefill_failure`.
+
+### [L-056] Bản sửa L-055 tắt chốt L-037 khi `clear_exist=False` → "Son" + "Dao" lại thành "SonDao" không bị chặn — ĐÃ SỬA (27/11, Claude)
+- Nguyên nhân gốc: L-055 cho "gõ nối có chủ ý" bằng cách bỏ qua `_input_overwrites_typed_field` khi `clear_exist=False`,
+  và kiểm sau gõ so với "cũ + mới" → AI gõ nhầm Last name vào ô First name (đang giữ giá trị đã gõ) với
+  `clear_exist=False` sẽ hỏng dữ liệu mà không có cảnh báo nào. AI đã từng tự đặt `clear_exist=False` (b57e57b3, Mai Phan).
+- Cách sửa: L-037 luôn chạy; chỉ bỏ qua khi `clear_exist=False` VÀ (giá trị đang giữ + chữ mới) có nguyên văn trong yêu cầu
+  của task (`_append_is_in_goal`, so sau `normalize_field_value`). Runner gán `executor.task_goal = goal`. Thông báo từ
+  chối thêm gợi ý "gõ lại toàn bộ giá trị với clear_exist=true".
+- Test hồi quy: `test_l055_numeric_commas_auto_format_retry_append_and_prefill_failure` (bước 3b: gõ nối "Dao" không có
+  trong yêu cầu → bị từ chối; "Hello"+" world" có trong yêu cầu → được phép).
+
+### [L-057] Recorder học workflow SAI từ lần chạy "completed" nhưng thiếu dữ liệu (Qwen 8B, Danh bạ) — ĐÃ SỬA (27/11)
+- Triệu chứng (qwen3-vl:8b-32k, 27/11, trace 4b93c2fe + 8fcc3df7): AI gõ tên vào ô Name, HỌ vào ô Company, không nhập số điện thoại, bấm Save, báo `completed`. Dữ liệu thật (content provider): `Toan` / organization=`Le` / KHÔNG có phone. Recorder lưu workflow từ cả 2 lần (6 màn, cạnh "slot2 → Company" active, nav "Company"/"Save" thấy 2 lần → active) → lần phát lại sau sẽ autopilot TỰ lặp lại quy trình sai mà không hỏi AI. (Workflow này đã được chuyển ra scratchpad/bad_wf, không dùng.)
+- Nguyên nhân gốc: recorder tin `report_task_status(completed)`; kiểm "inconsistent run" chỉ xét slot ĐÃ gõ, không xét giá trị yêu cầu chưa từng được gõ. Với 1 model tự ghi tự phát lại (không có model thầy) lỗi của model thành quy trình cố định.
+- Cách sửa (`workflow/targets.py`, `workflow/recorder.py`, mọi app): thêm `targets.extract_requested_literals` (số ≥3 chữ số không phải đơn vị thời gian/kích thước, chuỗi ngoặc kép, email) và `recorder._unverified_run_outcome`: (1) bỏ qua ghi nếu có giá trị yêu cầu/slot chưa từng được gõ và không thấy trên màn kết quả, hoặc màn kết quả có lặp lại dữ liệu đã lưu nhưng làm rơi một giá trị (trừ ô `password=True`); (2) từ chối ghi nếu giá trị bị gõ vào ô có nhãn khác trong khi ngay trên màn đó có ô `EditText` khác mang nhãn đứng sát giá trị ấy trong prompt (vd `"last name Le"` mà gõ vào `"Company"`).
+- Test: `test_l057_recorder_skips_incomplete_or_wrong_field_runs_and_handles_passwords`.
+
+### [L-058] Model nhẹ báo xong khi thiếu dữ liệu yêu cầu — thêm kiểm "giá trị yêu cầu trên màn cuối" trước khi nhận completed — ĐÃ SỬA (27/11)
+- Triệu chứng: như L-057; Qwen báo "Toan Le has been successfully created" dù không có số điện thoại.
+- Cách sửa (`agents/flash/runner.py`, mọi phiên Flash, không riêng workflow): khi AI gọi `report_task_status(completed)`, `_consume_missing_requested_literals` đối chiếu các literal từ `extract_requested_literals(goal)` với nội dung màn hiện tại (UI + OCR) và các giá trị đã gõ thành công (`executor._typed_values` + `_typed_field_history` + `autopilot._typed_ok`, qua `normalize_field_value`); thiếu cái nào → trả `ToolMessage(status=error)` **đúng 1 lần** nhắc bổ sung hoặc giải trình (giữ 1-1 `ToolMessage`).
+- Test: `test_l058_and_l059_completion_check_and_typed_progress_tracker`.
+
+### [L-059] Bảng theo dõi giá trị đã gõ và giá trị yêu cầu gửi kèm mỗi lượt cho model nhẹ — ĐÃ SỬA (27/11)
+- Triệu chứng: Qwen 8B quên mình đã gõ gì vào ô nào (đưa `"Le"` vào `Company`, bỏ sót số điện thoại `"0916200162"`).
+- Cách sửa (`agents/flash/runner.py`, mọi app): `_record_typed_field_entry` ghi lại cặp `(nhãn ô, chữ đã gõ)` mỗi khi `input_text` thành công; `_typed_progress_line` đồng bộ với các ô `EditText` trên màn hiện tại (nếu đang ở màn form và ô bị xoá thì tự cập nhật) và chèn 1 dòng ngắn `[Typed so far: 'Toan' → Name · 'Le' → Company | Requested values: "0916200162" ✗ not entered yet]` vào đầu quan sát. Không sinh nhiễu ở các tác vụ không có literal nhập liệu và chưa gõ gì.
+- Test: `test_l058_and_l059_completion_check_and_typed_progress_tracker`.
+
+### [L-060] Giải thích chiều vuốt, diff phần tử mới/ẩn và trạng thái mép cuộn khi đụng mép — ĐÃ SỬA (27/11)
+- Vấn đề: `swipe` trước đây chỉ trả `"Swiped down."` hoặc `"(no visible change)"`, không nói rõ ngón tay kéo xuống làm trang trôi về đầu (`TOP`) hay những phần tử nào vừa hiện ra/ẩn đi, dễ làm model nhẹ vuốt ngược chiều hoặc lặp khi đã kịch mép. (Android `uiautomator2` chỉ cung cấp cờ `scrollable`, không có sẵn vị trí cuộn trước khi vuốt.)
+- Cách sửa (`mcp/action_executor.py`, `agents/flash/runner.py`, mọi app): `_apply_swipe_outcome_feedback` so sánh `elements` trước và sau `swipe` để báo rõ chiều ngón tay ↔ chiều trang + danh sách `New:` / `Hidden:`; khi `swipe(direction=...)` gặp `screen_unchanged` mới ghi nhận trạng thái mép (`scroll_edge_state`: `'top'` / `'bottom'`), gợi ý đổi sang chiều ngược lại và hiển thị trong dòng `[Scroll: hit TOP/BOTTOM edge ...]` cho tới khi trang cuộn được hoặc chuyển màn.
+- Test: `test_l060_swipe_diff_direction_and_scroll_edge_feedback`.
+
+### [L-060] Model nhầm hướng vuốt ("scroll down" ≠ `swipe(direction="down")`) và không thử hướng ngược khi màn đứng yên — ĐANG MỞ
+- Triệu chứng (Qwen 8B, 4b93c2fe bước 5–6): muốn xem ô Phone ở PHÍA DƯỚI form, gọi `swipe(direction="down")` 2 lần
+  (ngón tay 300→700 = nội dung chạy về ĐẦU trang); lần 2 "(no visible change)" vì đã ở đầu trang; model không thử
+  `up`, chuyển sang bấm Save "để xem có hiện thêm ô không" → lưu thiếu số điện thoại.
+- Nguyên nhân gốc: `direction` là hướng NGÓN TAY, ngược với cách nói thường "cuộn xuống"; kết quả trả về chỉ "Swiped down."
+  nên model nhỏ không biết mình đã đi về phía nào và đã chạm mép.
+- Việc cần làm (executor, mọi app, không thêm quy tắc prompt): kết quả swipe nói rõ hiệu ứng theo NỘI DUNG:
+  "Swiped down (finger down): the page moved toward its TOP." Khi "(no visible change)" trên màn cuộn được: "Already at the
+  TOP edge — content further DOWN the page needs direction='up'." (tương tự cho mép dưới/trái/phải). Test: swipe không
+  đổi màn → thông điệp nêu mép và hướng ngược. CHƯA CÓ TEST.
+
+### [L-061] L-057/L-058/L-059 coi chuỗi trong ngoặc kép là "giá trị phải có" → đòi cả "Place Order" — ĐÃ SỬA (27/11, Claude)
+- Nguyên nhân gốc: `extract_requested_literals` lấy mọi chuỗi trong ngoặc kép. Yêu cầu thật trong traces trích nhãn nút/chỉ dẫn:
+  `"Place Order"`, `"Đặt đơn"`, `"Yes"`, `"Remove"`, `"Mua ngay"`. Hậu quả: L-058 nhắc AI "task asks for 'Place Order' but it
+  is not on the screen — finish it" (đẩy AI về đúng nút bị CẤM bấm); L-059 hiện "Place Order ✗ not entered yet" mỗi lượt;
+  L-057 bỏ ghi workflow Grab (W0: Grab rơi từ 17 xuống 9 phiên).
+- Cách sửa: mặc định KHÔNG lấy chuỗi ngoặc kép (`include_quoted=False`); chỉ số ≥3 chữ số và email là giá trị bắt buộc.
+  Chuỗi ngoặc kép AI thật sự gõ (vd từ khoá tìm kiếm) vẫn được theo dõi qua lịch sử gõ.
+- Kiểm chứng: W0 Grab trở lại 17 phiên, TOTAL 66 phiên, Undet=0. Test hồi quy: `test_l061_quoted_ui_labels_are_not_required_literals`.
+
+### [L-062] L-060 báo sai "this screen has no scrollable container" ngay sau khi trang vừa cuộn được — ĐANG MỞ
+- Triệu chứng (Qwen 8B, 03b4b720 bước 4–5): vuốt lần 1 trang chạy lên đầu ("New: Picture & calling card…"); vuốt lần 2 đứng
+  yên → "No visible change…: this screen has no scrollable container." Model hiểu là không cuộn được nữa → bấm Save, thiếu số.
+- Nguyên nhân gốc: form (Compose) không có node `scrollable=true` trong cây; `_apply_swipe_outcome_feedback` tin cờ này.
+- Việc cần làm: nếu trong lần chạy đã có một lần vuốt làm màn (cùng app, cùng màn) đổi, coi màn là cuộn được → báo mép
+  ("already at the TOP edge — content further DOWN needs direction='up'"); chỉ nói "no scrollable container" khi chưa có lần
+  vuốt nào làm đổi màn này. Test: vuốt 1 đổi + vuốt 2 đứng yên trên cây không có cờ scrollable → báo mép TOP. CHƯA CÓ TEST.
+
+### [L-063] Model báo "completed" lần 2 dù L-058 đã nhắc thiếu giá trị → kết quả vẫn ghi "completed" — ĐANG MỞ
+- Triệu chứng (Qwen 8B, 03b4b720): L-058 nhắc "task asks for '0917400174'… never typed"; model bấm Save lần nữa rồi báo
+  completed; phiên kết thúc `completed` dù danh bạ lưu KHÔNG có số (đã kiểm content provider).
+- Việc cần làm (runner, mọi phiên): lần báo completed thứ 2 mà giá trị vẫn thiếu → nhận báo cáo nhưng kết thúc phiên với
+  trạng thái trung thực (vd `failed` kèm lý do "requested value '0917400174' never entered / not on screen"); recorder không
+  ghi; UI hiển thị lý do. Không nhắc lần 3 (tránh vòng lặp). Test: 2 lần báo thiếu → status failed + lý do. CHƯA CÓ TEST.

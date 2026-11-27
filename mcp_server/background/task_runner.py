@@ -123,6 +123,7 @@ async def run_task(
     explorer_pro_mode: str | None = None,
     ask_on_choice: bool = True,
     ask_when_stuck: bool = True,
+    workflow: str | None = None,
 ):
     """Executes the mobile automation agent task and logs all actions/results.
 
@@ -217,6 +218,8 @@ async def run_task(
 
         if conversation_id:
             os.environ["ARTEMIS_CONVERSATION_ID"] = str(conversation_id)
+        if workflow and str(workflow).strip().lower() in ("off", "record", "replay"):
+            os.environ["ARTEMIS_WORKFLOW_MODE"] = str(workflow).strip().lower()
 
         config_builder = Builders.AgentConfig.with_default_profile(profile)
         config_builder.with_flash_user_choice(
@@ -455,6 +458,10 @@ if __name__ == "__main__":
         default=True,
         help="Flash user choice: ask when stuck instead of failing.",
     )
+    parser.add_argument(
+        "--workflow",
+        help="Per-task Flash workflow mode override: 'off', 'record', or 'replay'",
+    )
 
     args = parser.parse_args()
 
@@ -472,5 +479,6 @@ if __name__ == "__main__":
             explorer_pro_mode=args.explorer_pro_mode,
             ask_on_choice=args.ask_on_choice,
             ask_when_stuck=args.ask_when_stuck,
+            workflow=args.workflow,
         )
     )

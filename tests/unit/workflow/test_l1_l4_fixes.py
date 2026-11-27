@@ -583,7 +583,7 @@ def test_l027_tap_on_a_quantity_is_never_replayed():
     when seen in two runs, and an old workflow holding it is refused live."""
     from artemis.workflow.fingerprint import normalize
     from artemis.workflow.recorder import RawScreen, RecordedStep, record_run
-    from artemis.workflow.targets import TargetDescriptor, resolve
+    from artemis.workflow.targets import TargetDescriptor, descriptor_for, resolve
 
     pkg = "com.example.food"
 
@@ -734,7 +734,7 @@ def test_l029_autopilot_never_types_over_a_value_it_typed_for_another_field():
     from artemis.workflow.autopilot import Autopilot
     from artemis.workflow.recorder import RawScreen
     from artemis.workflow.store import Edge
-    from artemis.workflow.targets import TargetDescriptor
+    from artemis.workflow.targets import TargetDescriptor, descriptor_for
 
     from artemis.workflow.fingerprint import app_fingerprint, normalize
     from artemis.workflow.store import Node, Workflow
@@ -1034,7 +1034,7 @@ def test_l031_99cd3b7b_scrolled_and_initial_form_share_node_and_verify():
     from artemis.workflow.fingerprint import app_fingerprint, normalize
     from artemis.workflow.matcher import DEFAULT_TAU, match_screen
     from artemis.workflow.recorder import RecordedStep, record_run
-    from artemis.workflow.targets import TargetDescriptor
+    from artemis.workflow.targets import TargetDescriptor, descriptor_for
 
     R, list_pre, form_initial, form_after_first, form_scrolled_pre, form_scrolled_post, detail_post = (
         _make_99cd3b7b_screens()
@@ -1165,7 +1165,7 @@ def test_l032_scrolls_above_keyboard_or_hides_it_to_fill_three_field_form():
     from artemis.workflow.autopilot import Autopilot
     from artemis.workflow.fingerprint import app_fingerprint, normalize
     from artemis.workflow.recorder import RawScreen
-    from artemis.workflow.targets import TargetDescriptor
+    from artemis.workflow.targets import TargetDescriptor, descriptor_for
 
     R = lambda els: RawScreen(els, 1000, 1000)  # noqa: E731
     pkg = "com.example.form"
@@ -1428,7 +1428,7 @@ def test_l035_autopilot_commands_pass_real_executor_translation_contract():
     from artemis.workflow.autopilot import Autopilot
     from artemis.workflow.fingerprint import app_fingerprint, normalize
     from artemis.workflow.recorder import RawScreen
-    from artemis.workflow.targets import TargetDescriptor
+    from artemis.workflow.targets import TargetDescriptor, descriptor_for
 
     R = lambda els: RawScreen(els, 1000, 1000)  # noqa: E731
     pkg = "com.example.contract"
@@ -1551,7 +1551,7 @@ def test_l036_save_refuses_when_phone_value_sits_in_last_name_field():
     from artemis.workflow.autopilot import Autopilot
     from artemis.workflow.fingerprint import app_fingerprint, normalize
     from artemis.workflow.recorder import RawScreen
-    from artemis.workflow.targets import TargetDescriptor
+    from artemis.workflow.targets import TargetDescriptor, descriptor_for
 
     R = lambda els: RawScreen(els, 1000, 1000)  # noqa: E731
     pkg = "com.example.contacts"
@@ -1591,17 +1591,33 @@ def test_l036_save_refuses_when_phone_value_sits_in_last_name_field():
     )
     slots = {"slot1": "Trang", "slot2": "Mai", "slot3": "0907770007"}
 
-    # 1) When Phone field is NOT shown on screen and slot3 was NOT typed by autopilot:
-    #    must NOT click Save even though "0907770007" is inside Last name.
+    # 1) Under L-045 exact matching, Last name holding "Mai\n0907770007" is NOT
+    #    counted as clean slot2 held: Autopilot blocks Save and re-types Last name;
+    #    and when Last name is clean while "0907770007" sits in a third field (Notes)
+    #    and Phone is hidden, Save stays blocked (edge is None).
     norm_hidden = normalize(corrupted_form(include_phone=False), 1000, 1000)
     ap1 = Autopilot(wf, slots, verify_polls=1, poll_interval_s=0)
     edge, el, _, why = ap1._pick("n1", norm_hidden)
-    assert edge is None and el is None
+    assert edge is None or edge.id != "e4"  # Save is NEVER allowed
     assert why != "several recorded steps apply here"
 
-    # 2) When Phone IS shown empty while Last name holds "Mai\n0907770007":
+    clean_ln_notes_corrupted = [
+        {"package": pkg, "class": "android.widget.TextView", "text": "Create contact", "bounds": "[20,20][400,80]"},
+        {"package": pkg, "class": "android.widget.Button", "resource-id": f"{pkg}:id/save", "text": "Save", "bounds": "[760,20][960,90]", "clickable": True},
+        {"package": pkg, "class": "android.widget.EditText", "hint": "First name", "text": "Trang", "bounds": "[80,200][920,280]", "clickable": True, "editable": True},
+        {"package": pkg, "class": "android.widget.EditText", "hint": "Last name", "text": "Mai", "bounds": "[80,320][920,400]", "clickable": True, "editable": True},
+        {"package": pkg, "class": "android.widget.EditText", "hint": "Notes", "text": "0907770007", "bounds": "[80,440][920,520]", "clickable": True, "editable": True},
+    ]
+    edge_notes, el_notes, _, why_notes = ap1._pick("n1", normalize(clean_ln_notes_corrupted, 1000, 1000))
+    assert edge_notes is None and el_notes is None
+    assert why_notes != "several recorded steps apply here"
+
+    # 2) When Phone IS shown empty while Last name holds "Mai" and Notes holds "0907770007":
     #    Save stays blocked and Autopilot fills Phone instead of clicking Save!
-    norm_phone_empty = normalize(corrupted_form(include_phone=True, phone_text=""), 1000, 1000)
+    clean_ln_phone_empty = clean_ln_notes_corrupted + [
+        {"package": pkg, "class": "android.widget.EditText", "hint": "Phone", "text": "", "bounds": "[80,560][920,640]", "clickable": True, "editable": True},
+    ]
+    norm_phone_empty = normalize(clean_ln_phone_empty, 1000, 1000)
     ap2 = Autopilot(wf, slots, verify_polls=1, poll_interval_s=0)
     edge2, el2, val2, _ = ap2._pick("n1", norm_phone_empty)
     assert edge2 is not None and edge2.id == "e3" and el2 and el2.get("hint") == "Phone" and val2 == "0907770007"
@@ -1667,7 +1683,7 @@ def test_l039_autopilot_verifies_end_screen_by_scrolling_and_executor_blocks_ent
     from artemis.workflow.autopilot import Autopilot
     from artemis.workflow.fingerprint import app_fingerprint, normalize
     from artemis.workflow.recorder import RawScreen
-    from artemis.workflow.targets import TargetDescriptor
+    from artemis.workflow.targets import TargetDescriptor, descriptor_for
 
     R = lambda els: RawScreen(els, 1000, 1000)  # noqa: E731
     pkg = "com.example.clock"
@@ -1828,7 +1844,7 @@ def test_l041_autopilot_scrolls_beyond_three_until_end_or_found():
     from artemis.workflow.autopilot import MAX_SCROLL_SEARCH, Autopilot
     from artemis.workflow.fingerprint import app_fingerprint, normalize
     from artemis.workflow.recorder import RawScreen
-    from artemis.workflow.targets import TargetDescriptor
+    from artemis.workflow.targets import TargetDescriptor, descriptor_for
 
     assert MAX_SCROLL_SEARCH >= 10
     prompt_path = Path(__file__).resolve().parents[3] / "artemis" / "agents" / "flash" / "flash_runner.md"
@@ -1899,7 +1915,7 @@ def test_l042_verifies_on_revisit_when_slots_done_even_if_end_node_is_search_scr
     from artemis.workflow.autopilot import Autopilot
     from artemis.workflow.fingerprint import app_fingerprint, normalize
     from artemis.workflow.recorder import RawScreen
-    from artemis.workflow.targets import TargetDescriptor
+    from artemis.workflow.targets import TargetDescriptor, descriptor_for
 
     R = lambda els: RawScreen(els, 1000, 1000)  # noqa: E731
     pkg = "com.google.android.deskclock"
@@ -2013,7 +2029,7 @@ def test_l044_unsaved_form_with_typed_fields_does_not_confirm_completion():
     from artemis.workflow.fingerprint import app_fingerprint, normalize
     from artemis.workflow.recorder import RawScreen
     from artemis.workflow.store import Edge, Node, Workflow
-    from artemis.workflow.targets import TargetDescriptor
+    from artemis.workflow.targets import TargetDescriptor, descriptor_for
 
     pkg = "com.example.contacts"
     n = lambda b, text="", hint="", cls="android.widget.TextView", rid="", desc="": {
@@ -2373,3 +2389,1460 @@ def test_l043_burst_stops_and_recorder_gets_post_back_pre_screen(tmp_path):
     assert len(runner._wf.steps) == 1
     assert runner._wf.steps[0].pre is not None
     assert runner._wf.steps[0].pre.seq == 11
+
+
+def test_l045_prefix_remainder_rejected_by_autopilot_and_warned_by_executor():
+    """L-045: pre-existing prefix like '+1' making '+10916600066' must NOT pass
+    autopilot _verified / _held_slots, formatting noise ('-'/' '/'()'/'.') passes,
+    and executor warns clearly when live field text diverges after input_text."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from artemis.mcp.action_executor import McpActionExecutor
+    from artemis.mcp.action_types import ActionResult
+    from artemis.utils.visualization import format_minimal_list_with_elements
+    from artemis.workflow.autopilot import Autopilot
+    from artemis.workflow.fingerprint import app_fingerprint, normalize
+    from artemis.workflow.recorder import RawScreen
+    from artemis.workflow.store import Edge, Node, Workflow
+    from artemis.workflow.targets import TargetDescriptor, descriptor_for
+
+    pkg = "com.example.contacts"
+    phone_target = TargetDescriptor(hint="Phone", resource_id=f"{pkg}:id/phone")
+
+    def form_with_phone(phone_val: str):
+        return [
+            {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+            {"bounds": "[40,50][400,110]", "text": "Create contact", "class": "android.widget.TextView", "resource-id": f"{pkg}:id/title", "package": pkg, "visible": True},
+            {"bounds": "[50,300][950,400]", "text": phone_val, "hint": "Phone", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/phone", "package": pkg, "visible": True, "editable": True},
+            {"bounds": "[800,50][960,120]", "text": "Save", "class": "android.widget.Button", "resource-id": f"{pkg}:id/save", "package": pkg, "visible": True, "clickable": True},
+        ]
+
+    R = lambda els: RawScreen(els, 1000, 1000)
+    fp_form = app_fingerprint(normalize(form_with_phone("+1"), 1000, 1000))
+    wf = Workflow(
+        workflow_id=f"{pkg}__l045",
+        package=pkg,
+        goal="add contact 0916600066",
+        slots={"slot1": "0916600066"},
+        nodes={"n1": Node("n1", [fp_form])},
+        edges=[
+            Edge("e1", "n1", "n1", "slot", slot="slot1", tool="input_text", target=phone_target),
+        ],
+    )
+
+    ap = Autopilot(wf, {"slot1": "0916600066"}, verify_polls=1, poll_interval_s=0)
+    # App-supplied '+1' remained -> '+10916600066' must fail exact normalized verification & held check:
+    norm_bad = normalize(form_with_phone("+10916600066"), 1000, 1000)
+    assert not ap._verified(wf.edges[0], norm_bad, fp_form, "0916600066")
+    assert "slot1" not in ap._held_slots("n1", norm_bad)
+
+    # Punctuation / whitespace formatting alone still passes:
+    for ok_fmt in ("0916-600-066", "(091) 660.0066", "0916 600 066"):
+        norm_ok = normalize(form_with_phone(ok_fmt), 1000, 1000)
+        assert ap._verified(wf.edges[0], norm_ok, fp_form, "0916600066")
+        assert "slot1" in ap._held_slots("n1", norm_ok)
+
+    # Full Autopilot run surfaces actual field value in stop_reason when append leaves '+1':
+    class MismatchDriver:
+        def __init__(self):
+            self.stage = 0
+
+        def current(self):
+            return R(form_with_phone("+1" if self.stage == 0 else "+10916600066"))
+
+        async def refresh(self):
+            return self.current()
+
+        async def act(self, tool, args, element):
+            self.stage = 1
+            return True, "ok"
+
+    rep = asyncio.run(ap.run(MismatchDriver()))
+    assert not rep.finished
+    assert "'+10916600066'" in rep.stop_reason and "'0916600066'" in rep.stop_reason
+
+    # Executor (part b) reports clear mismatch warning after AI input_text:
+    pre_tree = form_with_phone("+1")
+    _, pre_els, _ = format_minimal_list_with_elements(pre_tree, 1000, 1000, compact=True)
+    phone_idx = next(el["index"] for el in pre_els if el.get("resource_id") == f"{pkg}:id/phone")
+    post_tree = form_with_phone("+10916600066")
+    post_xml, post_els, _ = format_minimal_list_with_elements(post_tree, 1000, 1000, compact=True)
+    ctx = SimpleNamespace(
+        last_raw_observation={"elements": pre_tree, "width": 1000, "height": 1000, "seq": 1},
+        data_engine=None,
+        device=SimpleNamespace(device_width=1000, device_height=1000),
+    )
+
+    class FakeSession:
+        started = True
+
+        async def call(self, name, args):
+            return ActionResult.success(name, f"input_text typed '{args.get('text')}'")
+
+        async def observe(self, settle_ms=0, include_image=False, persist=True):
+            ctx.last_raw_observation = {"elements": post_tree, "width": 1000, "height": 1000, "seq": 2}
+            return SimpleNamespace(
+                ok=True,
+                hierarchy_ok=True,
+                elements=post_els,
+                elements_text=post_xml,
+                width=1000,
+                height=1000,
+                screenshot_path=None,
+                scrollable=False,
+                message="ok",
+                timed_out=False,
+            )
+
+    ex = McpActionExecutor(ctx, actuator=SimpleNamespace(extensions=lambda: (), controller=None), agent_name="flash")
+    ex._session = FakeSession()
+    state = SimpleNamespace(
+        indexed_elements=pre_els,
+        indexed_points=[el["center"] for el in pre_els],
+        latest_screenshot=None,
+        screen_scrollable=False,
+    )
+    res = asyncio.run(
+        ex.execute(
+            "input_text",
+            {"target": phone_idx, "text": "0916600066", "clear_exist": False},
+            "tc-phone",
+            state,
+            index_elements=pre_els,
+        )
+    )
+    assert res.status == "error"
+    assert "field holds '+10916600066', requested '0916600066'" in res.text_summary
+    assert "clear_exist=true" in res.text_summary
+    assert res.metadata["typed_value_mismatch"] == {"actual": "+10916600066", "expected": "0916600066"}
+
+
+def test_l046_app_version_change_downgrades_nav_and_prunes_stale_nodes():
+    """L-046: versionName change downgrades active nav edges to provisional (and requires
+    2 runs to re-activate, even without commitment/judgement), keeps slot edges active,
+    and prunes unprotected nodes missing > 10 consecutive runs while protecting autopilot-visited
+    and start/end nodes."""
+    from artemis.workflow.fingerprint import app_fingerprint, normalize
+    from artemis.workflow.recorder import RawScreen, RecordedStep, record_run
+    from artemis.workflow.store import Edge, Node, Workflow
+    from artemis.workflow.targets import TargetDescriptor, descriptor_for
+
+    pkg = "com.example.contacts"
+    home = [
+        {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+        {"bounds": "[40,50][400,110]", "text": "Contacts", "class": "android.widget.TextView", "resource-id": f"{pkg}:id/title", "package": pkg, "visible": True},
+        {"bounds": "[800,800][950,950]", "content-desc": "Add", "class": "android.widget.ImageButton", "resource-id": f"{pkg}:id/fab", "package": pkg, "visible": True, "clickable": True},
+    ]
+    form_old = [
+        {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+        {"bounds": "[40,50][400,110]", "text": "Old Form", "class": "android.widget.TextView", "resource-id": f"{pkg}:id/old_title", "package": pkg, "visible": True},
+        {"bounds": "[50,250][950,350]", "text": "", "hint": "First name", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/first", "package": pkg, "visible": True, "editable": True},
+    ]
+    form_new = [
+        {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+        {"bounds": "[40,50][400,110]", "text": "Create contact", "class": "android.widget.TextView", "resource-id": f"{pkg}:id/new_title", "package": pkg, "visible": True},
+        {"bounds": "[50,300][950,400]", "text": "", "hint": "Name", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/name", "package": pkg, "visible": True, "editable": True},
+        {"bounds": "[800,50][960,120]", "text": "Save", "class": "android.widget.Button", "resource-id": f"{pkg}:id/save", "package": pkg, "visible": True, "clickable": True},
+    ]
+    done_screen = [
+        {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+        {"bounds": "[40,50][400,110]", "text": "Contact saved", "class": "android.widget.TextView", "resource-id": f"{pkg}:id/saved_title", "package": pkg, "visible": True},
+        {"bounds": "[50,250][700,320]", "text": "An", "class": "android.widget.TextView", "resource-id": f"{pkg}:id/saved_name", "package": pkg, "visible": True},
+    ]
+    R = lambda els: RawScreen(els, 1000, 1000)
+    norm_home = normalize(home, 1000, 1000)
+    fp_home = app_fingerprint(norm_home)
+    fp_old = app_fingerprint(normalize(form_old, 1000, 1000))
+    fp_new = app_fingerprint(normalize(form_new, 1000, 1000))
+    fp_done = app_fingerprint(normalize(done_screen, 1000, 1000))
+    fab_desc = descriptor_for(next(n for n in norm_home if n.get("resource-id") == f"{pkg}:id/fab"))
+
+    wf = Workflow(
+        workflow_id=f"{pkg}__1",
+        package=pkg,
+        goal="add An",
+        slots={"slot1": "An"},
+        nodes={
+            "n_home": Node("n_home", [fp_home]),
+            "n_old": Node("n_old", [fp_old]),
+            "n_new": Node("n_new", [fp_new]),
+            "n_done": Node("n_done", [fp_done]),
+        },
+        edges=[
+            Edge("e_nav", "n_home", "n_new", "nav", tool="click", target=fab_desc, seen=4, state="active"),
+            Edge("e_slot", "n_new", "n_new", "slot", slot="slot1", tool="input_text", target=TargetDescriptor(resource_id=f"{pkg}:id/name", hint="Name"), seen=4, state="active"),
+            Edge("e_old", "n_old", "n_done", "nav", tool="click", target=TargetDescriptor(resource_id=f"{pkg}:id/old_title"), seen=2, state="active"),
+        ],
+        start_nodes=["n_home"],
+        end_nodes=["n_done"],
+        app_version="4.5.0",
+    )
+
+    # 1. Version bump downgrades active nav edges to provisional with seen=0, preserves slot edge:
+    assert wf.apply_app_version("4.92.0") is True
+    assert wf.app_version == "4.92.0"
+    assert wf.edges[0].state == "provisional" and wf.edges[0].seen == 0
+    assert wf.edges[1].state == "active"  # slot stays active
+    assert wf.edges[2].state == "provisional" and wf.edges[2].seen == 0
+    assert wf.apply_app_version("") is False  # unknown version is a no-op
+
+    # Roundtrip preserves app_version and miss_count
+    wf.nodes["n_old"].miss_count = 3
+    reloaded = Workflow.from_json(wf.to_json())
+    assert reloaded.app_version == "4.92.0"
+    assert reloaded.nodes["n_old"].miss_count == 3
+
+    # 2. Recording 2 independent runs on 4.92.0 re-activates e_nav (first stays provisional, second activates)
+    # Also note n_new is visited via autopilot=True step -> miss_count must stay 0;
+    # n_old is never visited across 11 runs -> pruned after > 10 runs, removing e_old, keeping n_home/n_done.
+    nav_step = RecordedStep(
+        tool="click",
+        args={"target": 1},
+        action={"action": "click", "normalized_coordinates": [875, 875], "target_resource_id": f"{pkg}:id/fab", "target_bounds": [800, 800, 950, 950]},
+        ok=True,
+        pre=R(home),
+        post=R(form_new),
+        autopilot=False,
+    )
+    auto_slot_step = RecordedStep(
+        tool="input_text",
+        args={"target": 1, "text": "An"},
+        action={"action": "input_text", "normalized_coordinates": [500, 350]},
+        ok=True,
+        pre=R(form_new),
+        post=R(form_new),
+        autopilot=True,
+    )
+    reloaded.nodes["n_old"].miss_count = 0
+    for run_idx in range(1, 12):
+        res_wf = record_run(
+            [nav_step, auto_slot_step],
+            goal="add An",
+            workflow=reloaded,
+            slot_values={"slot1": "An"},
+            app_version="4.92.0",
+        )
+        assert res_wf is reloaded
+        assert reloaded.nodes["n_new"].miss_count == 0
+        nav_edge = next(e for e in reloaded.edges if e.id == "e_nav")
+        if run_idx == 1:
+            assert nav_edge.state == "provisional" and nav_edge.seen == 1
+        else:
+            assert nav_edge.state == "active" and nav_edge.seen >= 2
+        if run_idx <= 10:
+            assert "n_old" in reloaded.nodes
+            assert reloaded.nodes["n_old"].miss_count == run_idx
+        else:
+            assert "n_old" not in reloaded.nodes
+            assert all(e.src != "n_old" and e.dst != "n_old" for e in reloaded.edges)
+            assert "n_home" in reloaded.nodes and "n_done" in reloaded.nodes
+
+
+def test_l047_composite_slot_recorded_and_replayed_in_goal_order():
+    """L-047: single Name field holding 'Nam Kha' from separate slots slot1='Nam', slot2='Kha'
+    in goal order is recorded as composite slot 'slot1+slot2', does not guess wrong orders or
+    non-space separators, and replays cleanly with new slot values."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from artemis.workflow.autopilot import Autopilot
+    from artemis.workflow.fingerprint import app_fingerprint, normalize
+    from artemis.workflow.playbook import format_step
+    from artemis.workflow.recorder import RawScreen, RecordedStep, record_run
+    from artemis.workflow.store import Edge, Node, Workflow
+    from artemis.workflow.targets import TargetDescriptor, descriptor_for
+
+    pkg = "com.example.contacts"
+    form_new = lambda name_val="", phone_val="": [
+        {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+        {"bounds": "[40,50][400,110]", "text": "Create contact", "class": "android.widget.TextView", "resource-id": f"{pkg}:id/title", "package": pkg, "visible": True},
+        {"bounds": "[50,200][950,290]", "text": name_val, "hint": "Name", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/name", "package": pkg, "visible": True, "editable": True},
+        {"bounds": "[50,340][950,430]", "text": phone_val, "hint": "Phone", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/phone", "package": pkg, "visible": True, "editable": True},
+        {"bounds": "[800,50][960,120]", "text": "Save", "class": "android.widget.Button", "resource-id": f"{pkg}:id/save", "package": pkg, "visible": True, "clickable": True},
+    ]
+    home_saved = lambda label="", phone_label="": [
+        {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+        {"bounds": "[40,50][400,110]", "text": "Contacts", "class": "android.widget.TextView", "resource-id": f"{pkg}:id/home_title", "package": pkg, "visible": True},
+        {"bounds": "[40,220][700,300]", "text": label, "class": "android.widget.TextView", "resource-id": f"{pkg}:id/row", "package": pkg, "visible": True},
+        *([{"bounds": "[40,320][700,390]", "text": phone_label, "class": "android.widget.TextView", "resource-id": f"{pkg}:id/row_phone", "package": pkg, "visible": True}] if phone_label else []),
+    ]
+    R = lambda els: RawScreen(els, 1000, 1000)
+
+    # Existing workflow originally recorded with separate First name (slot1) and Last name (slot2) + Phone (slot3)
+    old_wf = Workflow(
+        workflow_id=f"{pkg}__1",
+        package=pkg,
+        goal="add contact first name Bao, last name Lam, phone 0900",
+        slots={"slot1": "Bao", "slot2": "Lam", "slot3": "0900"},
+        nodes={
+            "n_old_form": Node("n_old_form", [app_fingerprint(normalize([
+                {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+                {"bounds": "[50,200][950,290]", "text": "", "hint": "First name", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/fn", "package": pkg, "visible": True, "editable": True},
+                {"bounds": "[50,320][950,410]", "text": "", "hint": "Last name", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/ln", "package": pkg, "visible": True, "editable": True},
+            ], 1000, 1000))]),
+        },
+        edges=[
+            Edge("e_old1", "n_old_form", "n_old_form", "slot", slot="slot1", tool="input_text", target=TargetDescriptor(hint="First name")),
+            Edge("e_old2", "n_old_form", "n_old_form", "slot", slot="slot2", tool="input_text", target=TargetDescriptor(hint="Last name")),
+        ],
+    )
+
+    new_goal = "add contact first name Nam, last name Kha, phone 0916600066"
+    new_slots = {"slot1": "Nam", "slot2": "Kha", "slot3": "0916600066"}
+    merged = record_run(
+        [
+            RecordedStep(
+                tool="input_text",
+                args={"target": 1, "text": "Nam Kha"},
+                action={"action": "input_text", "normalized_coordinates": [500, 245]},
+                ok=True,
+                pre=R(form_new()),
+                post=R(form_new("Nam Kha")),
+            ),
+            RecordedStep(
+                tool="input_text",
+                args={"target": 2, "text": "0916600066"},
+                action={"action": "input_text", "normalized_coordinates": [500, 385]},
+                ok=True,
+                pre=R(form_new("Nam Kha")),
+                post=R(form_new("Nam Kha", "0916600066")),
+            ),
+            RecordedStep(
+                tool="click",
+                args={"target": 3},
+                action={"action": "click", "normalized_coordinates": [880, 85], "target_resource_id": f"{pkg}:id/save", "target_bounds": [800, 50, 960, 120]},
+                ok=True,
+                pre=R(form_new("Nam Kha", "0916600066")),
+                post=R(home_saved("Nam Kha", "0916600066")),
+            ),
+        ],
+        goal=new_goal,
+        workflow=old_wf,
+        slot_values=new_slots,
+    )
+    assert merged is not None
+    comp_edge = next(e for e in merged.edges if e.target and e.target.hint == "Name")
+    assert comp_edge.kind == "slot" and comp_edge.slot == "slot1+slot2"
+    assert "type 'Linh Ta'" in format_step(comp_edge, {"slot1": "Linh", "slot2": "Ta"})
+
+    # Reversed order ('Kha Nam') or non-space separator ('Nam-Kha') must NOT be treated as composite slot:
+    for bad_text in ("Kha Nam", "Nam-Kha"):
+        neg_wf = Workflow(workflow_id=f"{pkg}__neg", package=pkg, goal=new_goal, slots=old_wf.slots)
+        res_neg = record_run(
+            [
+                RecordedStep(
+                    tool="input_text",
+                    args={"target": 1, "text": bad_text},
+                    action={"action": "input_text", "normalized_coordinates": [500, 245]},
+                    ok=True,
+                    pre=R(form_new()),
+                    post=R(form_new(bad_text)),
+                ),
+            ],
+            goal=new_goal,
+            workflow=neg_wf,
+            slot_values=new_slots,
+        )
+        assert res_neg is not None
+        assert res_neg.edges[0].kind == "judgement"
+
+    # Replay composite + phone slots automatically with new task values ("Linh Ta"):
+    class ReplayDriver:
+        def __init__(self):
+            self.name = ""
+            self.phone = ""
+            self.saved = False
+            self.typed_actions = []
+
+        def current(self):
+            if self.saved:
+                return R(home_saved("Linh Ta", "0988777666"))
+            return R(form_new(self.name, self.phone))
+
+        async def refresh(self):
+            return self.current()
+
+        async def act(self, tool, args, element):
+            if tool == "input_text":
+                self.typed_actions.append(args["text"])
+                if args["text"] == "Linh Ta":
+                    self.name = "Linh Ta"
+                elif args["text"] == "0988777666":
+                    self.phone = "0988777666"
+                return True, "ok"
+            if tool == "click":
+                self.saved = True
+                return True, "ok"
+            return False, "unexpected"
+
+    drv = ReplayDriver()
+    ap = Autopilot(merged, {"slot1": "Linh", "slot2": "Ta", "slot3": "0988777666"}, verify_polls=1, poll_interval_s=0)
+    rep = asyncio.run(ap.run(drv))
+    assert rep.finished
+    assert drv.typed_actions == ["Linh Ta", "0988777666"]
+    assert rep.verified_found == ["Linh", "Ta", "0988777666"] and rep.verified_missing == []
+
+
+def test_l048_prompt_deviation_pauses_autopilot_for_ai_confirmation_and_supports_manual_or_proceed(tmp_path):
+    """L-048 part 1: when a new goal carries instructions outside the recorded
+    slot template (e.g. 'save to SIM'), maybe_autopilot does NOT execute steps
+    blindly; it hands the planned playbook to AI, lets AI proceed via
+    workflow_autopilot(decision='proceed') or take manual control directly."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from langchain_core.messages import ToolMessage
+
+    from artemis.agents.flash.runner import FlashRunner, _TurnRecord
+    from artemis.agents.flash.workflow_hook import FlashWorkflowHook
+    from artemis.workflow.fingerprint import app_fingerprint, normalize
+    from artemis.workflow.selector import goal_deviation_summary
+    from artemis.workflow.store import Edge, Node, Workflow, WorkflowStore
+    from artemis.workflow.targets import TargetDescriptor
+
+    pkg = "com.example.contacts"
+    home_tree = [
+        {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+        {"bounds": "[40,50][400,110]", "text": "Contacts", "class": "android.widget.TextView", "resource-id": f"{pkg}:id/title", "package": pkg, "visible": True},
+        {"bounds": "[800,800][950,950]", "content-desc": "Add", "class": "android.widget.ImageButton", "resource-id": f"{pkg}:id/fab", "package": pkg, "visible": True, "clickable": True},
+    ]
+    form_tree = [
+        {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+        {"bounds": "[50,200][950,290]", "text": "", "hint": "Name", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/name", "package": pkg, "visible": True, "editable": True},
+    ]
+    fp_home = app_fingerprint(normalize(home_tree, 1000, 1000))
+    fp_form = app_fingerprint(normalize(form_tree, 1000, 1000))
+    wf = Workflow(
+        workflow_id=f"{pkg}__1",
+        package=pkg,
+        goal="Open Contacts and create contact Bao Lam",
+        slots={"slot1": "Bao", "slot2": "Lam"},
+        nodes={"n1": Node("n1", [fp_home]), "n2": Node("n2", [fp_form])},
+        edges=[
+            Edge("e1", "n1", "n2", "nav", tool="click", label="Add", target=TargetDescriptor(resource_id=f"{pkg}:id/fab", text="Add")),
+            Edge("e2", "n2", "n2", "slot", slot="slot1", tool="input_text", target=TargetDescriptor(hint="Name")),
+        ],
+        start_nodes=["n1"],
+        end_nodes=["n2"],
+    )
+
+    # Identical framing (only slot values changed) produces no deviation:
+    assert goal_deviation_summary(
+        "Open Contacts and create contact Tuan Vo",
+        wf.goal,
+        wf.slots,
+        {"slot1": "Tuan", "slot2": "Vo"},
+    ) == ""
+    assert goal_deviation_summary(
+        "add first name Tuan, last name Vo",
+        "add first name Bao, last name Lam",
+        {"slot1": "Bao", "slot2": "Lam"},
+    ) == ""
+    # Extra instruction triggers clear summary:
+    diff = goal_deviation_summary(
+        "Open Contacts and create contact Tuan Vo, save to SIM",
+        wf.goal,
+        wf.slots,
+        {"slot1": "Tuan", "slot2": "Vo"},
+    )
+    assert "save to SIM" in diff
+
+    store = WorkflowStore(tmp_path)
+    store.save(wf)
+
+    def _make_runner(goal_text: str):
+        ctx = SimpleNamespace(
+            last_raw_observation={"elements": home_tree, "width": 1000, "height": 1000, "seq": 1},
+            data_engine=None,
+            device=SimpleNamespace(device_width=1000, device_height=1000, device_id="dev1"),
+            _workflow_version_cache={("dev1", pkg): ""},
+        )
+        ex = MagicMock()
+        ex.action_tool_names = frozenset({"click", "input_text", "press_key", "swipe"})
+        runner = FlashRunner.__new__(FlashRunner)
+        runner.ctx = ctx
+        runner.goal = goal_text
+        runner.executor = ex
+        runner.controller = MagicMock()
+        runner.fast_burst = True
+        runner.summarizer = None
+        runner._raise_if_device_offline = lambda **_kw: None
+        hook = FlashWorkflowHook(runner, "replay", str(tmp_path))
+        hook.workflow = wf
+        hook.slot_values = {"slot1": "Tuan", "slot2": "Vo"}
+        hook._selected_for = pkg
+        from artemis.workflow.autopilot import Autopilot
+        hook._autopilot = Autopilot(wf, hook.slot_values)
+        runner._wf = hook
+        return runner, hook
+
+    # Case A: paused on Turn 1 with Planned workflow steps, then AI approves via workflow_autopilot('proceed')
+    runner_a, hook_a = _make_runner("Open Contacts and create contact Tuan Vo, save to SIM")
+    state = SimpleNamespace(screen_scrollable=False, indexed_elements=[], indexed_points=[])
+    handed = asyncio.run(hook_a.maybe_autopilot(state, b"img", "[1] Add"))
+    assert handed is not None
+    _, _, notice = handed
+    assert "[Workflow Review]" in notice
+    assert "save to SIM" in notice
+    assert "Planned workflow steps:" in notice
+    assert "workflow_autopilot(decision='proceed')" in notice
+    # Autopilot did NOT dispatch any device action during review pause:
+    assert hook_a.autopilot_steps == 0
+    # Wait without decision on next check returns None (no spam / no hijack):
+    assert asyncio.run(hook_a.maybe_autopilot(state, b"img", "[1] Add")) is None
+
+    # AI approves -> trailing burst calls get 1-to-1 ToolMessages; _deviation_decision becomes 'proceed':
+    msgs_a: list = []
+    turn_a = _TurnRecord()
+    asyncio.run(
+        runner_a._process_tool_calls(
+            [
+                {"name": "workflow_autopilot", "args": {"decision": "proceed", "reason": "steps match"}, "id": "tc-wf"},
+                {"name": "click", "args": {"target": 1}, "id": "tc-skip"},
+            ],
+            state,
+            msgs_a,
+            "thought",
+            {},
+            b"img",
+            "xml",
+            0,
+            turn_a,
+        )
+    )
+    tool_msgs = [m for m in msgs_a if isinstance(m, ToolMessage)]
+    assert len(tool_msgs) == 2
+    assert tool_msgs[0].status == "success"
+    assert tool_msgs[1].status == "error"
+    assert hook_a._deviation_decision == "proceed"
+
+    # Case B: AI acts directly on screen instead of calling workflow_autopilot -> auto locks manual mode:
+    runner_b, hook_b = _make_runner("Open Contacts and create contact Tuan Vo, save to SIM")
+    handed_b = asyncio.run(hook_b.maybe_autopilot(state, b"img", "[1] Add"))
+    assert handed_b is not None and hook_b._deviation_decision == "prompted"
+    hook_b.note_ai_manual_override()
+    assert hook_b._deviation_decision == "manual"
+    assert asyncio.run(hook_b.maybe_autopilot(state, b"img", "[1] Add")) is None
+
+
+def test_l048_per_task_workflow_override_in_mcp_and_resolve_mode(tmp_path, monkeypatch):
+    """L-048 part 2: per-task workflow='off'|'record'|'replay' overrides config/env via
+    ctx.workflow_mode and mobile_run_task validates and forwards it to both daemon and standalone."""
+    import os
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    import pytest
+
+    from artemis.agents.flash.workflow_hook import resolve_mode
+    from artemis.runtime import trace_store
+    from mcp_server.tools import task_runner
+
+    # ctx.workflow_mode beats env and config
+    monkeypatch.setenv("ARTEMIS_WORKFLOW_MODE", "replay")
+    cfg = SimpleNamespace(mode="replay", dir=None, max_steps=15)
+    assert resolve_mode(cfg, SimpleNamespace(workflow_mode="off"))[0] == "off"
+    assert resolve_mode(cfg, None)[0] == "replay"
+
+    # Rejects unknown workflow mode cleanly before trace init:
+    with pytest.raises(ValueError, match="Invalid workflow"):
+        task_runner.mobile_run_task(task_desc="test", model="Flash", workflow="bogus")
+
+    monkeypatch.setattr(trace_store, "TRACES_DIR", str(tmp_path))
+    monkeypatch.delenv("ARTEMIS_STANDALONE", raising=False)
+
+    daemon_submit = MagicMock(side_effect=lambda **kw: {"tasks": [{"session_id": kw["session_id"]}]})
+    with (
+        patch.object(task_runner, "ensure_daemon_running", return_value=(True, "http://127.0.0.1:9999")),
+        patch.object(task_runner, "submit_task_to_daemon", daemon_submit),
+    ):
+        task_runner.mobile_run_task(task_desc="Manual run", model="Flash", workflow="off")
+    assert daemon_submit.call_args.kwargs["workflow"] == "off"
+
+    popen_mock = MagicMock()
+    popen_mock.return_value.pid = os.getpid()
+    lock_cls_mock = MagicMock()
+    lock_cls_mock.reserve.return_value = "ticket-wf"
+    lock_cls_mock.QUEUE_TICKET_ENV = "ARTEMIS_QUEUE_TICKET"
+    with (
+        patch.object(task_runner, "ensure_daemon_running", return_value=(False, None)),
+        patch.object(task_runner, "DeviceExecutionLock", lock_cls_mock),
+        patch.object(task_runner.subprocess, "Popen", popen_mock),
+        patch.object(task_runner.threading, "Thread", return_value=MagicMock()),
+        patch.object(task_runner, "read_ipc_port", return_value=0),
+    ):
+        task_runner.mobile_run_task(task_desc="Standalone manual", model="Flash", workflow="off")
+    cmd = popen_mock.call_args.args[0]
+    env = popen_mock.call_args.kwargs["env"]
+    assert "--workflow" in cmd and cmd[cmd.index("--workflow") + 1] == "off"
+    assert env["ARTEMIS_WORKFLOW_MODE"] == "off"
+
+
+def test_l049_password_field_masks_and_accent_preservation():
+    """L-049: (1) password=true fields verify by masked char count ('••••' == len('pass')),
+    never warn when masked count matches or empty/unverifiable;
+    (2) field normalization keeps Vietnamese accents (NFC) so 'Ha Noi' != 'Hà Nội'."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from artemis.mcp.action_executor import McpActionExecutor
+    from artemis.mcp.action_types import ActionResult
+    from artemis.utils.visualization import format_minimal_list_with_elements
+    from artemis.workflow.autopilot import Autopilot
+    from artemis.workflow.fingerprint import app_fingerprint, normalize
+    from artemis.workflow.recorder import RawScreen
+    from artemis.workflow.store import Edge, Node, Workflow
+    from artemis.workflow.targets import TargetDescriptor, normalize_field_value
+
+    # 1) Accent preservation (NFC vs NFD vs ASCII drop)
+    assert normalize_field_value("Hà Nội") != normalize_field_value("Ha Noi")
+    assert normalize_field_value("Hà Nội") == normalize_field_value("hà nội")
+    assert normalize_field_value("Hà Nội") == normalize_field_value("Ha\u0300 No\u0302\u0323i")
+
+    pkg = "com.example.login"
+    pw_target = TargetDescriptor(hint="Password", resource_id=f"{pkg}:id/pw")
+    city_target = TargetDescriptor(hint="City", resource_id=f"{pkg}:id/city")
+
+    def screen_tree(*, pw_text: str = "", city_text: str = ""):
+        return [
+            {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+            {"bounds": "[50,200][950,290]", "text": pw_text, "hint": "Password", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/pw", "package": pkg, "visible": True, "editable": True, "password": True},
+            {"bounds": "[50,340][950,430]", "text": city_text, "hint": "City", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/city", "package": pkg, "visible": True, "editable": True, "password": False},
+        ]
+
+    R = lambda els: RawScreen(els, 1000, 1000)
+    fp = app_fingerprint(normalize(screen_tree(), 1000, 1000))
+    wf = Workflow(
+        workflow_id=f"{pkg}__1",
+        package=pkg,
+        goal="login",
+        slots={"slot1": "pass", "slot2": "Hà Nội"},
+        nodes={"n1": Node("n1", [fp])},
+        edges=[
+            Edge("e_pw", "n1", "n1", "slot", slot="slot1", tool="input_text", target=pw_target),
+            Edge("e_city", "n1", "n1", "slot", slot="slot2", tool="input_text", target=city_target),
+        ],
+    )
+    ap = Autopilot(wf, {"slot1": "pass", "slot2": "Hà Nội"}, verify_polls=1, poll_interval_s=0)
+
+    # Password mask matches password length -> verified True!
+    n_pw_ok = normalize(screen_tree(pw_text="••••"), 1000, 1000)
+    assert ap._verified(wf.edges[0], n_pw_ok, fp, "pass")
+    assert "slot1" in ap._held_slots("n1", n_pw_ok)
+
+    # Password mask wrong length -> verified False
+    n_pw_bad = normalize(screen_tree(pw_text="••••••"), 1000, 1000)
+    assert not ap._verified(wf.edges[0], n_pw_bad, fp, "pass")
+
+    # Empty password field (not verifiable) -> verified False, AND Autopilot does NOT emit misleading mismatch
+    class EmptyPwDriver:
+        def current(self):
+            return R(screen_tree(pw_text=""))
+
+        async def refresh(self):
+            return self.current()
+
+        async def act(self, tool, args, element):
+            return True, "ok"
+
+    rep_pw = asyncio.run(ap.run(EmptyPwDriver()))
+    assert not rep_pw.finished
+    assert "field holds" not in rep_pw.stop_reason
+
+    # City field losing Vietnamese accents ('Ha Noi' != 'Hà Nội') -> rejected by autopilot
+    n_city_lost = normalize(screen_tree(city_text="Ha Noi"), 1000, 1000)
+    n_city_ok = normalize(screen_tree(city_text="Hà Nội"), 1000, 1000)
+    assert not ap._verified(wf.edges[1], n_city_lost, fp, "Hà Nội")
+    assert ap._verified(wf.edges[1], n_city_ok, fp, "Hà Nội")
+
+    # Executor checks: password masked ('••••') and empty password ('') must NOT warn;
+    # city 'Ha Noi' vs 'Hà Nội' MUST warn.
+    pre_tree = screen_tree()
+    _, pre_els, _ = format_minimal_list_with_elements(pre_tree, 1000, 1000, compact=True)
+    pw_idx = next(el["index"] for el in pre_els if el.get("resource_id") == f"{pkg}:id/pw")
+    city_idx = next(el["index"] for el in pre_els if el.get("resource_id") == f"{pkg}:id/city")
+
+    post_tree_state = {"tree": pre_tree}
+
+    class FakeSession:
+        started = True
+
+        async def call(self, name, args):
+            return ActionResult.success(name, "ok")
+
+        async def observe(self, settle_ms=0, include_image=False, persist=True):
+            t = post_tree_state["tree"]
+            xml, els, _ = format_minimal_list_with_elements(t, 1000, 1000, compact=True)
+            ctx.last_raw_observation = {"elements": t, "width": 1000, "height": 1000, "seq": 2}
+            return SimpleNamespace(
+                ok=True, hierarchy_ok=True, elements=els, elements_text=xml,
+                width=1000, height=1000, screenshot_path=None, scrollable=False, message="ok", timed_out=False,
+            )
+
+    ctx = SimpleNamespace(
+        last_raw_observation={"elements": pre_tree, "width": 1000, "height": 1000, "seq": 1},
+        data_engine=None,
+        device=SimpleNamespace(device_width=1000, device_height=1000),
+    )
+    ex = McpActionExecutor(ctx, actuator=SimpleNamespace(extensions=lambda: (), controller=None), agent_name="flash")
+    ex._session = FakeSession()
+    state = SimpleNamespace(indexed_elements=pre_els, indexed_points=[el["center"] for el in pre_els], latest_screenshot=None, screen_scrollable=False)
+
+    # Password returns '••••' for len 4 -> no warning!
+    post_tree_state["tree"] = screen_tree(pw_text="••••")
+    res_pw_mask = asyncio.run(ex.execute("input_text", {"target": pw_idx, "text": "pass"}, "tc-pw1", state, index_elements=pre_els))
+    assert "Warning:" not in res_pw_mask.text_summary
+    assert "typed_value_mismatch" not in res_pw_mask.metadata
+
+    # Password returns empty '' -> unverifiable -> no warning!
+    post_tree_state["tree"] = screen_tree(pw_text="")
+    ex._last_point_action = None
+    ex._ineffective_taps = []
+    res_pw_empty = asyncio.run(ex.execute("input_text", {"target": pw_idx, "text": "pass"}, "tc-pw2", state, index_elements=pre_els))
+    assert "Warning:" not in res_pw_empty.text_summary
+    assert "typed_value_mismatch" not in res_pw_empty.metadata
+
+    # City typed 'Hà Nội' but ADB dropped accents to 'Ha Noi' -> fails with clear hint!
+    post_tree_state["tree"] = screen_tree(city_text="Ha Noi")
+    res_city = asyncio.run(ex.execute("input_text", {"target": city_idx, "text": "Hà Nội"}, "tc-city", state, index_elements=pre_els))
+    assert res_city.status == "error"
+    assert "field holds 'Ha Noi', requested 'Hà Nội'" in res_city.text_summary
+
+
+def test_l050_executor_refuses_input_text_on_non_field_and_labels_unlabeled_inputs():
+    """L-050: (1) compact list keeps unlabeled EditText even when a static TextView label
+    sits inside it (Company) and labels unlabeled input fields as '(input field: \"...\")'
+    from nearby XML/OCR text; (2) executor refuses input_text(target=i) aimed at a button
+    instead of an input field, while still allowing OCR/hint targets."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from artemis.mcp.action_executor import McpActionExecutor
+    from artemis.mcp.action_types import ActionResult
+    from artemis.utils.visualization import format_minimal_list_with_elements, merge_ocr_into_list
+
+    pkg = "com.example.contacts"
+    # Mirrors 325ba852 Create contact screen:
+    # - Button [100,150][350,250] (avatar button) -> (button)
+    # - Unlabeled EditText [100,600][620,680] with static TextView "Company" inside its bounds
+    # - Unlabeled EditText [100,800][620,880] below an OCR text "Email" at [120,760][220,795]
+    nodes = [
+        {"bounds": "[100,150][350,250]", "text": "", "class": "android.widget.Button", "package": pkg, "visible": True, "clickable": True},
+        {"bounds": "[100,600][620,680]", "text": "", "class": "android.widget.EditText", "package": pkg, "visible": True, "clickable": True, "editable": True},
+        {"bounds": "[128,630][267,670]", "text": "Company", "class": "android.widget.TextView", "package": pkg, "visible": True, "clickable": False},
+        {"bounds": "[100,800][620,880]", "text": "", "class": "android.widget.EditText", "package": pkg, "visible": True, "clickable": True, "editable": True},
+    ]
+    txt, els, _ = format_minimal_list_with_elements(nodes, 720, 1280, compact=True)
+    ocr_items = [{
+        "text": "Email",
+        "score": 0.99,
+        "position": [{"x": 120, "y": 760}, {"x": 220, "y": 760}, {"x": 220, "y": 795}, {"x": 120, "y": 795}],
+    }]
+    merged_txt, _ = merge_ocr_into_list(txt, els, ocr_items, 720, 1280)
+
+    assert '(button)' in merged_txt
+    assert '(input field: "Company")' in merged_txt
+    assert '(input field: "Email")' in merged_txt
+
+    btn_idx = next(el["index"] for el in els if el.get("class") == "android.widget.Button")
+    input_idx = next(el["index"] for el in els if el.get("nearby_label") == "Company")
+    ocr_idx = next(el["index"] for el in els if el.get("is_ocr"))
+
+    ctx = SimpleNamespace(
+        last_raw_observation={"elements": nodes, "width": 720, "height": 1280, "seq": 1},
+        data_engine=None,
+        device=SimpleNamespace(device_width=720, device_height=1280),
+    )
+
+    class FakeSession:
+        started = True
+
+        def __init__(self):
+            self.calls = []
+
+        async def call(self, name, args):
+            self.calls.append((name, dict(args)))
+            return ActionResult.success(name, "ok")
+
+        async def observe(self, settle_ms=0, include_image=False, persist=True):
+            return SimpleNamespace(
+                ok=True, hierarchy_ok=True, elements=els, elements_text=merged_txt,
+                width=720, height=1280, screenshot_path=None, scrollable=False, message="ok", timed_out=False,
+            )
+
+    ex = McpActionExecutor(ctx, actuator=SimpleNamespace(extensions=lambda: (), controller=None), agent_name="flash")
+    ex._session = FakeSession()
+    state = SimpleNamespace(indexed_elements=els, indexed_points=[e["center"] for e in els], latest_screenshot=None, screen_scrollable=False)
+
+    # Targeting the avatar button with input_text is refused without dispatching tap/type:
+    res_btn = asyncio.run(ex.execute("input_text", {"target": btn_idx, "text": "Dung Mac"}, "tc-btn", state, index_elements=els))
+    assert res_btn.status == "error"
+    assert "not an input field" in res_btn.text_summary
+    assert "without target" in res_btn.text_summary
+    assert ex._session.calls == []
+
+    # Targeting real unlabeled input field or OCR label works:
+    res_inp = asyncio.run(ex.execute("input_text", {"target": input_idx, "text": "Acme"}, "tc-inp", state, index_elements=els))
+    assert res_inp.status == "success"
+    res_ocr = asyncio.run(ex.execute("input_text", {"target": ocr_idx, "text": "a@b.com"}, "tc-ocr", state, index_elements=els))
+    assert res_ocr.status == "success"
+    assert [c[0] for c in ex._session.calls] == ["input_text", "input_text"]
+
+
+def test_l051_typed_mismatch_fails_and_reminds_once_on_report_completion():
+    """L-051: when post-typing field text diverges from expected (e.g. '+10913400134'
+    vs '0913400134'), input_text fails with clear instructions while keeping fresh XML,
+    and report_task_status(completed) reminds the AI once if left unfixed."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from langchain_core.messages import ToolMessage
+
+    from artemis.agents.flash.runner import FlashRunner, _TurnRecord
+    from artemis.mcp.action_executor import McpActionExecutor
+    from artemis.mcp.action_types import ActionResult
+    from artemis.utils.visualization import format_minimal_list_with_elements
+
+    pkg = "com.example.contacts"
+
+    def phone_tree(val: str):
+        return [
+            {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+            {"bounds": "[50,300][950,400]", "text": val, "hint": "Phone", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/phone", "package": pkg, "visible": True, "editable": True},
+        ]
+
+    pre_tree = phone_tree("+1")
+    _, pre_els, _ = format_minimal_list_with_elements(pre_tree, 1000, 1000, compact=True)
+    phone_idx = next(e["index"] for e in pre_els if e.get("resource_id") == f"{pkg}:id/phone")
+    post_tree_bad = phone_tree("+10913400134")
+    bad_xml, bad_els, _ = format_minimal_list_with_elements(post_tree_bad, 1000, 1000, compact=True)
+
+    ctx = SimpleNamespace(
+        last_raw_observation={"elements": pre_tree, "width": 1000, "height": 1000, "seq": 1},
+        data_engine=None,
+        device=SimpleNamespace(device_width=1000, device_height=1000),
+    )
+
+    class FakeSession:
+        started = True
+
+        async def call(self, name, args):
+            return ActionResult.success(name, f"Typed '{args.get('text')}'")
+
+        async def observe(self, settle_ms=0, include_image=False, persist=True):
+            ctx.last_raw_observation = {"elements": post_tree_bad, "width": 1000, "height": 1000, "seq": 2}
+            return SimpleNamespace(
+                ok=True, hierarchy_ok=True, elements=bad_els, elements_text=bad_xml,
+                width=1000, height=1000, screenshot_path=None, scrollable=False, message="ok", timed_out=False,
+            )
+
+    ex = McpActionExecutor(ctx, actuator=SimpleNamespace(extensions=lambda: (), controller=None), agent_name="flash")
+    ex._session = FakeSession()
+    state = SimpleNamespace(indexed_elements=pre_els, indexed_points=[e["center"] for e in pre_els], latest_screenshot=None, screen_scrollable=False)
+
+    res = asyncio.run(
+        ex.execute("input_text", {"target": phone_idx, "text": "0913400134", "clear_exist": False}, "tc-bad", state, index_elements=pre_els)
+    )
+    assert res.status == "error"
+    assert "+10913400134" in res.text_summary and "clear_exist=true" in res.text_summary
+    assert res.ui_elements_text == bad_xml  # updated UI context still delivered
+
+    runner = FlashRunner.__new__(FlashRunner)
+    runner.ctx = ctx
+    runner.executor = ex
+    runner.controller = MagicMock()
+    runner.goal = "save contact"
+    runner.fast_burst = True
+    runner.summarizer = None
+    runner._raise_if_device_offline = lambda **_kw: None
+    runner._wf = None
+    runner._loop_guard = None
+    runner._scroll_probes = 99
+    runner._finalize_task_report = AsyncMock(return_value={"status": "completed", "explanation": "done"})
+
+    # First report_task_status(completed) without fixing reminds once:
+    msgs1: list = []
+    report1, _, _, _ = asyncio.run(
+        runner._process_tool_calls(
+            [{"name": "report_task_status", "args": {"status": "completed", "explanation": "saved"}, "id": "tc-rep1"}],
+            state, msgs1, "thought", {}, b"img", bad_xml, 0, _TurnRecord(),
+        )
+    )
+    assert report1 is None
+    assert len(msgs1) == 1 and msgs1[0].status == "error"
+    assert "+10913400134" in msgs1[0].content and "0913400134" in msgs1[0].content
+
+    # Second call after AI explains / proceeds is allowed through:
+    msgs2: list = []
+    report2, _, _, _ = asyncio.run(
+        runner._process_tool_calls(
+            [{"name": "report_task_status", "args": {"status": "completed", "explanation": "explained"}, "id": "tc-rep2"}],
+            state, msgs2, "thought", {}, b"img", bad_xml, 0, _TurnRecord(),
+        )
+    )
+    assert report2 == {"status": "completed", "explanation": "done"}
+
+
+def test_l055_numeric_commas_auto_format_retry_append_and_prefill_failure():
+    """L-055: (1) only untyped prefill+typed concats fail; (2) intentional appends onto
+    session-typed text are accepted without mismatch; (3) retrying with clear_exist=True
+    when app keeps auto-formatting downgrades to warning & clears completion block;
+    (4) numeric thousands commas are ignored when comparing numeric values."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from artemis.agents.flash.runner import FlashRunner, _TurnRecord
+    from artemis.mcp.action_executor import McpActionExecutor
+    from artemis.mcp.action_types import ActionResult
+    from artemis.utils.visualization import format_minimal_list_with_elements
+    from artemis.workflow.targets import check_field_value, normalize_field_value
+
+    # (4) Numeric thousands comma normalization
+    assert normalize_field_value("1,000,000") == normalize_field_value("1000000")
+    assert check_field_value({"text": "1,000,000"}, "1000000") == (True, True, "1,000,000")
+
+    pkg = "com.example.form"
+
+    def make_tree(amount="", phone="", note="", prefill=""):
+        return [
+            {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+            {"bounds": "[50,100][950,200]", "text": amount, "hint": "Amount", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/amount", "package": pkg, "visible": True, "editable": True},
+            {"bounds": "[50,250][950,350]", "text": phone, "hint": "Phone", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/phone", "package": pkg, "visible": True, "editable": True},
+            {"bounds": "[50,400][950,500]", "text": note, "hint": "Note", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/note", "package": pkg, "visible": True, "editable": True},
+            {"bounds": "[50,550][950,650]", "text": prefill, "hint": "HomePhone", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/home_phone", "package": pkg, "visible": True, "editable": True},
+        ]
+
+    live_tree = make_tree(prefill="+1")
+    _, init_els, _ = format_minimal_list_with_elements(live_tree, 1000, 1000, compact=True)
+    ctx = SimpleNamespace(
+        last_raw_observation={"elements": live_tree, "width": 1000, "height": 1000, "seq": 1},
+        data_engine=None,
+        device=SimpleNamespace(device_width=1000, device_height=1000),
+    )
+    next_tree = {"tree": live_tree}
+
+    class FakeSession:
+        started = True
+
+        async def call(self, name, args):
+            return ActionResult.success(name, f"Typed '{args.get('text')}'")
+
+        async def observe(self, settle_ms=0, include_image=False, persist=True):
+            t = next_tree["tree"]
+            xml, els, _ = format_minimal_list_with_elements(t, 1000, 1000, compact=True)
+            ctx.last_raw_observation = {"elements": t, "width": 1000, "height": 1000, "seq": ctx.last_raw_observation["seq"] + 1}
+            return SimpleNamespace(
+                ok=True, hierarchy_ok=True, elements=els, elements_text=xml,
+                width=1000, height=1000, screenshot_path=None, scrollable=False, message="ok", timed_out=False,
+            )
+
+    ex = McpActionExecutor(ctx, actuator=SimpleNamespace(extensions=lambda: (), controller=None), agent_name="flash")
+    ex._session = FakeSession()
+    state = SimpleNamespace(indexed_elements=init_els, indexed_points=[e["center"] for e in init_els], latest_screenshot=None, screen_scrollable=False)
+
+    def idx_for(rid):
+        return next(e["index"] for e in state.indexed_elements if e.get("resource_id") == f"{pkg}:id/{rid}")
+
+    # 1) Numeric commas: "1000000" formatted as "1,000,000" -> passes cleanly
+    next_tree["tree"] = make_tree(amount="1,000,000", prefill="+1")
+    res_num = asyncio.run(ex.execute("input_text", {"target": idx_for("amount"), "text": "1000000"}, "tc-num", state))
+    assert res_num.status == "success"
+    assert "typed_value_mismatch" not in res_num.metadata
+
+    # 2) App auto-formats "+84 912 345 678" when clear_exist=True retry happens (and first attempt):
+    next_tree["tree"] = make_tree(amount="1,000,000", phone="+84 912 345 678", prefill="+1")
+    res_vn1 = asyncio.run(ex.execute("input_text", {"target": idx_for("phone"), "text": "0912345678", "clear_exist": False}, "tc-vn1", state))
+    assert res_vn1.status == "success"
+    res_vn2 = asyncio.run(ex.execute("input_text", {"target": idx_for("phone"), "text": "0912345678", "clear_exist": True}, "tc-vn2", state))
+    assert res_vn2.status == "success"
+    assert ex.consume_unfixed_typed_mismatches() == []
+
+    ex.task_goal = "Fill the form: amount 1000000, phone 0912345678, note Hello world"
+    # 3) Intentional append ("Hello" + " world", clear_exist=False) -> no L-037 block & no mismatch!
+    next_tree["tree"] = make_tree(amount="1,000,000", phone="+84 912 345 678", note="Hello", prefill="+1")
+    res_h1 = asyncio.run(ex.execute("input_text", {"target": idx_for("note"), "text": "Hello"}, "tc-h1", state))
+    assert res_h1.status == "success"
+    next_tree["tree"] = make_tree(amount="1,000,000", phone="+84 912 345 678", note="Hello world", prefill="+1")
+    res_h2 = asyncio.run(ex.execute("input_text", {"target": idx_for("note"), "text": " world", "clear_exist": False}, "tc-h2", state))
+    assert res_h2.status == "success"
+    assert "typed_value_mismatch" not in res_h2.metadata
+    assert "Note: field holds" not in res_h2.text_summary
+
+    # 3b) L-056: appending text the goal does NOT ask for onto a value typed in this run
+    # ("Son" + "Dao" pattern) is still refused by L-037, even with clear_exist=False.
+    res_bad = asyncio.run(ex.execute("input_text", {"target": idx_for("note"), "text": "Dao", "clear_exist": False}, "tc-bad", state))
+    assert res_bad.status == "error"
+    assert "already holds" in res_bad.text_summary
+
+    # 4) Leftover prefill "+1" NOT typed in this run -> still FAILS!
+    next_tree["tree"] = make_tree(amount="1,000,000", phone="+84 912 345 678", note="Hello world", prefill="+10913400134")
+    res_pre = asyncio.run(ex.execute("input_text", {"target": idx_for("home_phone"), "text": "0913400134", "clear_exist": False}, "tc-pre", state))
+    assert res_pre.status == "error"
+    assert "clear_exist=true" in res_pre.text_summary
+    assert len(ex.consume_unfixed_typed_mismatches()) == 1
+
+    # Retrying home_phone after clearing "+1" succeeds (and even if app re-inserts +84 913 400 134 it warns only):
+    next_tree["tree"] = make_tree(amount="1,000,000", phone="+84 912 345 678", note="Hello world", prefill="+84 913 400 134")
+    res_retry = asyncio.run(ex.execute("input_text", {"target": idx_for("home_phone"), "text": "0913400134", "clear_exist": True}, "tc-retry", state))
+    assert res_retry.status == "success"
+
+    runner = FlashRunner.__new__(FlashRunner)
+    runner.ctx = ctx
+    runner.executor = ex
+    runner.controller = MagicMock()
+    runner.goal = "submit form"
+    runner.fast_burst = True
+    runner.summarizer = None
+    runner._raise_if_device_offline = lambda **_kw: None
+    runner._wf = None
+    runner._loop_guard = None
+    runner._scroll_probes = 99
+    runner._finalize_task_report = AsyncMock(return_value={"status": "completed", "explanation": "ok"})
+    msgs: list = []
+    report, _, _, _ = asyncio.run(
+        runner._process_tool_calls(
+            [{"name": "report_task_status", "args": {"status": "completed", "explanation": "ok"}, "id": "tc-done"}],
+            state, msgs, "done", {}, b"img", "", 0, _TurnRecord(),
+        )
+    )
+    assert report == {"status": "completed", "explanation": "ok"}
+
+
+def test_l053_compact_list_folds_keyboard_keys_keeps_action_keys_and_orders_app_first():
+    """L-053: when an IME window is open, compact list prints app elements first,
+    folds regular keyboard keys into one summary line, keeps action keys ('Done',
+    'Hide keyboard') with valid indices, and ignores keyboard OCR during merge."""
+    from artemis.utils.visualization import (
+        _keyboard_window_info,
+        format_minimal_list_with_elements,
+        merge_ocr_into_list,
+    )
+
+    ime = "com.google.android.inputmethod.latin"
+    app = "com.example.contacts"
+    # Keyboard nodes deliberately appear FIRST (matching real Android dump order):
+    kb_nodes = [
+        {"bounds": "[0,1450][1080,2400]", "text": "", "class": "android.widget.FrameLayout", "package": ime, "visible": True},
+        {"bounds": "[30,1470][160,1550]", "content-desc": "Hide keyboard", "class": "android.widget.ImageButton", "resource-id": f"{ime}:id/hide_keyboard", "package": ime, "visible": True, "clickable": True},
+        {"bounds": "[200,1470][320,1550]", "text": "GIF", "class": "android.widget.Button", "package": ime, "visible": True, "clickable": True},
+    ] + [
+        {"bounds": f"[{20 + i * 105},1600][{115 + i * 105},1740]", "text": ch, "class": "android.view.View", "package": ime, "visible": True, "clickable": True}
+        for i, ch in enumerate("qwertyuiop")
+    ] + [
+        {"bounds": "[880,2100][1050,2260]", "content-desc": "Done", "class": "android.widget.ImageButton", "resource-id": f"{ime}:id/key_pos_ime_action", "package": ime, "visible": True, "clickable": True},
+    ]
+    app_nodes = [
+        {"bounds": "[0,0][1080,2400]", "text": "", "class": "android.widget.FrameLayout", "package": app, "visible": True},
+        {"bounds": "[40,120][480,190]", "text": "Create contact", "class": "android.widget.TextView", "package": app, "visible": True},
+        {"bounds": "[820,120][1020,190]", "text": "Save", "class": "android.widget.Button", "package": app, "visible": True, "clickable": True},
+        {"bounds": "[100,400][980,500]", "text": "", "class": "android.widget.EditText", "package": app, "visible": True, "clickable": True, "editable": True, "focused": True},
+    ]
+    nodes = kb_nodes + app_nodes
+    text, els, _ = format_minimal_list_with_elements(nodes, 1080, 2400, compact=True)
+    lines = text.splitlines()
+
+    # App elements appear BEFORE the keyboard summary line and regular keys ("q", "GIF") are folded:
+    kb_summary_pos = next(i for i, l in enumerate(lines) if l.startswith("(keyboard open "))
+    create_pos = next(i for i, l in enumerate(lines) if '"Create contact"' in l)
+    input_pos = next(i for i, l in enumerate(lines) if "(input field)" in l)
+    hide_pos = next(i for i, l in enumerate(lines) if '"Hide keyboard"' in l)
+    done_pos = next(i for i, l in enumerate(lines) if '"Done"' in l)
+    assert create_pos < input_pos < kb_summary_pos < hide_pos < done_pos
+    assert not any('"q"' in l or '"GIF"' in l for l in lines)
+
+    # Indices stay strictly aligned with elements[idx - 1], and kept action keys have is_keyboard=True:
+    done_el = els[next(i for i, e in enumerate(els) if e.get("text") == "Done")]
+    assert done_el["is_keyboard"] is True
+    assert f"[{done_el['index']}] \"Done\"" in lines[done_pos]
+    for pos_i, el in enumerate(els):
+        assert el["index"] == pos_i + 1
+
+    # OCR merge with ignore_boxes=[kb_box] skips keyboard OCR ("GIF") while adding app OCR ("Email"):
+    _, kb_box = _keyboard_window_info(nodes, 1080, 2400)
+    assert kb_box is not None
+    ocr_reads = [
+        {"text": "Email", "score": 0.99, "position": [{"x": 120, "y": 355}, {"x": 240, "y": 355}, {"x": 240, "y": 390}, {"x": 120, "y": 390}]},
+        {"text": "English", "score": 0.99, "position": [{"x": 420, "y": 2150}, {"x": 620, "y": 2150}, {"x": 620, "y": 2200}, {"x": 420, "y": 2200}]},
+    ]
+    merged, _ = merge_ocr_into_list(text, els, ocr_reads, 1080, 2400, ignore_boxes=[kb_box])
+    assert '(input field: "Email")' in merged
+    assert "English" not in merged
+
+
+def test_l054_selective_som_draws_only_unlabeled_inputs_and_ocr_within_budget():
+    """L-054: draw_som_marks renders Set-of-Mark v2 boxes ONLY on unlabeled controls,
+    input fields, and OCR gap-fill elements (never XML-labeled non-inputs or keyboard keys),
+    wires cleanly through FlashRunner._build_tail with model_image.marks, and runs < 50ms."""
+    from io import BytesIO
+    import time
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from PIL import Image, ImageChops
+
+    from artemis.config.agent import FlashModelImageConfig
+    from artemis.agents.flash.runner import FlashRunner
+    from artemis.utils.visualization import (
+        draw_som_marks,
+        format_minimal_list_with_elements,
+        merge_ocr_into_list,
+        select_som_elements,
+    )
+
+    ime = "com.google.android.inputmethod.latin"
+    app = "com.example.contacts"
+    nodes = [
+        {"bounds": "[0,0][1080,2400]", "text": "", "class": "android.widget.FrameLayout", "package": app, "visible": True},
+        {"bounds": "[40,100][400,180]", "text": "Contacts", "class": "android.widget.TextView", "package": app, "visible": True},
+        {"bounds": "[450,240][630,420]", "text": "", "class": "android.widget.ImageButton", "package": app, "visible": True, "clickable": True},
+        {"bounds": "[100,520][980,640]", "text": "", "class": "android.widget.EditText", "package": app, "visible": True, "clickable": True, "editable": True},
+        {"bounds": "[0,1500][1080,2400]", "text": "", "class": "android.widget.FrameLayout", "package": ime, "visible": True},
+        {"bounds": "[20,1600][120,1720]", "text": "a", "class": "android.view.View", "package": ime, "visible": True, "clickable": True},
+        {"bounds": "[880,2100][1050,2260]", "content-desc": "Done", "class": "android.widget.ImageButton", "resource-id": f"{ime}:id/key_pos_ime_action", "package": ime, "visible": True, "clickable": True},
+    ]
+    txt, els, _ = format_minimal_list_with_elements(nodes, 1080, 2400, compact=True)
+    ocr_reads = [{"text": "Email", "score": 0.99, "position": [{"x": 120, "y": 820}, {"x": 260, "y": 820}, {"x": 260, "y": 870}, {"x": 120, "y": 870}]}]
+    merge_ocr_into_list(txt, els, ocr_reads, 1080, 2400)
+
+    selected = select_som_elements(els)
+    selected_indices = {e["index"] for e in selected}
+    contacts_el = next(e for e in els if e.get("text") == "Contacts")
+    avatar_el = next(e for e in els if e.get("is_icon") and "Image" in str(e.get("class") or ""))
+    input_el = next(e for e in els if "EditText" in str(e.get("class") or ""))
+    ocr_el = next(e for e in els if e.get("is_ocr"))
+    done_el = next(e for e in els if e.get("text") == "Done")
+
+    assert contacts_el["index"] not in selected_indices
+    assert done_el["index"] not in selected_indices
+    assert {avatar_el["index"], input_el["index"], ocr_el["index"]}.issubset(selected_indices)
+
+    raw_img = Image.new("RGB", (1080, 2400), (245, 245, 245))
+    buf = BytesIO()
+    raw_img.save(buf, format="JPEG", quality=85)
+    raw_bytes = buf.getvalue()
+
+    marked_full = draw_som_marks(raw_bytes, els, max_side=0, jpeg_quality=85)
+    marked_im = Image.open(BytesIO(marked_full))
+    diff = ImageChops.difference(Image.open(BytesIO(raw_bytes)), marked_im)
+    # Labeled "Contacts" & keyboard "Done" crops have zero annotation pixels; avatar/input have red marks:
+    assert diff.crop((40, 100, 400, 180)).getbbox() is None
+    assert diff.crop((880, 2100, 1050, 2260)).getbbox() is None
+    assert diff.crop((445, 210, 635, 425)).getbbox() is not None
+    assert diff.crop((95, 490, 985, 645)).getbbox() is not None
+
+    # Timing check: warm draw + resize to max_side=768 under 50ms:
+    _ = draw_som_marks(raw_bytes, els, max_side=768, jpeg_quality=75)
+    t0 = time.monotonic()
+    for _ in range(5):
+        out_shrunk = draw_som_marks(raw_bytes, els, max_side=768, jpeg_quality=75)
+    avg_ms = ((time.monotonic() - t0) / 5.0) * 1000.0
+    assert avg_ms < 50.0, f"SoM drawing too slow: {avg_ms:.1f}ms/screen"
+    assert Image.open(BytesIO(out_shrunk)).size == (346, 768)
+
+    # FlashRunner._build_tail wiring for marks='unlabeled' vs 'off':
+    runner = FlashRunner.__new__(FlashRunner)
+    runner.image_on_demand = False
+    ledger = MagicMock()
+    ledger.elapsed_label.return_value = "T+00:05"
+
+    runner.model_image_cfg = FlashModelImageConfig(max_side=768, jpeg_quality=75, marks="unlabeled")
+    tail_on = runner._build_tail(ledger, 1, raw_bytes, txt, elements=els)
+    img_block_on = next(b for b in tail_on.content if isinstance(b, dict) and b.get("type") == "image_url")
+
+    runner.model_image_cfg = FlashModelImageConfig(max_side=768, jpeg_quality=75, marks="off")
+    tail_off = runner._build_tail(ledger, 1, raw_bytes, txt, elements=els)
+    img_block_off = next(b for b in tail_off.content if isinstance(b, dict) and b.get("type") == "image_url")
+    assert img_block_on["image_url"]["url"] != img_block_off["image_url"]["url"]
+
+
+def test_l057_recorder_skips_incomplete_or_wrong_field_runs_and_handles_passwords():
+    """L-057: recorder refuses to save/merge workflows when a requested numeric/quoted/slot
+    value is missing from both typing and the post-save outcome (Toan/Le without phone),
+    when outcome screen echoes saved values yet drops one field, or when a slot lands in
+    a field whose label conflicts with a goal keyword ('last name Le' typed into 'Company');
+    password inputs and non-echoing confirmation screens still record."""
+    from artemis.workflow.recorder import RawScreen, RecordedStep, record_run
+
+    pkg = "com.example.contacts"
+    R = lambda nodes: RawScreen(nodes, 1000, 1000)  # noqa: E731
+
+    def form(name="", company="", first="", last="", phone="", *, two_names=False):
+        nodes = [
+            {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+            {"bounds": "[760,40][960,110]", "text": "Save", "class": "android.widget.Button", "resource-id": f"{pkg}:id/save", "package": pkg, "visible": True, "clickable": True},
+            {"bounds": "[80,520][920,600]", "text": company, "hint": "Company", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/company", "package": pkg, "visible": True, "editable": True},
+            {"bounds": "[80,640][920,720]", "text": phone, "hint": "Phone", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/phone", "package": pkg, "visible": True, "editable": True},
+        ]
+        if two_names:
+            nodes.insert(2, {"bounds": "[80,260][920,340]", "text": first, "hint": "First name", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/first", "package": pkg, "visible": True, "editable": True})
+            nodes.insert(3, {"bounds": "[80,380][920,460]", "text": last, "hint": "Last name", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/last", "package": pkg, "visible": True, "editable": True})
+        else:
+            nodes.insert(2, {"bounds": "[80,260][920,340]", "text": name, "hint": "Name", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/name", "package": pkg, "visible": True, "editable": True})
+        return nodes
+
+    def detail(*labels):
+        return [
+            {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+            *[
+                {"bounds": f"[60,{160 + i * 90}][800,{230 + i * 90}]", "text": lbl, "class": "android.widget.TextView", "package": pkg, "visible": True}
+                for i, lbl in enumerate(labels)
+            ],
+        ]
+
+    # 1) Toan / Le bug: Qwen typed "Toan" -> Name, "Le" -> Company, skipped phone "0916200162", pressed Save:
+    bad_toan = [
+        RecordedStep(tool="input_text", args={"text": "Toan", "target": 3}, action={"normalized_coordinates": [300, 300]}, pre=R(form()), post=R(form(name="Toan"))),
+        RecordedStep(tool="input_text", args={"text": "Le", "target": 4}, action={"normalized_coordinates": [300, 560]}, pre=R(form(name="Toan")), post=R(form(name="Toan", company="Le"))),
+        RecordedStep(tool="click", args={"target": 2}, action={"normalized_coordinates": [850, 75], "target_text": "Save", "target_resource_id": f"{pkg}:id/save"}, pre=R(form(name="Toan", company="Le")), post=R(detail("Toan", "Le"))),
+    ]
+    assert record_run(bad_toan, goal="Create contact Toan Le, phone 0916200162") is None
+
+    # 2) Typed all 3, but "Le" landed in Company instead of Last name when goal explicitly said "last name Le":
+    wrong_field = [
+        RecordedStep(tool="input_text", args={"text": "Toan", "target": 3}, action={"normalized_coordinates": [300, 300]}, pre=R(form(two_names=True)), post=R(form(first="Toan", two_names=True))),
+        RecordedStep(tool="input_text", args={"text": "Le", "target": 5}, action={"normalized_coordinates": [300, 560]}, pre=R(form(first="Toan", two_names=True)), post=R(form(first="Toan", company="Le", two_names=True))),
+        RecordedStep(tool="input_text", args={"text": "0916200162", "target": 6}, action={"normalized_coordinates": [300, 680]}, pre=R(form(first="Toan", company="Le", two_names=True)), post=R(form(first="Toan", company="Le", phone="0916200162", two_names=True))),
+        RecordedStep(tool="click", args={"target": 2}, action={"normalized_coordinates": [850, 75], "target_text": "Save", "target_resource_id": f"{pkg}:id/save"}, pre=R(form(first="Toan", company="Le", phone="0916200162", two_names=True)), post=R(detail("Toan", "Le", "0916200162"))),
+    ]
+    assert record_run(wrong_field, goal="Create contact first name Toan last name Le phone 0916200162") is None
+
+    # 3) Good run (Name="Toan Le", Phone="0916200162", detail shows formatted "+84 916 200 162") records cleanly:
+    good_run = [
+        RecordedStep(tool="input_text", args={"text": "Toan Le", "target": 3}, action={"normalized_coordinates": [300, 300]}, pre=R(form()), post=R(form(name="Toan Le"))),
+        RecordedStep(tool="input_text", args={"text": "0916200162", "target": 5}, action={"normalized_coordinates": [300, 680]}, pre=R(form(name="Toan Le")), post=R(form(name="Toan Le", phone="0916200162"))),
+        RecordedStep(tool="click", args={"target": 2}, action={"normalized_coordinates": [850, 75], "target_text": "Save", "target_resource_id": f"{pkg}:id/save"}, pre=R(form(name="Toan Le", phone="0916200162")), post=R(detail("Toan Le", "+84 916 200 162"))),
+    ]
+    assert record_run(good_run, goal="Create contact Toan Le, phone 0916200162") is not None
+
+
+def test_l058_and_l059_completion_check_and_typed_progress_tracker():
+    """L-058 & L-059: (1) _typed_progress_line tracks (text -> field label) per typed field and
+    shows requested literals status (not added on non-form tasks); (2) report_task_status(completed)
+    rejects once when a requested literal was never typed and never shown on screen, then accepts
+    when typed or after retry/explanation."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from artemis.agents.flash.runner import FlashRunner, _TurnRecord
+    from artemis.mcp.action_executor import McpActionExecutor
+    from artemis.mcp.action_types import ActionResult
+    from artemis.utils.visualization import format_minimal_list_with_elements
+
+    pkg = "com.example.contacts"
+
+    def form_tree(name="", company="", phone=""):
+        return [
+            {"bounds": "[0,0][1000,1000]", "class": "android.widget.FrameLayout", "package": pkg, "visible": True},
+            {"bounds": "[80,200][920,280]", "text": name, "hint": "Name", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/name", "package": pkg, "visible": True, "editable": True},
+            {"bounds": "[80,320][920,400]", "text": company, "hint": "Company", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/company", "package": pkg, "visible": True, "editable": True},
+            {"bounds": "[80,440][920,520]", "text": phone, "hint": "Phone", "class": "android.widget.EditText", "resource-id": f"{pkg}:id/phone", "package": pkg, "visible": True, "editable": True},
+        ]
+
+    init_tree = form_tree()
+    init_xml, init_els, _ = format_minimal_list_with_elements(init_tree, 1000, 1000, compact=True)
+    ctx = SimpleNamespace(
+        last_raw_observation={"elements": init_tree, "width": 1000, "height": 1000, "seq": 1},
+        data_engine=None,
+        device=SimpleNamespace(device_width=1000, device_height=1000),
+    )
+
+    ex = McpActionExecutor(ctx, actuator=SimpleNamespace(extensions=lambda: (), controller=None), agent_name="flash")
+    runner = FlashRunner.__new__(FlashRunner)
+    runner.ctx = ctx
+    runner.executor = ex
+    runner.controller = MagicMock()
+    runner.goal = "Create contact Toan Le, phone 0916200162"
+    runner.fast_burst = True
+    runner.summarizer = None
+    runner._raise_if_device_offline = lambda **_kw: None
+    runner._wf = None
+    runner._loop_guard = None
+    runner._scroll_probes = 99
+    runner._typed_field_history = []
+    runner._reminded_missing_literals = False
+    runner.image_on_demand = False
+    runner._finalize_task_report = AsyncMock(return_value={"status": "completed", "explanation": "done"})
+
+    state = SimpleNamespace(indexed_elements=init_els, indexed_points=[e["center"] for e in init_els], latest_screenshot=None, screen_scrollable=False)
+
+    # Record wrong placement ("Toan" -> Name, "Le" -> Company):
+    ctx.last_raw_observation = {"elements": form_tree(name="Toan"), "width": 1000, "height": 1000, "seq": 2}
+    runner._record_typed_field_entry(
+        {"target": 1, "text": "Toan"},
+        index_elements=init_els,
+        state=state,
+        pre_raw={"elements": init_tree, "width": 1000, "height": 1000},
+        exec_result=SimpleNamespace(status="success", metadata={"target_coordinates": init_els[0]["center"]}),
+    )
+    ctx.last_raw_observation = {"elements": form_tree(name="Toan", company="Le"), "width": 1000, "height": 1000, "seq": 3}
+    runner._record_typed_field_entry(
+        {"target": 2, "text": "Le"},
+        index_elements=init_els,
+        state=state,
+        pre_raw={"elements": form_tree(name="Toan"), "width": 1000, "height": 1000},
+        exec_result=SimpleNamespace(status="success", metadata={"target_coordinates": init_els[1]["center"]}),
+    )
+
+    ledger = MagicMock()
+    ledger.elapsed_label.return_value = "T+00:10"
+    tail = runner._build_tail(ledger, 2, None, init_xml, elements=init_els)
+    header_txt = tail.content[0]["text"]
+    assert "'Toan' → Name" in header_txt and "'Le' → Company" in header_txt
+    assert '"0916200162" ✗ not entered yet' in header_txt
+
+    # Non-form task (no literals & nothing typed) produces NO task-values line:
+    plain_runner = FlashRunner.__new__(FlashRunner)
+    plain_runner.goal = "Open Settings and toggle Wi-Fi"
+    plain_runner.ctx = SimpleNamespace(last_raw_observation=None)
+    plain_runner.image_on_demand = False
+    plain_tail = plain_runner._build_tail(ledger, 1, None, "[1] \"Wi-Fi\" 0,0,100,100")
+    assert "Typed so far" not in plain_tail.content[0]["text"]
+    assert "Requested values" not in plain_tail.content[0]["text"]
+
+    # L-058: report_task_status(completed) without typing/showing "0916200162" reminds once:
+    msgs1: list = []
+    rep1, _, _, _ = asyncio.run(
+        runner._process_tool_calls(
+            [{"name": "report_task_status", "args": {"status": "completed", "explanation": "created"}, "id": "tc-m1"}],
+            state, msgs1, "done", {}, b"img", init_xml, 0, _TurnRecord(),
+        )
+    )
+    assert rep1 is None and msgs1[0].status == "error"
+    assert "0916200162" in msgs1[0].content
+
+    # Typing "0916200162" satisfies L-058 and updates L-059 status:
+    ctx.last_raw_observation = {"elements": form_tree(name="Toan", company="Le", phone="0916200162"), "width": 1000, "height": 1000, "seq": 4}
+    runner._record_typed_field_entry(
+        {"target": 3, "text": "0916200162"},
+        index_elements=init_els,
+        state=state,
+        pre_raw={"elements": form_tree(name="Toan", company="Le"), "width": 1000, "height": 1000},
+        exec_result=SimpleNamespace(status="success", metadata={"target_coordinates": init_els[2]["center"]}),
+    )
+    runner._reminded_missing_literals = False  # verify clean pass even before consuming reminder
+    tail2 = runner._build_tail(ledger, 3, None, init_xml, elements=init_els)
+    assert '"0916200162" ✓ typed (Phone)' in tail2.content[0]["text"]
+
+    msgs2: list = []
+    rep2, _, _, _ = asyncio.run(
+        runner._process_tool_calls(
+            [{"name": "report_task_status", "args": {"status": "completed", "explanation": "created"}, "id": "tc-m2"}],
+            state, msgs2, "done", {}, b"img", init_xml, 0, _TurnRecord(),
+        )
+    )
+    assert rep2 == {"status": "completed", "explanation": "done"}
+
+
+def test_l060_swipe_diff_direction_and_scroll_edge_feedback():
+    """L-060: swipe reports finger vs page direction plus New/Hidden elements,
+    records TOP/BOTTOM edge hints ONLY after a blocked directional swipe,
+    exposes the edge hint in _build_tail, and resets it once the page moves."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from artemis.agents.flash.runner import FlashRunner
+    from artemis.mcp.action_executor import McpActionExecutor
+    from artemis.mcp.action_types import ActionResult
+    from artemis.utils.visualization import format_minimal_list_with_elements
+
+    pkg = "com.example.contacts"
+
+    def make_tree(items, *, scrollable=True):
+        return [
+            {"bounds": "[0,0][1000,1000]", "class": "android.widget.ScrollView", "package": pkg, "visible": True, "scrollable": scrollable},
+            *items,
+        ]
+
+    top_items = [
+        {"bounds": "[420,120][580,260]", "text": "", "class": "android.widget.ImageButton", "package": pkg, "visible": True, "clickable": True},
+        {"bounds": "[360,270][640,320]", "text": "Choose picture", "class": "android.widget.TextView", "package": pkg, "visible": True},
+        {"bounds": "[80,400][920,480]", "text": "", "hint": "Name", "class": "android.widget.EditText", "package": pkg, "visible": True, "editable": True},
+    ]
+    mid_items = [
+        {"bounds": "[80,200][920,280]", "text": "", "hint": "Name", "class": "android.widget.EditText", "package": pkg, "visible": True, "editable": True},
+        {"bounds": "[80,400][920,480]", "text": "", "hint": "Phone", "class": "android.widget.EditText", "package": pkg, "visible": True, "editable": True},
+        {"bounds": "[80,550][920,630]", "text": "", "hint": "Email", "class": "android.widget.EditText", "package": pkg, "visible": True, "editable": True},
+    ]
+
+    mid_tree = make_tree(mid_items)
+    mid_xml, mid_els, _ = format_minimal_list_with_elements(mid_tree, 1000, 1000, compact=True)
+    top_tree = make_tree(top_items)
+    top_xml, top_els, _ = format_minimal_list_with_elements(top_tree, 1000, 1000, compact=True)
+
+    ctx = SimpleNamespace(
+        last_raw_observation={"elements": mid_tree, "width": 1000, "height": 1000, "seq": 1},
+        data_engine=None,
+        device=SimpleNamespace(device_width=1000, device_height=1000),
+    )
+    obs_state = {"tree": top_tree, "els": top_els, "xml": top_xml, "scrollable": True}
+
+    class FakeSession:
+        started = True
+
+        async def call(self, name, args):
+            return ActionResult.success(name, "Swiped.")
+
+        async def observe(self, settle_ms=0, include_image=False, persist=True):
+            ctx.last_raw_observation = {"elements": obs_state["tree"], "width": 1000, "height": 1000, "seq": 2}
+            return SimpleNamespace(
+                ok=True, hierarchy_ok=True, elements=obs_state["els"], elements_text=obs_state["xml"],
+                width=1000, height=1000, screenshot_path=None, scrollable=obs_state["scrollable"], message="ok", timed_out=False,
+            )
+
+    ex = McpActionExecutor(ctx, actuator=SimpleNamespace(extensions=lambda: (), controller=None), agent_name="flash")
+    ex._session = FakeSession()
+    ex._wait_screen_settled = lambda *_a, **_kw: asyncio.sleep(0)
+    state = SimpleNamespace(indexed_elements=mid_els, indexed_points=[e["center"] for e in mid_els], latest_screenshot=None, screen_scrollable=True)
+
+    # 1) Initial swipe down moves toward TOP and reports New & Hidden elements:
+    res_down = asyncio.run(ex.execute("swipe", {"direction": "down"}, "tc-s1", state, index_elements=mid_els))
+    assert res_down.status == "success"
+    assert "moved toward its TOP" in res_down.text_summary
+    assert 'New: "Choose picture", (icon)' in res_down.text_summary
+    assert 'Hidden: "Phone", "Email"' in res_down.text_summary
+    assert ex.scroll_edge_state() is None
+
+    # 2) Swiping down again at TOP edge produces No visible change -> TOP edge hint:
+    res_top = asyncio.run(ex.execute("swipe", {"direction": "down"}, "tc-s2", state, index_elements=top_els))
+    assert "already at the TOP edge" in res_top.text_summary
+    assert "direction='up'" in res_top.text_summary
+    assert ex.scroll_edge_state() == "top"
+
+    runner = FlashRunner.__new__(FlashRunner)
+    runner.executor = ex
+    runner.goal = "Open Settings"
+    runner.ctx = ctx
+    runner.image_on_demand = False
+    ledger = MagicMock()
+    ledger.elapsed_label.return_value = "T+00:12"
+    tail_top = runner._build_tail(ledger, 2, None, top_xml, scrollable=True)
+    assert "hit TOP edge" in tail_top.content[0]["text"]
+    assert "direction='up'" in tail_top.content[0]["text"]
+
+    # 3) Swiping up moves back toward BOTTOM and clears TOP edge state:
+    obs_state.update({"tree": mid_tree, "els": mid_els, "xml": mid_xml})
+    res_up = asyncio.run(ex.execute("swipe", {"direction": "up"}, "tc-s3", state, index_elements=top_els))
+    assert "moved toward its BOTTOM" in res_up.text_summary
+    assert ex.scroll_edge_state() is None
+    tail_mid = runner._build_tail(ledger, 3, None, mid_xml, scrollable=True)
+    assert "[Scroll: scrollable container detected]" in tail_mid.content[0]["text"]
+
+
+def test_l061_quoted_ui_labels_are_not_required_literals():
+    """L-061: quoted strings in a goal are often UI labels or forbidden controls
+    ("do not tap 'Place Order'"); they must never become values the completion
+    check (L-058) or the recorder (L-057) demand on the final screen."""
+    from artemis.workflow.targets import extract_requested_literals
+
+    goal = (
+        'On Grab: empty the basket, confirm "Yes"/"Remove" if asked, never tap "Place Order" '
+        "or 'Đặt đơn'; then call 0916400164"
+    )
+    assert extract_requested_literals(goal) == ["0916400164"]
+    assert "Place Order" in extract_requested_literals(goal, include_quoted=True)

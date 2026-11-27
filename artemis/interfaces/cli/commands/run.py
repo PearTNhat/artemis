@@ -70,6 +70,7 @@ async def execute_task(
     no_ask_user: bool = False,
     ask_on_choice: bool | None = None,
     ask_when_stuck: bool | None = None,
+    workflow: str | None = None,
 ) -> None:
     """Executes a single mobile automation task end-to-end.
 
@@ -96,6 +97,8 @@ async def execute_task(
     )
     if effective_sid:
         os.environ["ARTEMIS_SESSION_ID"] = str(effective_sid)
+    if workflow and str(workflow).strip().lower() in ("off", "record", "replay"):
+        os.environ["ARTEMIS_WORKFLOW_MODE"] = str(workflow).strip().lower()
     if not os.environ.get("ARTEMIS_TASK_INGRESS"):
         os.environ["ARTEMIS_TASK_INGRESS"] = "cli"
     publish_startup_progress(
@@ -564,6 +567,13 @@ def run_command(
             help="Override whether Flash asks the user when stuck instead of stopping.",
         ),
     ] = None,
+    workflow: Annotated[
+        str | None,
+        typer.Option(
+            "--workflow",
+            help="Override Flash app-workflow mode for this run ('off', 'record', or 'replay').",
+        ),
+    ] = None,
 ) -> None:
     """Run an autonomous UI automation task on the connected Android device."""
     ensure_video_recording_available(with_video_recording_tools)
@@ -619,6 +629,7 @@ def run_command(
                     ingress="cli",
                     ask_on_choice=daemon_ask_on_choice,
                     ask_when_stuck=daemon_ask_when_stuck,
+                    workflow=workflow,
                     base_url=base_url,
                 )
                 if resp and resp.get("tasks"):
@@ -722,6 +733,7 @@ def run_command(
                 no_ask_user=effective_no_ask,
                 ask_on_choice=ask_on_choice,
                 ask_when_stuck=ask_when_stuck,
+                workflow=workflow,
             )
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
