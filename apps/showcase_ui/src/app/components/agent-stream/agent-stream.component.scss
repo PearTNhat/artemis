@@ -345,6 +345,17 @@ $stream-row-height: 25px;
       }
     }
 
+    .workflow-chip {
+      cursor: default;
+      background: rgba(236, 253, 245, 0.9);
+      border-color: rgba(110, 231, 183, 0.95);
+
+      .model-icon,
+      .model-name {
+        color: #047857;
+      }
+    }
+
     /* Screen Recording Action Button: Interactive Button */
     .btn-screen-recording {
       display: inline-flex;
@@ -1986,6 +1997,40 @@ $stream-row-height: 25px;
                  }
                }
 
+               &.is-autopilot {
+                 border-color: #6ee7b7;
+                 border-left: 3px solid #059669;
+                 background: #f0fdf4;
+
+                 .action-icon {
+                   color: #059669;
+                 }
+
+                 .action-status-badge.is-autopilot {
+                   display: inline-flex;
+                   align-items: center;
+                   gap: 4px;
+                   margin-left: 6px;
+                   padding: 2px 7px;
+                   border-radius: 999px;
+                   background: #d1fae5;
+                   color: #065f46;
+                   border: 1px solid #6ee7b7;
+                   font-size: 11px;
+                   font-weight: 700;
+
+                   .status-icon {
+                     font-size: 13px;
+                   }
+                 }
+
+                 .action-status-badge.is-autopilot.is-unverified {
+                   background: #fef3c7;
+                   color: #92400e;
+                   border-color: #fcd34d;
+                 }
+               }
+
                 &.is-failed {
                   background: #f8fafc;
                   border-color: #fca5a5;
@@ -3279,6 +3324,7 @@ $stream-row-height: 25px;
       font-size: 11px;
 
       &.warn { background: #fef3c7; color: #92400e; }
+      &.wf { background: #d1fae5; color: #065f46; font-weight: 600; }
     }
 
     .timing-agents {
@@ -3911,6 +3957,14 @@ $stream-row-height: 25px;
         padding: 2px 5px;
         border-radius: 4px;
         letter-spacing: 0.05em;
+
+        &.is-workflow {
+          background: #d1fae5;
+          color: #065f46;
+          border: 1px solid #6ee7b7;
+          letter-spacing: 0.01em;
+          margin-left: 4px;
+        }
         border: 1px solid #e2e8f0;
         background: #fafafa;
         color: #64748b;

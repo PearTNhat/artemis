@@ -32,12 +32,15 @@ so the autopilot can verify every step it replays.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+import re
+from typing import Any, Iterable
 
-from artemis.workflow.fingerprint import ScreenFingerprint, app_fingerprint, normalize
+from artemis.workflow.fingerprint import ScreenFingerprint, app_fingerprint, foreground_package, normalize
 from artemis.workflow.matcher import DEFAULT_DELTA, DEFAULT_TAU, is_matchable, match_screen, weighted_jaccard
 from artemis.workflow.store import Edge, Node, Workflow
+from third_party.mobile_use.utils.logger import get_logger
 from artemis.workflow.targets import (
+    is_data_label,
     TargetDescriptor,
     anchors_for,
     descriptor_for,
@@ -48,6 +51,7 @@ from artemis.workflow.targets import (
     is_list_item,
     node_at,
     node_label,
+    screen_content_key,
     typed_slots,
     visible_app_nodes,
 )
@@ -55,6 +59,8 @@ from artemis.workflow.targets import (
 # Layout similarity above which the screens before and after a swipe are the
 # same screen scrolled (a long form), not a new screen.
 SAME_SCREEN_SCROLLED = 0.5
+_log = get_logger(__name__)
+
 TAP_TOOLS = frozenset({"click", "tap", "long_press"})
 INPUT_TOOLS = frozenset({"input_text", "focus_and_input_text"})
 NAV_KEYS = frozenset({"ENTER", "66", "SEARCH", "84", "BACK", "4"})
@@ -97,15 +103,205 @@ def _screen(raw: RawScreen | None) -> _Screen | None:
     return _Screen(norm, fp)
 
 
-def detect_slots(steps: list[RecordedStep], goal: str) -> dict[str, str]:
-    """Typed values that also appear in the goal become slots (slot1, slot2...)."""
+_NON_SLOT_TAP_WORDS = frozenset(
+    {
+        "ok",
+        "yes",
+        "no",
+        "back",
+        "next",
+        "done",
+        "save",
+        "cancel",
+        "close",
+        "open",
+        "search",
+        "find",
+        "send",
+        "submit",
+        "start",
+        "stop",
+        "confirm",
+        "allow",
+        "deny",
+        "accept",
+        "continue",
+        "skip",
+        "clear",
+        "delete",
+        "edit",
+        "add",
+        "new",
+        "more",
+        "menu",
+        "settings",
+        "home",
+    }
+)
+
+
+def _known_nav_targets(workflow: Workflow | None) -> tuple[set[str], set[str]]:
+    if workflow is None:
+        return set(), set()
+    rids: set[str] = set()
+    labels: set[str] = set()
+    for e in workflow.edges:
+        if e.kind == "nav":
+            if e.target and e.target.resource_id:
+                rids.add(e.target.resource_id)
+            if e.label:
+                labels.add(fold(e.label))
+            if e.target and e.target.text:
+                labels.add(fold(e.target.text))
+    return rids, labels
+
+
+def _looks_like_choice_control(node: dict[str, Any], norm: list[dict[str, Any]]) -> bool:
+    """True for checkable options, list items, or peers aligned in a tab/option group."""
+    if node.get("checkable") or node.get("in_scrollable") or node.get("selected"):
+        return True
+    cls = node.get("class") or ""
+    pkg = node.get("package") or ""
+    l, t, r, b = node.get("bounds") or (0, 0, 0, 0)
+    for other in visible_app_nodes(norm):
+        if other is node or other.get("package") != pkg or other.get("class") != cls:
+            continue
+        if not node_label(other):
+            continue
+        ol, ot, or_, ob = other.get("bounds") or (0, 0, 0, 0)
+        same_row = abs(ot - t) <= 20 and abs(ob - b) <= 20
+        same_col = abs(ol - l) <= 20 and abs(or_ - r) <= 20
+        if same_row or same_col:
+            return True
+    return False
+
+
+def _run_app_names(
+    steps: list[RecordedStep], fg_package: str, extra_names: Iterable[str] = ()
+) -> set[str]:
+    """App names observed in this run (no hardcoded prepositions/keywords).
+
+    Collects names from ``extra_names`` (e.g. ``ctx.package_cache``), recorded
+    ``manage_app(app_name=...)`` calls, and Launcher/recents icon taps that
+    transitioned into ``fg_package``.
+    """
+    names: set[str] = set()
+    for a in extra_names:
+        fa = fold(str(a or ""))
+        if len(fa) >= 2:
+            names.add(fa)
+    for st in steps:
+        if st.tool == "manage_app":
+            raw_app = str(st.args.get("app_name") or "").strip()
+            fa = fold(raw_app)
+            if len(fa) >= 2:
+                names.add(fa)
+            continue
+        if (
+            fg_package
+            and st.tool in TAP_TOOLS
+            and st.pre is not None
+            and st.post is not None
+            and st.pre.elements
+            and st.post.elements
+        ):
+            pre_norm = normalize(st.pre.elements, width=st.pre.width, height=st.pre.height)
+            post_norm = normalize(st.post.elements, width=st.post.width, height=st.post.height)
+            if foreground_package(pre_norm) != fg_package and foreground_package(post_norm) == fg_package:
+                tapped = node_at(
+                    pre_norm,
+                    point=_point(st.action),
+                    box=_box(st.action),
+                    resource_id=str(st.action.get("target_resource_id") or ""),
+                )
+                for raw_lbl in (
+                    node_label(tapped) if tapped is not None else "",
+                    str(st.action.get("target_text") or ""),
+                ):
+                    fl = fold(raw_lbl)
+                    if len(fl) >= 2:
+                        names.add(fl)
+    return names
+
+
+def detect_slots(
+    steps: list[RecordedStep],
+    goal: str,
+    *,
+    workflow: Workflow | None = None,
+    app_names: Iterable[str] = (),
+) -> dict[str, str]:
+    """Typed values or non-generic tapped option/tab labels matching whole words in ``goal``."""
     slots: dict[str, str] = {}
     g = (goal or "").casefold()
+    g_fold = fold(goal)
+    seen_folded: set[str] = set()
+    typed_spans: list[tuple[int, int]] = []
+    pkg_counts: dict[str, int] = {}
     for st in steps:
+        for scr in (st.pre, st.post):
+            if scr is not None and scr.elements:
+                p = foreground_package(normalize(scr.elements, width=scr.width, height=scr.height))
+                if p:
+                    pkg_counts[p] = pkg_counts.get(p, 0) + 1
         if st.tool in INPUT_TOOLS and st.ok:
             text = str(st.args.get("text") or "").strip()
-            if text and text.casefold() in g and text not in slots.values():
+            if text and text.casefold() in g and fold(text) not in seen_folded:
                 slots[f"slot{len(slots) + 1}"] = text
+                seen_folded.add(fold(text))
+                for m in re.finditer(re.escape(fold(text)), g_fold):
+                    typed_spans.append((m.start(), m.end()))
+
+    primary_pkg = (
+        workflow.package
+        if workflow is not None and workflow.package
+        else (max(pkg_counts, key=lambda k: pkg_counts[k]) if pkg_counts else "")
+    )
+    blocked_apps = _run_app_names(steps, primary_pkg, app_names)
+    nav_rids, nav_labels = _known_nav_targets(workflow)
+    for st in steps:
+        if st.tool not in TAP_TOOLS or not st.ok or st.no_effect or st.after_user_choice:
+            continue
+        if st.pre is None or not st.pre.elements:
+            continue
+        norm = normalize(st.pre.elements, width=st.pre.width, height=st.pre.height)
+        fg = foreground_package(norm)
+        node = node_at(
+            norm,
+            point=_point(st.action),
+            box=_box(st.action),
+            resource_id=str(st.action.get("target_resource_id") or ""),
+        )
+        if node is None or is_editable(node):
+            continue
+        if fg and node.get("package") != fg:
+            continue
+        nb = tuple(node["bounds"])
+        label = node_label(node) or str(st.action.get("target_text") or "").strip()
+        if is_commitment_at(norm, nb, extra_texts=(label, str(st.action.get("target_text") or ""))):  # type: ignore[arg-type]
+            continue
+        rid = str(node.get("resource-id") or "")
+        lf = fold(label)
+        if len(lf) < 3 or lf.isdigit() or lf in _NON_SLOT_TAP_WORDS or lf in blocked_apps:
+            continue
+        if (rid and rid in nav_rids) or lf in nav_labels:
+            continue
+        if lf in seen_folded:
+            continue
+        if not _looks_like_choice_control(node, norm):
+            continue
+        m = re.search(r"(?<!\w)" + re.escape(lf) + r"(?!\w)", g_fold)
+        if not m:
+            continue
+        # Do not turn a verb/label right next to a typed slot ("add city Madrid") into a slot.
+        if any(
+            (ts_e <= m.start() and not g_fold[ts_e : m.start()].strip())
+            or (m.end() <= ts_s and not g_fold[m.end() : ts_s].strip())
+            for ts_s, ts_e in typed_spans
+        ):
+            continue
+        slots[f"slot{len(slots) + 1}"] = label
+        seen_folded.add(lf)
     return slots
 
 
@@ -172,6 +368,10 @@ def _classify(
         )
         if node is None:
             return "judgement", "", None, ""
+        if not is_editable(node) and is_data_label(node_label(node)):
+            # A quantity / price / count shows account state, not a control the
+            # task always needs: the AI decides each time (L-027).
+            return "judgement", "", None, ""
         if is_editable(node):
             # A tap on a field: if it only focuses it (same screen after), the
             # input step that follows carries its own target, so it is not a
@@ -216,6 +416,120 @@ def _classify(
     return "", "", None, ""
 
 
+def _mask_slots(text: str, values: dict[str, str]) -> str:
+    out = str(text or "").strip()
+    if not out:
+        return ""
+    for name, val in sorted(values.items(), key=lambda kv: len(kv[1]), reverse=True):
+        if val and val.casefold() in out.casefold():
+            idx = out.casefold().find(val.casefold())
+            while idx != -1:
+                out = out[:idx] + f"{{{name}}}" + out[idx + len(val) :]
+                idx = out.casefold().find(val.casefold(), idx + len(name) + 2)
+    return out[:120]
+
+
+def _step_hints(st: RecordedStep, pre: _Screen, values: dict[str, str]) -> tuple[str, str]:
+    """Returns (label, target_description) for an edge with slot values masked."""
+    label = ""
+    if st.tool in TAP_TOOLS:
+        node = node_at(
+            pre.norm,
+            point=_point(st.action),
+            box=_box(st.action),
+            resource_id=str(st.action.get("target_resource_id") or ""),
+        )
+        if node is not None:
+            label = node_label(node)
+        if not label:
+            label = str(st.action.get("target_text") or "").strip()
+    elif st.tool in INPUT_TOOLS:
+        fields = [n for n in visible_app_nodes(pre.norm) if is_editable(n)]
+        node = node_at(pre.norm, point=_point(st.action), box=_box(st.action))
+        if node is None or not is_editable(node):
+            node = fields[0] if len(fields) == 1 else None
+        if node is not None:
+            label = str(node.get("hint") or "").strip()
+    desc = str(
+        st.args.get("target_description")
+        or st.action.get("target_description")
+        or ""
+    ).strip()
+    return _mask_slots(label, values), _mask_slots(desc, values)
+
+
+def _is_slot_step(st: RecordedStep, pre: _Screen | None, values: dict[str, str]) -> bool:
+    if st.tool in INPUT_TOOLS:
+        return bool(_slot_for_text(str(st.args.get("text") or ""), values))
+    if st.tool in TAP_TOOLS and pre is not None:
+        node = node_at(
+            pre.norm,
+            point=_point(st.action),
+            box=_box(st.action),
+            resource_id=str(st.action.get("target_resource_id") or ""),
+        )
+        if node is not None and not is_editable(node):
+            return bool(_slot_in_label(node_label(node), values))
+    return False
+
+
+def _prune_detour_cycles(
+    screens: list[tuple[RecordedStep, _Screen | None, _Screen | None]],
+    values: dict[str, str],
+    skip: set[int],
+    *,
+    package: str,
+) -> int:
+    """Marks no-op detour cycles n_X -> ... -> n_X in ``skip``; returns pruned count."""
+    effective = [
+        idx
+        for idx, (st, pre, _) in enumerate(screens)
+        if idx not in skip and not st.autopilot and st.ok and not st.no_effect and pre is not None and pre.fp.package == package
+    ]
+    if not effective:
+        return 0
+    last_eff = effective[-1]
+    pruned = 0
+    i = 0
+    n = len(screens)
+    while i < n:
+        st_i, pre_i, _ = screens[i]
+        if i in skip or st_i.autopilot or not st_i.ok or st_i.no_effect or pre_i is None or pre_i.fp.package != package:
+            i += 1
+            continue
+        pre_key = screen_content_key(st_i.pre)
+        if pre_key is None:
+            i += 1
+            continue
+        matched_k: int | None = None
+        for k in range(n - 1, i, -1):
+            if k in skip:
+                continue
+            st_k, _, post_k = screens[k]
+            if st_k.autopilot or not st_k.ok or st_k.no_effect or post_k is None or post_k.fp.package != package:
+                continue
+            if i == 0 and k == last_eff:
+                continue
+            if screen_content_key(st_k.post) != pre_key:
+                continue
+            if any(
+                j not in skip and _is_slot_step(screens[j][0], screens[j][1], values)
+                for j in range(i, k + 1)
+            ):
+                continue
+            matched_k = k
+            break
+        if matched_k is not None:
+            for j in range(i, matched_k + 1):
+                if j not in skip:
+                    skip.add(j)
+                    pruned += 1
+            i = matched_k + 1
+        else:
+            i += 1
+    return pruned
+
+
 def _value_persisted(i: int, screens: list, value: str) -> bool:
     """Is the value typed at step ``i`` still in that field on the last screen
     of the run where the field can be found?"""
@@ -235,6 +549,71 @@ def _value_persisted(i: int, screens: list, value: str) -> bool:
     return False
 
 
+def _typed_field_key(st: RecordedStep, pre: _Screen) -> tuple[Any, ...] | None:
+    """The field an input step typed into, identified the way its edge target is."""
+    fields = [n for n in visible_app_nodes(pre.norm) if is_editable(n)]
+    node = node_at(pre.norm, point=_point(st.action), box=_box(st.action))
+    if node is None or not is_editable(node):
+        node = fields[0] if len(fields) == 1 else None
+    if node is None:
+        return None
+    d = descriptor_for(node)
+    return (d.resource_id, d.hint, d.class_name, d.grid if not (d.resource_id or d.hint) else None)
+
+
+def inconsistent_typing(screens: list, values: dict[str, str]) -> str:
+    """Why a run's form filling cannot be trusted, or "" (L-029).
+
+    For every task value, its LAST typing must still be in that field when the
+    form is submitted (the screen before the next non-typing action, or the last
+    screen of the run). If not, a later typing overwrote it: the AI may report
+    success, but what it submitted is not what the task asked, and a workflow
+    learned from it would replay the overwrite. A mistake corrected later (value
+    typed again into the right field) is fine: only the last typing counts.
+    """
+    last: dict[str, int] = {}
+    for i, (st, pre, _) in enumerate(screens):
+        if st.tool in INPUT_TOOLS and st.ok and not st.autopilot and pre is not None:
+            slot = _slot_for_text(str(st.args.get("text") or ""), values)
+            if slot:
+                last[slot] = i
+    for slot, i in last.items():
+        st, pre, post = screens[i]
+        key = _typed_field_key(st, pre)
+        if key is None:
+            continue
+        # the screen at submit time: pre-screen of the next non-typing action
+        submit = None
+        for st2, pre2, _ in screens[i + 1 :]:
+            if st2.tool not in INPUT_TOOLS and st2.tool not in ("swipe", "wait", "wait_for_screen_change",
+                                                                 "wait_for_text", "wait_until_gone",
+                                                                 "wait_for_delay"):
+                submit = pre2
+                break
+        if submit is None:
+            submit = post
+        if submit is None:
+            continue
+        node = node_at(pre.norm, point=_point(st.action), box=_box(st.action))
+        fields = [n for n in visible_app_nodes(pre.norm) if is_editable(n)]
+        if node is None or not is_editable(node):
+            node = fields[0] if len(fields) == 1 else None
+        if node is None:
+            continue
+        desc = descriptor_for(node)
+        desc.text = ""
+        field, status = resolve(desc, submit.norm)
+        if field is None:
+            continue  # field not shown at submit time: cannot tell
+        if fold(values[slot]) not in fold(str(field.get("text") or "")):
+            label = desc.hint or desc.resource_id or desc.class_name
+            return (
+                f"'{values[slot]}' ({slot}) is no longer in its field ({label}) when the form is submitted"
+                f" (it holds '{field.get('text') or ''}'): a later typing overwrote it"
+            )
+    return ""
+
+
 def record_run(
     steps: list[RecordedStep],
     *,
@@ -242,6 +621,7 @@ def record_run(
     workflow: Workflow | None = None,
     workflow_id: str = "",
     slot_values: dict[str, str] | None = None,
+    app_names: Iterable[str] = (),
     tau: float = DEFAULT_TAU,
     delta: float = DEFAULT_DELTA,
 ) -> Workflow | None:
@@ -260,7 +640,7 @@ def record_run(
         if not pkgs:
             return None
         package = max(pkgs, key=lambda p: pkgs[p])
-        slots = dict(slot_values or detect_slots(steps, goal))
+        slots = dict(slot_values or detect_slots(steps, goal, app_names=app_names))
         wf = Workflow(workflow_id=workflow_id or f"{package}__1", package=package, goal=goal, slots=slots)
         values = slots
     else:
@@ -283,6 +663,11 @@ def record_run(
             if match_screen(nxt_post.fp, {"pre": [pre.fp]}, tau=tau, delta=0.0, min_app_tokens=1).matched:
                 skip.update({i, i + 1})
 
+    why_inconsistent = inconsistent_typing(screens, values)
+    if why_inconsistent:
+        _log.warning(f"Workflow recording skipped, inconsistent run: {why_inconsistent}")
+        return None if workflow is None else workflow
+
     # A slot typed more than once (a mistake corrected, a wrong field fixed):
     # keep the typing whose value is still in its field on the last screen
     # that shows that field (what was actually submitted); unknown -> the last.
@@ -299,8 +684,15 @@ def record_run(
         keep = persisted[-1] if persisted else idxs[-1]
         skip.update(i for i in idxs if i != keep)
 
-    known = {e.signature() for e in wf.edges}
+    # W1b: prune multi-step detours (n_X -> ... -> n_X) with no slot entered/picked
+    # in between and identical screen content & element states upon return.
+    _prune_detour_cycles(screens, values, skip, package=package)
+
+    known = {e.signature(): e for e in wf.edges}
+    seen_this_run: set[tuple] = set()
     added = 0
+    first_src: str | None = None
+    typed_on_screen: dict[str, set[str]] = {}  # node -> slots typed into its fields
     for i, (st, pre, post) in enumerate(screens):
         if (
             st.tool in ("swipe",) + tuple(INPUT_TOOLS)
@@ -327,6 +719,8 @@ def record_run(
         if not kind:
             continue
         src = _node_for(wf, pre.fp, tau, delta)
+        if first_src is None:
+            first_src = src
         dst = None
         anchors: list[dict[str, str]] = []
         if post is not None and post.fp.package == package:
@@ -348,9 +742,12 @@ def record_run(
             kind, slot, target, key = "judgement", "", None, ""
         typed = ""
         if kind in ("nav", "slot") and st.tool not in INPUT_TOOLS:
-            # Every value already in the form when this step ran: a submit
-            # recorded after all fields were filled waits for all of them.
-            typed = ",".join(sorted(typed_slots(pre.norm, values)))
+            # Every value already in this form when the step ran (visible, or
+            # typed into a field of the same screen earlier and since scrolled
+            # out of view): a submit recorded after all fields were filled
+            # waits for all of them. Values typed on other screens do not count.
+            typed = ",".join(sorted(typed_slots(pre.norm, values) | typed_on_screen.get(src, set())))
+        step_label, step_desc = _step_hints(st, pre, values)
         edge = Edge(
             id="",
             typed=typed,
@@ -362,17 +759,40 @@ def record_run(
             slot=slot,
             target=target,
             anchors=anchors if kind in ("nav", "slot") else [],
+            label=step_label,
+            description=step_desc,
         )
+        if st.tool in INPUT_TOOLS and slot:
+            typed_on_screen.setdefault(src, set()).add(slot)
         sig = edge.signature()
         if sig in known:
+            existing = known[sig]
+            if sig not in seen_this_run:
+                existing.seen += 1
+                seen_this_run.add(sig)
+            if not existing.label and step_label:
+                existing.label = step_label
+            if not existing.description and step_desc:
+                existing.description = step_desc
             continue
-        known.add(sig)
+        known[sig] = edge
+        seen_this_run.add(sig)
         edge.id = wf.new_edge_id()
         wf.edges.append(edge)
         added += 1
 
     if workflow is None and not any(e.kind in ("nav", "slot") for e in wf.edges):
         return None
+    # L-026: in workflows with a commitment action or judgement branches (where
+    # later screens depend on cart / order / pre-existing state), one-off taps
+    # (e.g. "Make another" when cart already held an item) must stay provisional
+    # until confirmed across >= 2 independent runs.
+    if wf.has_commitment() or any(e.kind == "judgement" for e in wf.edges):
+        for e in wf.edges:
+            if e.kind == "nav" and e.state != "disabled":
+                e.state = "active" if e.seen >= 2 else "provisional"
+    if first_src is not None and first_src not in wf.start_nodes:
+        wf.start_nodes.append(first_src)
     # The screen the run was reported completed on (after its last action).
     for st, pre, post in reversed(screens):
         last = post if post is not None else pre

@@ -27,7 +27,7 @@ import {
   DEFAULT_EXPLORER_MODE,
   DEFAULT_VERIFICATION_LEVEL
 } from '../core/models/pro-tuning.model';
-import { SessionRunTuning } from '../core/models/session.model';
+import { SessionRunTuning, SessionWorkflowInfo } from '../core/models/session.model';
 
 /** Denominator for "context used" when the backend does not report one. */
 export const OPERATOR_CONTEXT_WINDOW_TOKENS = 1_000_000;
@@ -113,4 +113,37 @@ export function parseRunTuning(deviceInfo: unknown): SessionRunTuning | null {
     verification_level: t.verification_level ?? null,
     explorer_mode: t.explorer_mode ?? null
   };
+}
+
+/** Reads `workflow` metadata out of a session's `device_info` (string or object). */
+export function parseSessionWorkflow(deviceInfo: unknown): SessionWorkflowInfo | null {
+  let info: unknown = deviceInfo;
+  if (typeof info === 'string') {
+    try {
+      info = JSON.parse(info);
+    } catch {
+      return null;
+    }
+  }
+  if (!info || typeof info !== 'object') return null;
+  const wf = (info as { workflow?: unknown }).workflow;
+  if (!wf || typeof wf !== 'object') return null;
+  const w = wf as SessionWorkflowInfo;
+  if (!w.mode && !w.workflow_id && !w.autopilot_steps) return null;
+  return w;
+}
+
+/** Concise badge label for a session that used/recorded a workflow. */
+export function formatWorkflowBadge(wf: SessionWorkflowInfo | null, fallbackAutopilotCount = 0): string {
+  const autoCount = Math.max(Number(wf?.autopilot_steps || 0), Number(fallbackAutopilotCount || 0));
+  if (autoCount > 0) {
+    return `${autoCount} bước không hỏi AI`;
+  }
+  if (wf?.mode === 'record') {
+    return wf.saved ? 'Ghi workflow · Đã lưu' : 'Đang ghi workflow';
+  }
+  if (wf?.mode === 'replay') {
+    return wf.workflow_id ? `Replay · ${wf.workflow_id}` : 'Workflow Replay';
+  }
+  return '';
 }

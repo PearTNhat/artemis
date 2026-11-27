@@ -198,6 +198,8 @@ def normalize(
                 "scrollable": _to_bool(node.get("scrollable"), False),
                 "focused": _to_bool(node.get("focused"), False),
                 "checkable": _to_bool(node.get("checkable"), False),
+                "checked": _to_bool(node.get("checked"), False),
+                "selected": _to_bool(node.get("selected"), False),
                 "enabled": _to_bool(node.get("enabled"), True),
                 "visible-to-user": _to_bool(vis_raw, True),
                 "package": str(node.get("package") or "").strip(),
@@ -361,6 +363,17 @@ def fingerprint_from_raw(
     return tokenize(normalize(raw, width=width, height=height), static_texts=static_texts)
 
 
+def _app_node_role(node: dict[str, Any]) -> str:
+    """App-workflow role including active selection/checked states (W3)."""
+    base = node_role(node)
+    flags: list[str] = []
+    if node.get("selected"):
+        flags.append("selected")
+    if node.get("checked"):
+        flags.append("checked")
+    return f"{base}:{'+'.join(flags)}" if flags else base
+
+
 def app_fingerprint(normalized: list[dict[str, Any]]) -> ScreenFingerprint:
     """Workflow fingerprint of a screen's *layout*, robust to its data.
 
@@ -387,7 +400,7 @@ def app_fingerprint(normalized: list[dict[str, Any]]) -> ScreenFingerprint:
         kept += 1
         cls = node.get("class") or ""
         rid = node.get("resource-id") or ""
-        role = node_role(node)
+        role = _app_node_role(node)
         if rid:
             resource_ids.add(rid)
             tokens[("node", cls, rid, role)] = 1

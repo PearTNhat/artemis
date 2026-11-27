@@ -568,6 +568,32 @@ class StorageManager:
             )
             conn.commit()
 
+    def merge_step_extra_metadata(self, step_id: UUID | str, patch: dict[str, Any]) -> bool:
+        """Merges ``patch`` into a step's ``extra_metadata`` (keys in ``patch`` win).
+
+        Returns False when the step does not exist (yet): step rows are written
+        by a background thread, so callers may retry.
+        """
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT extra_metadata FROM steps WHERE step_id = ?", (str(step_id),)
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                meta = json.loads(row["extra_metadata"]) if row["extra_metadata"] else {}
+                if not isinstance(meta, dict):
+                    meta = {}
+            except Exception:
+                meta = {}
+            meta.update(patch)
+            conn.execute(
+                "UPDATE steps SET extra_metadata = ? WHERE step_id = ?",
+                (json.dumps(meta), str(step_id)),
+            )
+            conn.commit()
+            return True
+
     def update_step_summary(
         self,
         step_id: UUID,

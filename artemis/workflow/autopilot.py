@@ -32,7 +32,18 @@ from artemis.workflow.matcher import DEFAULT_DELTA, DEFAULT_TAU, is_matchable, m
 from artemis.workflow.recorder import INPUT_TOOLS, RawScreen
 from artemis.workflow.store import Edge, Workflow
 from third_party.mobile_use.utils.logger import get_logger
-from artemis.workflow.targets import anchors_present, fold, keyboard_covers, node_label, resolve, typed_slots, visible_app_nodes
+from artemis.workflow.targets import (
+    anchors_present,
+    fold,
+    keyboard_box,
+    keyboard_covers,
+    node_label,
+    other_window_boxes,
+    resolve,
+    safe_swipe_in_norm,
+    typed_slots,
+    visible_app_nodes,
+)
 
 logger = get_logger(__name__)
 
@@ -61,6 +72,7 @@ class AutopilotReport:
     stop_reason: str = ""
     stop_detail: str = ""
     elapsed_s: float = 0.0
+    done_edge_ids: set[str] = field(default_factory=set)
 
     @property
     def steps(self) -> int:
@@ -110,6 +122,13 @@ def _is_scrollable(norm) -> bool:
     return False
 
 
+def _scroll_swipe(norm) -> list[int] | None:
+    """A swipe (0-1000 coords) that scrolls the app's main scrolling area and
+    stays inside it, clear of any other window and floating controls. None when
+    there is no safe band."""
+    return safe_swipe_in_norm(norm or [], direction="up", min_container_area=250_000)
+
+
 def _labels(norm) -> frozenset:
     return frozenset(node_label(n) for n in visible_app_nodes(norm or []) if node_label(n))
 
@@ -154,6 +173,7 @@ class Autopilot:
         # must not restart the workflow and redo the task.
         self._done: set[str] = set()  # edge ids replayed in this run
         self._kb_hidden = False
+        self._typed_ok: set[str] = set()
         self._revisit = ""
         self._finished = False
 
@@ -171,12 +191,20 @@ class Autopilot:
 
     def _pick(self, node_id: str, norm) -> tuple[Edge | None, dict[str, Any] | None, str, str]:
         """-> (edge, element, slot value, stop reason)."""
-        edges = [e for e in self.wf.edges_from(node_id) if e.state == "active"]
+        all_edges = self.wf.edges_from(node_id)
+        edges = [e for e in all_edges if e.state == "active"]
         at_end = node_id in self.wf.end_nodes and bool(self._done)
         if at_end and not any(e.kind == "commitment_stop" for e in edges):
             self._finished = True
             return None, None, "", "reached the screen the recorded successful run finished on"
         if not edges:
+            if any(e.state == "provisional" for e in all_edges):
+                return (
+                    None,
+                    None,
+                    "",
+                    "this navigation step was only seen once: waiting for 2 independent runs before auto-tapping",
+                )
             return None, None, "", "no recorded step from this screen"
         if all(e.id in self._done for e in edges):
             self._revisit = node_id
@@ -190,7 +218,9 @@ class Autopilot:
             return None, None, "", "this screen needs a choice or judgement (recorded as the AI's / user's decision)"
         cands: dict[tuple, tuple[Edge, dict[str, Any] | None, str]] = {}
         reasons: list[str] = []
-        held = typed_slots(norm, self.slot_values)
+        # Typed values: visible in a field now, or typed and verified by the
+        # autopilot earlier in this run (the field may have scrolled away).
+        held = typed_slots(norm, self.slot_values) | self._typed_ok
         for e in edges:
             value = self.slot_values.get(e.slot, "") if e.slot else ""
             if e.slot and not value:
@@ -207,6 +237,17 @@ class Autopilot:
                 cands[(e.tool, e.key)] = (e, None, value)
                 continue
             el, status = resolve(e.target, norm, slot_value=value if e.target.slot else None)
+            if el is not None and e.tool in INPUT_TOOLS:
+                # Never type over a value this run already typed for another
+                # field (a wrong recording would overwrite it, L-029).
+                held_text = fold(str(el.get("text") or ""))
+                clash = [
+                    k for k in self._typed_ok
+                    if k != e.slot and self.slot_values.get(k) and fold(self.slot_values[k]) in held_text
+                ]
+                if clash:
+                    reasons.append(f"field already holds {', '.join(sorted(clash))} typed in this run")
+                    continue
             if status == "occluded" and not self._kb_hidden:
                 hidden_el = self._occluded_node(e.target, norm)
                 if hidden_el is not None and keyboard_covers(hidden_el, norm):
@@ -308,8 +349,22 @@ class Autopilot:
                     if scrolls >= MAX_SCROLL_SEARCH:
                         rep.stop_reason = f"recorded target not found after {scrolls} swipes"
                         break
+                    if _scroll_swipe(norm) is None and keyboard_box(norm) is not None and not self._kb_hidden:
+                        # No band to swipe clear of the keyboard: hide it first.
+                        self._kb_hidden = True
+                        ok, _ = await driver.act("press_key", {"key": "BACK"}, None)
+                        rep.acted += 1
+                        if not ok:
+                            rep.stop_reason = "could not hide the keyboard before scrolling"
+                            break
+                        rep.ran.append("press_key BACK (hide the keyboard before scrolling) -> ok")
+                        continue
+                    swipe = _scroll_swipe(norm)
+                    if swipe is None:
+                        rep.stop_reason = "recorded target not found and no safe area to scroll"
+                        break
                     before = _labels(norm)
-                    ok, _ = await driver.act("swipe", {"direction": "up"}, None)
+                    ok, _ = await driver.act("swipe", {"coordinates": swipe}, None)
                     rep.acted += 1
                     scrolls += 1
                     snorm, sfp = _screen(driver.current())
@@ -352,6 +407,11 @@ class Autopilot:
                         break
                     await asyncio.sleep(self.poll_interval_s)
                 self._note(edge, verified)
+                report = getattr(driver, "note_verified", None)
+                if callable(report):
+                    report(verified)  # UI: verified workflow step vs taken over by the AI
+                if verified and edge.tool in INPUT_TOOLS and edge.slot:
+                    self._typed_ok.add(edge.slot)
                 self.total_steps += 1
                 if not verified:
                     rep.stop_reason = f"after '{desc}' the screen is not the recorded next screen"
@@ -363,5 +423,6 @@ class Autopilot:
             rep.stop_reason = f"autopilot error: {exc}"
         rep.finished = self._finished
         rep.revisit_node = self._revisit if rep.acted == 0 else ""
+        rep.done_edge_ids = set(self._done)
         rep.elapsed_s = round(time.monotonic() - started, 3)
         return rep

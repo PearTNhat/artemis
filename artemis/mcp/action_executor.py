@@ -145,6 +145,9 @@ class McpActionExecutor:
         self._session: ActionSession | None = None
         self._last_point_action: dict[str, Any] | None = None
         self._ineffective_taps: list[dict[str, Any]] = []
+        # Values typed by input_text in this run: never overwritten by a typing
+        # aimed at a point that is not a field (L-029).
+        self._typed_values: list[str] = []
         self._last_elements_signature: str | None = None
         self._last_image_hash: str | None = None
         # dHash distance at or below which two screenshots count as the same
@@ -397,6 +400,29 @@ class McpActionExecutor:
                     # coordinates of an index target (the model named an index,
                     # not a point).
                     target_coordinates = wire_args.get("target")
+                    if (
+                        raw_name == "input_text"
+                        and target_coordinates
+                        and self.agent_name == "flash"
+                    ):
+                        other = self._input_would_go_elsewhere(target_coordinates)
+                        if other is not None:
+                            raise _ArgError(
+                                f"input_text refused: {target_coordinates} is not on an input field of"
+                                f" the current screen (it may be hidden by the keyboard or come from an"
+                                f" older element list), so the text would go into the focused field"
+                                f" {other!r} and could overwrite it. Use the index of the field from the"
+                                f" current list, or hide the keyboard / scroll to show the field first."
+                            )
+                    if raw_name == "input_text" and not target_coordinates and self.agent_name == "flash":
+                        other = self._input_would_go_elsewhere(None)
+                        if other is not None:
+                            raise _ArgError(
+                                f"input_text refused: no field was given, so the text would go into the"
+                                f" focused field {other!r}, which already holds a value typed earlier in"
+                                f" this run, and would overwrite it. Pass the index of the field to fill"
+                                f" (hide the keyboard / scroll first if it is not listed)."
+                            )
                     if target_coordinates:
                         # 1. Immediate consecutive repeated tap check
                         if self._last_point_action:
@@ -462,6 +488,13 @@ class McpActionExecutor:
                 action_s = time.monotonic() - action_started
                 if res.ok:
                     self._note_interaction(raw_name, target_coordinates)
+                    if raw_name == "input_text":
+                        typed_value = str(args.get("text") or "").strip().casefold()
+                        if typed_value:
+                            if not hasattr(self, "_typed_values"):
+                                self._typed_values = []
+                            self._typed_values.append(typed_value)
+                            del self._typed_values[:-20]
                 if is_device_offline_result(res):
                     device_offline = True
 
@@ -659,6 +692,47 @@ class McpActionExecutor:
                 "observe_detail": observe_detail or None,
             },
         )
+
+    def _input_would_go_elsewhere(self, target_point: list[int] | tuple[int, int] | None) -> str | None:
+        """Before ``input_text`` aimed at ``target_point`` (0-1000), on the screen
+        the model is looking at: the label of the field the text would really go
+        into, when the point is not on any input field while another field holds
+        focus AND holds a value typed earlier in this run (target hidden by the
+        keyboard, an index from an older list): typing goes to the focused field
+        and would overwrite it (L-029). Empty fields and content this run did not
+        type (a URL to replace) are allowed. None otherwise.
+        """
+        raw = getattr(self.ctx, "last_raw_observation", None)
+        if not isinstance(raw, dict) or not raw.get("elements"):
+            return None
+        try:
+            from artemis.workflow.fingerprint import normalize
+            from artemis.workflow.targets import is_editable, node_label, visible_app_nodes
+
+            norm = normalize(raw["elements"], width=raw.get("width"), height=raw.get("height"))
+        except Exception:
+            return None
+        visible = visible_app_nodes(norm)
+        fields = [n for n in visible if is_editable(n)]
+        focused = [n for n in fields if n.get("focused")]
+        if len(focused) != 1:
+            return None
+        if target_point is not None:
+            x, y = int(target_point[0]), int(target_point[1])
+            margin = 10
+            for f in fields:
+                l, t, r, b = f["bounds"]
+                if l - margin <= x <= r + margin and t - margin <= y <= b + margin:
+                    return None  # the point is on an input field: the tap focuses it
+        # target_point None: input_text with no target types into the focused field
+        f = focused[0]
+        held = str(f.get("text") or "").strip().casefold()
+        typed = [v for v in getattr(self, "_typed_values", []) if v]
+        if not held or not any(v in held for v in typed):
+            # Empty, or content this run did not type (a URL, an old query): the
+            # model means to replace it; only our own earlier input is protected.
+            return None
+        return str(f.get("hint") or node_label(f) or f.get("resource-id") or "the focused field")
 
     # --- Wait for the UI to settle (Flash) ---------------------------------------------
     # Measured on an emulator (dHash, 64 bits): consecutive frames of a still
@@ -1328,11 +1402,18 @@ class McpActionExecutor:
 
         if kind == "direction":
             dir_name = target
+            raw_obs = getattr(self.ctx, "last_raw_observation", None)
+            ui_tree = (getattr(state, "latest_ui_hierarchy", None) if state else None) or (
+                raw_obs.get("elements") if isinstance(raw_obs, dict) else None
+            )
+            if isinstance(raw_obs, dict) and raw_obs.get("width") and raw_obs.get("height"):
+                width = int(raw_obs["width"])
+                height = int(raw_obs["height"])
             x1, y1, x2, y2, smart_dur = compute_smart_swipe_coordinates(
                 direction=target,
                 target=args.get("target"),
                 indexed_elements=self._index_elements(state, index_elements) if state else None,
-                ui_hierarchy=getattr(state, "latest_ui_hierarchy", None) if state else None,
+                ui_hierarchy=ui_tree,
                 width=width,
                 height=height,
                 duration=final_duration,
@@ -1346,15 +1427,26 @@ class McpActionExecutor:
                     return f"Error swiping {dir_name}: {res.detail}"
                 return f"Swiped {dir_name}."
 
+            start = [_norm(x1, width), _norm(y1, height)]
+            end = [_norm(x2, width), _norm(y2, height)]
+            # The swipe actually sent (moved off floating buttons / the keyboard):
+            # recorded on the step so the trace and the UI overlay show where it
+            # really ran, not the generic direction default (L-030).
+            resolved = {
+                "coordinates": start + end,
+                "normalized_coordinates": start + end,
+                "normalized_start_coordinates": start,
+                "normalized_end_coordinates": end,
+            }
             return (
                 "swipe",
                 {
-                    "start": [_norm(x1, width), _norm(y1, height)],
-                    "end": [_norm(x2, width), _norm(y2, height)],
+                    "start": start,
+                    "end": end,
                     "duration_ms": smart_dur,
                 },
                 finalize,
-                {},
+                resolved,
             )
 
         if kind == "coords":

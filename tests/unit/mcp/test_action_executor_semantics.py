@@ -280,7 +280,11 @@ def test_directional_swipe_needs_no_description():
     wire_name, wire_args, _, recorded = executor._translate("swipe", {"direction": "up"}, _state())
     assert wire_name == "swipe"
     assert "start" in wire_args and "end" in wire_args
-    assert recorded == {}
+    assert "target_description" not in recorded
+    # L-030: the step records the swipe actually sent, not the direction default.
+    assert recorded["normalized_start_coordinates"] == wire_args["start"]
+    assert recorded["normalized_end_coordinates"] == wire_args["end"]
+    assert recorded["normalized_coordinates"] == wire_args["start"] + wire_args["end"]
 
 
 def test_directional_swipe_ignores_a_stray_description():
@@ -289,7 +293,7 @@ def test_directional_swipe_ignores_a_stray_description():
         "swipe", {"direction": "up", "target_description": "the feed"}, _state()
     )
     assert "target_description" not in wire_args
-    assert recorded == {}
+    assert "target_description" not in recorded
 
 
 def test_click_sequence_requires_one_description_per_entry():

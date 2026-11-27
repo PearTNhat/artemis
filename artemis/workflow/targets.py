@@ -24,9 +24,11 @@ No app name or button wording lives here (AGENTS.md 2.7).
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import hashlib
 from typing import Any, Iterable
 
-from artemis.workflow.fingerprint import SYSTEMUI_PACKAGE
+from artemis.utils.screen_diff import flatten_hierarchy
+from artemis.workflow.fingerprint import SYSTEMUI_PACKAGE, foreground_package, normalize
 
 # Containers covering > 40% of the canvas are layout wrappers, never targets.
 MAX_TARGET_AREA_NORM = 400_000
@@ -74,24 +76,67 @@ def fold(text: str) -> str:
     return "".join(c for c in t if not unicodedata.combining(c)).casefold().strip()
 
 
+_LIST_CONTAINER_CLASSES = ("RecyclerView", "ListView", "GridView")
+
+
+def _inside_list_container(node: dict[str, Any], norm: list[dict[str, Any]]) -> bool:
+    if node.get("in_scrollable"):
+        return True
+    nb = _box(node)
+    cx, cy = center(nb)
+    pkg = node.get("package") or ""
+    for other in visible_app_nodes(norm):
+        if other is node or (pkg and other.get("package") != pkg):
+            continue
+        cls = str(other.get("class") or "")
+        if any(c in cls for c in _LIST_CONTAINER_CLASSES):
+            ob = _box(other)
+            if area(ob) >= 1000 and ob[0] <= cx <= ob[2] and ob[1] <= cy <= ob[3]:
+                if nb[0] >= ob[0] - 5 and nb[1] >= ob[1] - 5 and nb[2] <= ob[2] + 5 and nb[3] <= ob[3] + 5:
+                    return True
+    return False
+
+
 def _same_kind(node: dict[str, Any], visible: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Visible entries of the same kind as ``node``: same resource id, or for
-    unnamed nodes same class and width at another height (list rows)."""
+    unnamed nodes same class and width (or aligned list edge inside a list
+    container) at another height."""
     rid = node.get("resource-id") or ""
     b = _box(node)
     if rid:
         return [n for n in visible if n.get("resource-id") == rid and node_label(n)]
-    return [
-        n
-        for n in visible
-        if n.get("class") == node.get("class")
-        and node_label(n)
-        and abs((_box(n)[2] - _box(n)[0]) - (b[2] - b[0])) <= 10
-    ]
+    width = b[2] - b[0]
+    in_list = _inside_list_container(node, visible)
+    out: list[dict[str, Any]] = []
+    for n in visible:
+        if n.get("class") != node.get("class") or not node_label(n):
+            continue
+        nb = _box(n)
+        same_width = abs((nb[2] - nb[0]) - width) <= 10
+        aligned_edge = in_list and _inside_list_container(n, visible) and (
+            abs(nb[0] - b[0]) <= 20 or abs(nb[2] - b[2]) <= 20
+        )
+        if same_width or aligned_edge:
+            out.append(n)
+    return out
 
 
 def node_label(node: dict[str, Any]) -> str:
     return str(node.get("text") or node.get("content-desc") or "").strip()
+
+
+def is_data_label(label: str) -> bool:
+    """A label made only of digits, punctuation, symbols and spaces ("2", "111.000",
+    "+2h" is not: it has a letter). Such a node shows data (a quantity, a price, a
+    count) that depends on the state of the account, not a navigation control:
+    the autopilot never taps it on its own (L-027). Decided by Unicode category,
+    no currency or wording list."""
+    import unicodedata
+
+    text = (label or "").strip()
+    if not text or not any(ch.isdigit() for ch in text):
+        return False
+    return all(unicodedata.category(ch)[0] in ("N", "P", "S", "Z") for ch in text)
 
 
 def visible_app_nodes(norm: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -264,9 +309,10 @@ def resolve(
             return None, "ambiguous_slot"
         if len(matches) == 1 and len(_same_kind(matches[0], visible)) > 1:
             # Several entries of the same kind are listed (other results,
-            # variants): picking one is a choice for the AI / the user, even
-            # when only one of them contains the value.
-            return None, "list_choice"
+            # variants): picking one is a choice for the AI / the user, unless
+            # it is a non-scrollable static option/tab matching the exact slot value.
+            if matches[0].get("in_scrollable") or fold(node_label(matches[0])) != value:
+                return None, "list_choice"
     else:
         if desc.resource_id:
             rid = [n for n in visible if n.get("resource-id") == desc.resource_id]
@@ -312,6 +358,9 @@ def resolve(
         return None, "occluded"
     if is_commitment_at(norm, nb, extra_texts=(node_label(node),)):
         return None, "commitment"
+    if not desc.focused_editable and not is_editable(node) and is_data_label(node_label(node)):
+        # A quantity / price / count: state-dependent data, never auto-tapped (L-027).
+        return None, "data_label"
     return node, "ok"
 
 
@@ -378,11 +427,11 @@ def typed_slots(norm: list[dict[str, Any]], slot_values: dict[str, str]) -> set[
 
 
 def is_list_item(node: dict[str, Any], norm: list[dict[str, Any]]) -> bool:
-    """A repeated entry of scrolling content (a result, a product, a contact),
+    """A repeated entry of list/scrolling content (a result, a product, a contact),
     not a control that merely floats over the list (FAB, sticky button).
     Repetition is the pattern: another visible node shares its resource id, or
-    (unlabelled ids) its class and width at another height."""
-    if not node.get("in_scrollable"):
+    (unnamed ids) its class and width / aligned left-or-right list edge at another height."""
+    if not _inside_list_container(node, norm):
         return False
     box = _box(node)
     rid = node.get("resource-id") or ""
@@ -396,9 +445,13 @@ def is_list_item(node: dict[str, Any], norm: list[dict[str, Any]]) -> bool:
                 return True
         elif (
             other.get("class") == node.get("class")
-            and abs((ob[2] - ob[0]) - width) <= 10
             and abs(ob[1] - box[1]) >= 20
-            and other.get("in_scrollable")
+            and _inside_list_container(other, norm)
+            and (
+                abs((ob[2] - ob[0]) - width) <= 10
+                or abs(ob[0] - box[0]) <= 20
+                or abs(ob[2] - box[2]) <= 20
+            )
         ):
             return True
     return False
@@ -432,15 +485,220 @@ def keyboard_covers(target: dict[str, Any], norm: list[dict[str, Any]]) -> bool:
     focus. Pressing BACK hides it (standard Android behaviour)."""
     from artemis.workflow.fingerprint import foreground_package
 
-    fg = foreground_package(norm)
     if not covered_by_other_window(target, norm):
         return False
+    return keyboard_box(norm) is not None
+
+
+def keyboard_box(norm: list[dict[str, Any]]) -> Box | None:
+    """Box of an input-method-like window, or None: another package's window
+    spanning the screen width in the lower part while an app field has focus
+    (the soft keyboard; BACK hides it)."""
+    from artemis.workflow.fingerprint import foreground_package
+
+    fg = foreground_package(norm)
     if not any(n.get("focused") and is_editable(n) and n.get("package") == fg for n in visible_app_nodes(norm)):
-        return False
-    for n in visible_app_nodes(norm):
-        if n.get("package") in (fg, None, ""):
+        return None
+    # A keyboard dump may have no full-width root, only its keys: use the
+    # union of the other window's nodes in the lower part of the screen.
+    boxes = [
+        _box(n)
+        for n in visible_app_nodes(norm)
+        if n.get("package") not in (fg, None, "", SYSTEMUI_PACKAGE) and _box(n)[1] >= 400
+    ]
+    if len(boxes) < 5 and not any(b[2] - b[0] >= 900 for b in boxes):
+        return None
+    if not boxes:
+        return None
+    union = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+    return union if union[2] - union[0] >= 800 else None
+
+
+def other_window_boxes(norm: list[dict[str, Any]]) -> list[Box]:
+    """Boxes of content drawn by other packages (keyboard keys, bubbles, dialogs)."""
+    from artemis.workflow.fingerprint import foreground_package
+
+    fg = foreground_package(norm)
+    return [
+        _box(n)
+        for n in visible_app_nodes(norm)
+        if n.get("package") not in (fg, None, "", SYSTEMUI_PACKAGE)
+    ]
+
+
+def screen_content_key(raw: Any) -> str | None:
+    """Hash of the foreground app's visible labels AND element states (checked,
+    selected, enabled, error): picking an option changes the key even when no
+    text changes. Accepts either a ``dict`` or an object with ``.elements``.
+    """
+    if isinstance(raw, dict):
+        elements = raw.get("elements")
+        width = raw.get("width")
+        height = raw.get("height")
+    else:
+        elements = getattr(raw, "elements", None)
+        width = getattr(raw, "width", None)
+        height = getattr(raw, "height", None)
+    if not elements:
+        return None
+    norm = normalize(elements, width=width, height=height)
+    fg = foreground_package(norm)
+    labels = sorted(
+        node_label(n) for n in visible_app_nodes(norm) if node_label(n) and (not fg or n.get("package") == fg)
+    )
+    if not labels:
+        return None
+    states = []
+    for n in flatten_hierarchy(elements) or []:
+        if not isinstance(n, dict) or (fg and n.get("package") not in (fg, None, "")):
             continue
-        b = _box(n)
-        if b[2] - b[0] >= 900 and b[1] >= 400:
-            return True
-    return False
+        flags = "".join(
+            k[0] for k in ("checked", "selected", "error") if str(n.get(k) or "").lower() not in ("", "false", "none", "0")
+        )
+        if str(n.get("enabled", "true")).lower() == "false":
+            flags += "d"
+        if flags:
+            states.append(f"{n.get('resource-id') or n.get('text') or n.get('bounds')}:{flags}")
+    body = "\x1f".join([fg] + labels + ["#"] + sorted(states))
+    return hashlib.sha1(body.encode("utf-8")).hexdigest()[:16]
+
+
+_SCROLL_CONTAINER_HINTS = ("scrollview", "recyclerview", "listview", "webview", "viewpager", "gridview")
+
+
+def _in_box(px: int, py: int, box: Box, margin: int = 15) -> bool:
+    return (box[0] - margin) <= px <= (box[2] + margin) and (box[1] - margin) <= py <= (box[3] + margin)
+
+
+def safe_swipe_in_norm(
+    norm: list[dict[str, Any]],
+    *,
+    direction: str = "up",
+    target_bounds: Box | None = None,
+    indexed_elements: list[dict[str, Any]] | None = None,
+    screen_width: int = 1000,
+    screen_height: int = 1000,
+    min_container_area: int = 150_000,
+) -> list[int] | None:
+    """Computes a safe swipe ``[sx, sy, ex, ey]`` (0-1000 scale) inside the
+    foreground app's main scrollable container, avoiding other windows (keyboard,
+    dialogs) and non-scrolling clickable/editable controls (FABs, bottom bars).
+    Returns ``None`` when no safe band exists.
+    """
+    fg = foreground_package(norm)
+    vis = visible_app_nodes(norm)
+    if target_bounds is not None:
+        l, t, r, b = target_bounds
+    else:
+        areas: list[Box] = []
+        for n in vis:
+            if fg and n.get("package") != fg:
+                continue
+            cls = str(n.get("class") or "").lower()
+            is_scroll = bool(n.get("scrollable")) or any(k in cls for k in _SCROLL_CONTAINER_HINTS)
+            if not is_scroll:
+                continue
+            nb = _box(n)
+            if area(nb) >= min_container_area:
+                areas.append(nb)
+        if not areas:
+            return None
+        l, t, r, b = max(areas, key=area)
+
+    # Clip out other-window overlays (keyboard, floating dialogs).
+    for ol, ot, orr, ob in other_window_boxes(norm):
+        if ol < r and orr > l and ot < b and ob > t:
+            if ot > t:
+                b = min(b, ot)
+            elif ob < b:
+                t = max(t, ob)
+            else:
+                return None
+
+    dir_str = str(direction or "up").strip().lower()
+    if dir_str in ("up", "down") and (b - t) < 200:
+        return None
+    if dir_str in ("left", "right") and (r - l) < 200:
+        return None
+
+    # Obstacles: any interactive control (area <= 250_000) for primary pass,
+    # and strictly non-list / button / input controls for fallback pass when
+    # a screen is filled edge-to-edge with clickable list cards.
+    all_obstacles: list[Box] = []
+    strict_obstacles: list[Box] = []
+    for n in vis:
+        if fg and n.get("package") != fg:
+            continue
+        if not (n.get("clickable") or is_editable(n) or n.get("checkable")):
+            continue
+        nb = _box(n)
+        if not (0 < area(nb) <= 250_000):
+            continue
+        all_obstacles.append(nb)
+        cls_l = str(n.get("class") or "").lower()
+        if not n.get("in_scrollable") or "button" in cls_l or is_editable(n) or n.get("checkable"):
+            strict_obstacles.append(nb)
+
+    if not all_obstacles and indexed_elements:
+        sw = max(1, int(screen_width or 1000))
+        sh = max(1, int(screen_height or 1000))
+        for elem in indexed_elements:
+            eb = elem.get("bounds")
+            if isinstance(eb, (list, tuple)) and len(eb) == 4:
+                nb = (
+                    round(int(eb[0]) * 1000 / sw),
+                    round(int(eb[1]) * 1000 / sh),
+                    round(int(eb[2]) * 1000 / sw),
+                    round(int(eb[3]) * 1000 / sh),
+                )
+                if 0 < area(nb) <= 150_000 and (nb[1] >= 600 or nb[3] <= 200):
+                    all_obstacles.append(nb)
+                    strict_obstacles.append(nb)
+
+    # Trim bottom/top full-width sticky bars overlapping the scrollable area.
+    cw = r - l
+    for ob_l, ob_t, ob_r, ob_b in strict_obstacles:
+        if ob_l < r and ob_r > l and ob_t < b and ob_b > t and (ob_r - ob_l) >= int(cw * 0.7):
+            if ob_t >= (t + b) // 2:
+                b = min(b, ob_t - 10)
+            elif ob_b <= (t + b) // 2:
+                t = max(t, ob_b + 10)
+
+    if dir_str in ("up", "down") and (b - t) < 200:
+        return None
+    if dir_str in ("left", "right") and (r - l) < 200:
+        return None
+
+    w = r - l
+    h = b - t
+    if dir_str in ("up", "down"):
+        x_cands = [int(l + w * f) for f in (0.60, 0.20, 0.82, 0.35, 0.72, 0.50)]
+        y_hi = b - max(20, h // 6)
+        y_lo = t + max(20, h // 6)
+        if dir_str == "up":
+            y_starts = [y_hi, int(t + h * 0.65), int(t + h * 0.52)]
+            y_end = y_lo
+        else:
+            y_starts = [y_lo, int(t + h * 0.35), int(t + h * 0.48)]
+            y_end = y_hi
+        for obs_list in (all_obstacles, strict_obstacles):
+            for sy in y_starts:
+                if abs(y_end - sy) < 150:
+                    continue
+                for sx in x_cands:
+                    if not any(_in_box(sx, sy, ob) for ob in obs_list):
+                        return [sx, sy, sx, y_end]
+        sx = int(l + w * 0.60)
+        return [sx, y_hi if dir_str == "up" else y_lo, sx, y_lo if dir_str == "up" else y_hi]
+
+    # left / right
+    y_cands = [int(t + h * f) for f in (0.50, 0.35, 0.65)]
+    x_hi = r - max(20, w // 4)
+    x_lo = l + max(20, w // 4)
+    sx, ex = (x_hi, x_lo) if dir_str == "left" else (x_lo, x_hi)
+    for obs_list in (all_obstacles, strict_obstacles):
+        for sy in y_cands:
+            if not any(_in_box(sx, sy, ob) for ob in obs_list):
+                return [sx, sy, ex, sy]
+    sy = int(t + h * 0.50)
+    return [sx, sy, ex, sy]

@@ -171,6 +171,13 @@ def build_wf():
     return wf
 
 
+def build_confirmed_wf():
+    """Two independent successful runs so nav steps in a commitment workflow are active."""
+    wf = build_wf()
+    record_run(recorded_run(), goal=GOAL, workflow=wf, slot_values={"slot1": "pho bo"})
+    return wf
+
+
 def test_recorder_classifies_steps_by_ui_pattern():
     wf = build_wf()
     assert wf.package == PKG
@@ -207,7 +214,7 @@ def test_result_pick_without_user_choice_is_a_slot_pick():
 
 
 def test_replay_with_new_slot_value_stops_at_the_choice():
-    wf = build_wf()
+    wf = build_confirmed_wf()
     app = FakeApp(home())
     rep = asyncio.run(Autopilot(wf, {"slot1": "bun cha"}, poll_interval_s=0).run(app))
     assert [a[0] for a in app.actions] == ["click", "input_text", "press_key"]
@@ -219,7 +226,7 @@ def test_replay_with_new_slot_value_stops_at_the_choice():
 
 
 def test_replay_stops_when_destination_differs():
-    wf = build_wf()
+    wf = build_confirmed_wf()
     app = FakeApp(home(), enter_leads_to=other_screen_same_app)
     rep = asyncio.run(Autopilot(wf, {"slot1": "bun cha"}, poll_interval_s=0).run(app))
     assert rep.steps == 2
@@ -239,7 +246,7 @@ def other_screen_same_app():
 
 
 def test_edge_disabled_after_two_consecutive_failures():
-    wf = build_wf()
+    wf = build_confirmed_wf()
     for _ in range(2):
         app = FakeApp(home(), enter_leads_to=other_screen_same_app)
         asyncio.run(Autopilot(wf, {"slot1": "bun cha"}, poll_interval_s=0).run(app))
@@ -247,7 +254,7 @@ def test_edge_disabled_after_two_consecutive_failures():
 
 
 def test_missing_slot_value_hands_over_before_typing():
-    wf = build_wf()
+    wf = build_confirmed_wf()
     app = FakeApp(home())
     rep = asyncio.run(Autopilot(wf, {}, poll_interval_s=0).run(app))
     assert rep.steps == 1
@@ -255,7 +262,7 @@ def test_missing_slot_value_hands_over_before_typing():
 
 
 def test_never_passes_a_commitment_stop():
-    wf = build_wf()
+    wf = build_confirmed_wf()
     app = FakeApp(detail("bun cha special"))
     rep = asyncio.run(Autopilot(wf, {"slot1": "bun cha"}, poll_interval_s=0).run(app))
     assert rep.steps == 1  # add to basket
@@ -459,7 +466,7 @@ def test_layout_fingerprint_ignores_how_many_results_a_list_shows():
 
 
 def test_autopilot_never_restarts_the_workflow_in_the_same_run():
-    wf = build_wf()
+    wf = build_confirmed_wf()
     ap = Autopilot(wf, {"slot1": "bun cha"}, poll_interval_s=0)
     app = FakeApp(home())
     asyncio.run(ap.run(app))  # click, type, search -> stops at the choice
@@ -529,9 +536,10 @@ class ScrollApp(FakeApp):
 
 
 def _wf_with_detail_step():
-    wf = build_wf()
-    # re-record the add step on the scrolled-down page
+    wf = build_confirmed_wf()
+    # re-record the add step on the scrolled-down page (confirmed across 2 runs)
     steps = [step("click", {"target": 9}, _long_detail(1), cart(), point=(500, 740))]
+    record_run(steps, goal=GOAL, workflow=wf, slot_values={"slot1": "pho bo"})
     record_run(steps, goal=GOAL, workflow=wf, slot_values={"slot1": "pho bo"})
     return wf
 
@@ -540,7 +548,10 @@ def test_autopilot_scrolls_to_a_target_recorded_below_the_fold():
     wf = _wf_with_detail_step()
     app = ScrollApp(pages=3)
     rep = asyncio.run(Autopilot(wf, {"slot1": "x"}, poll_interval_s=0).run(app))
-    assert app.actions[0] == ("swipe", {"direction": "up"})
+    tool, args = app.actions[0]
+    x1, y1, x2, y2 = args["coordinates"]
+    assert tool == "swipe" and y1 > y2  # scrolls the content up
+    assert 80 <= y2 < y1 <= 900  # inside the scrolling area [80, 900]
     assert ("click", {"target": 1}) in app.actions and app.screen == cart()
 
 
@@ -573,7 +584,7 @@ def test_reaching_the_recorded_end_screen_says_the_task_is_done():
 def test_merged_edge_order_does_not_block_a_step_that_never_ran():
     """Merges append edges out of path order: a later-recorded step must not
     mark an earlier-listed, never-run step as already done."""
-    wf = build_wf()
+    wf = build_confirmed_wf()
     enter = wf.edges[2]
     wf.edges.remove(enter)
     wf.edges.append(enter)  # e.g. learned in a later run, listed last
@@ -643,7 +654,7 @@ def test_fields_without_ids_are_named_by_their_hint():
 
 
 def test_autopilot_hides_the_keyboard_covering_its_target():
-    wf = build_wf()  # has nav "Add to basket" on the detail screen
+    wf = build_confirmed_wf()  # has nav "Add to basket" on the detail screen
     focused = {**_n("note", 20, 520, 980, 600, cls="android.widget.EditText", editable=True), "focused": "true"}
     with_kb = detail("x") + [focused] + _keyboard()
 
@@ -722,6 +733,9 @@ def test_record_mode_merges_a_repeated_task_instead_of_a_new_file(tmp_path):
         for st in steps:
             if st.tool == "input_text":
                 st.args["text"] = value
+            for scr in (st.pre, st.post):  # the screens show what was typed in this run
+                if scr is not None:
+                    scr.elements = [{**n, "text": n.get("text", "").replace("pho bo", value)} for n in scr.elements]
         return steps
 
     async def ask(_prompt):
@@ -738,3 +752,89 @@ def test_record_mode_merges_a_repeated_task_instead_of_a_new_file(tmp_path):
 
     saved = WorkflowStore(tmp_path).list(PKG)
     assert len(saved) == 1 and saved[0].runs == 2 and saved[0].ok_runs == 2
+
+
+def _kb_scroll_app(kb_top):
+    """Scrolling form with a focused field and a keyboard from ``kb_top`` down;
+    fails the test if a swipe ever starts or ends on the keyboard."""
+    focused = {**_n("note", 20, 100, 980, 160, cls="android.widget.EditText", editable=True), "focused": "true"}
+
+    def kb():
+        return [_n("", 0, kb_top, 1000, 1000, cls="android.widget.FrameLayout", package="com.example.keyboard")] + [
+            {**_n("", 10 + i * 95, kb_top + 20, 95 + i * 95, kb_top + 90, text=f"k{i}", clickable=True,
+                  package="com.example.keyboard"), "resource-id": f"com.example.keyboard:id/key_{i}"}
+            for i in range(10)
+        ]
+
+    class App(ScrollApp):
+        def __init__(self):
+            super().__init__(pages=3)
+            self.kb = True
+            self.screen = _long_detail(0) + [focused] + kb()
+
+        async def act(self, tool, args, element):
+            if tool == "swipe":
+                x1, y1, x2, y2 = args["coordinates"]
+                if self.kb and max(y1, y2) >= kb_top:
+                    raise AssertionError(f"swipe {args['coordinates']} touches the keyboard at y>={kb_top}")
+            if tool == "press_key" and args.get("key") == "BACK":
+                self.actions.append((tool, args))
+                self.kb = False
+                self.screen = _long_detail(self.offset) + [focused]
+                return True, "ok"
+            res = await super().act(tool, args, element)
+            if tool == "swipe":
+                self.screen = self.screen + [focused] + (kb() if self.kb else [])
+            return res
+
+    return App()
+
+
+def test_scroll_search_swipes_above_the_keyboard_without_hiding_it():
+    """Regression: a swipe started on the keyboard glide-typed "Hu" into a field
+    ("Lan" -> "Lan Hu Hu Hu"). With room above the keyboard, swipe there."""
+    wf = _wf_with_detail_step()
+    app = _kb_scroll_app(kb_top=680)
+    rep = asyncio.run(Autopilot(wf, {"slot1": "x"}, poll_interval_s=0).run(app))
+    assert app.actions[0][0] == "swipe"  # scrolled above the keyboard, not BACK first
+    # the found button then sat under the keyboard: hidden only then, before the tap
+    assert app.actions[1:] == [("press_key", {"key": "BACK"}), ("click", {"target": 1})]
+    assert app.screen == cart(), rep.stop_reason
+
+
+def test_keyboard_over_most_of_the_list_is_hidden_before_scrolling(monkeypatch):
+    import artemis.workflow.autopilot as ap_mod
+
+    wf = _wf_with_detail_step()
+    app = _kb_scroll_app(kb_top=680)
+    real = ap_mod._scroll_swipe
+    # no safe band while the keyboard is up (e.g. a short list above a tall keyboard)
+    monkeypatch.setattr(ap_mod, "_scroll_swipe", lambda norm: real(norm) if not app.kb else None)
+    rep = asyncio.run(Autopilot(wf, {"slot1": "x"}, poll_interval_s=0).run(app))
+    assert app.actions[0] == ("press_key", {"key": "BACK"})
+    assert app.screen == cart(), rep.stop_reason
+
+
+def test_swipe_band_stops_above_another_window():
+    from artemis.workflow.autopilot import _scroll_swipe
+    from artemis.workflow.fingerprint import normalize
+
+    norm = normalize(_long_detail(0) + _keyboard(), width=1000, height=1000)
+    x1, y1, x2, y2 = _scroll_swipe(norm)
+    assert y1 < 680  # the keyboard window starts at y=680
+
+
+def test_submit_waits_for_every_field_of_its_form_even_scrolled_away():
+    """Save recorded after first+last name were typed needs both, even when the
+    first-name field has scrolled out of view by then; values typed on another
+    screen do not count."""
+    steps = [
+        step("input_text", {"text": "Minh", "target": 1}, _form(), _form("Minh"), point=(500, 150)),
+        step("input_text", {"text": "Tran", "target": 2}, _form("Minh"), _form("Minh", "Tran"), point=(500, 250)),
+        # by the time of Save the first-name field is no longer shown
+        step("click", {"target": 4}, [n for n in _form("Minh", "Tran") if "first" not in n["resource-id"]],
+             cart(), point=(890, 40)),
+    ]
+    wf = record_run(steps, goal=FORM_GOAL)
+    save = next(e for e in wf.edges if e.target and e.target.resource_id.endswith("save"))
+    assert set(save.typed.split(",")) == {"slot1", "slot2"}

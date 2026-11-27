@@ -259,6 +259,51 @@ def compute_smart_swipe_coordinates(
         screen_height=height,
     )
 
+    dir_str = str(direction or "up").strip().lower()
+    if ui_hierarchy:
+        from artemis.workflow.fingerprint import normalize
+        from artemis.workflow.targets import safe_swipe_in_norm
+
+        norm = normalize(ui_hierarchy, width=width, height=height)
+        tb = None
+        if target is not None and container != [0, 0, width, height]:
+            tb = (
+                int(round(container[0] * 1000 / max(1, width))),
+                int(round(container[1] * 1000 / max(1, height))),
+                int(round(container[2] * 1000 / max(1, width))),
+                int(round(container[3] * 1000 / max(1, height))),
+            )
+        safe = safe_swipe_in_norm(
+            norm,
+            direction=dir_str,
+            target_bounds=tb,
+            indexed_elements=indexed_elements,
+            screen_width=width,
+            screen_height=height,
+        )
+        if safe is not None:
+            sx = int(round(safe[0] * width / 1000))
+            sy = int(round(safe[1] * height / 1000))
+            ex = int(round(safe[2] * width / 1000))
+            ey = int(round(safe[3] * height / 1000))
+            sx = max(0, min(width - 1, sx))
+            ex = max(0, min(width - 1, ex))
+            sy = max(0, min(height - 1, sy))
+            ey = max(0, min(height - 1, ey))
+            if duration is None:
+                dist = ((ex - sx) ** 2 + (ey - sy) ** 2) ** 0.5
+                if dist <= 300:
+                    duration_ms = 350
+                elif dist <= 600:
+                    duration_ms = 550
+                elif dist <= 1000:
+                    duration_ms = 750
+                else:
+                    duration_ms = 900
+            else:
+                duration_ms = int(duration)
+            return sx, sy, ex, ey, duration_ms
+
     c_left = max(0, min(width - 1, container[0]))
     c_top = max(0, min(height - 1, container[1]))
     c_right = max(c_left + 50, min(width, container[2]))
@@ -266,8 +311,6 @@ def compute_smart_swipe_coordinates(
 
     c_width = c_right - c_left
     c_height = c_bottom - c_top
-
-    dir_str = str(direction or "up").strip().lower()
 
     if dir_str == "up":
         # Drag upwards -> reveal content below

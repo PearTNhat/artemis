@@ -173,6 +173,45 @@ export function isUserChoiceAction(action: any): boolean {
 }
 
 /**
+ * True when an action was executed directly by the app workflow autopilot
+ * without calling the LLM (`action_taken.autopilot`, `extra_metadata.workflow_autopilot`,
+ * or legacy `[autopilot] workflow ...` marker in `operator_raw_thinking`).
+ */
+export function isAutopilotAction(action: any, stepData?: any): boolean {
+  const act = getActionObject(action);
+  if (act && (act.autopilot === true || act.workflow_autopilot === true)) {
+    return true;
+  }
+  const meta = stepData?.extra_metadata;
+  if (meta && (meta.workflow_autopilot === true || meta.autopilot === true)) {
+    return true;
+  }
+  const raw = typeof stepData?.operator_raw_thinking === 'string' ? stepData.operator_raw_thinking : '';
+  return raw.startsWith('[autopilot]');
+}
+
+/**
+ * Destination check of an autopilot step: true = the screen after it matched the
+ * recorded one; false = it did not and the AI took over; null = not known (still
+ * running, or recorded before `workflow_verified` existed).
+ */
+export function getAutopilotVerified(stepData?: any): boolean | null {
+  const v = stepData?.extra_metadata?.workflow_verified;
+  return typeof v === 'boolean' ? v : null;
+}
+
+/** Extracts the workflow id attached to an autopilot step, if recorded. */
+export function getActionWorkflowId(action: any, stepData?: any): string {
+  const act = getActionObject(action);
+  if (act?.workflow_id) return String(act.workflow_id);
+  const meta = stepData?.extra_metadata;
+  if (meta?.workflow_id) return String(meta.workflow_id);
+  const raw = typeof stepData?.operator_raw_thinking === 'string' ? stepData.operator_raw_thinking : '';
+  const m = raw.match(/^\[autopilot\]\s+workflow\s+(\S+)/);
+  return m ? m[1] : '';
+}
+
+/**
  * Get human-readable title for Android actions
  */
 export function getActionTitle(action: any): string {

@@ -78,6 +78,8 @@ def build_timing_report(db_path: Path | str, session: str | None = None) -> dict
         meta = json.loads(r["extra_metadata"] or "{}")
         timing = meta.get("timing") or {}
         usage = meta.get("token_usage") or {}
+        is_autopilot = bool(meta.get("workflow_autopilot") or action.get("autopilot"))
+        wf_id = meta.get("workflow_id") or action.get("workflow_id")
         ts = float(r["timestamp"] or previous_ts)
         steps.append(
             {
@@ -96,6 +98,9 @@ def build_timing_report(db_path: Path | str, session: str | None = None) -> dict
                 "shared_model_call": bool(timing.get("shared_model_call")),
                 "llm_resumes": timing.get("llm_resumes") or 0,
                 "agy": timing.get("agy"),
+                "autopilot": is_autopilot,
+                "workflow_verified": meta.get("workflow_verified") if is_autopilot else None,
+                "workflow_id": wf_id,
                 "prompt_tokens": usage.get("prompt_tokens"),
                 "completion_tokens": usage.get("completion_tokens"),
             }

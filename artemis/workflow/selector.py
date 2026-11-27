@@ -12,25 +12,169 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Picks the recorded workflow for a new goal and fills its slots (KE_HOACH Mục 6.1).
+"""Picks the recorded workflow for a new goal and fills its slots (KE_HOACH Mục 6.1, W2).
 
-One text-only LLM call. Its answer is never trusted blindly: a slot value
-must literally appear in the new goal, otherwise the slot stays unknown and
-the steps that need it go to the AI.
+Fast-path (0 LLM calls): when the new goal matches a recorded goal verbatim or
+differs ONLY in anchored slot spans (100% identical static framing around each
+slot, separated by non-whitespace text).
+
+Fallback: one text-only LLM call (optionally prioritized by live screen match).
+Its answer is never trusted blindly: a slot value must literally appear in the
+new goal, otherwise the slot stays unknown and the steps that need it go to the AI.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Sequence, TypeVar
 
-from artemis.workflow.store import Workflow
+from artemis.workflow.fingerprint import ScreenFingerprint
+from artemis.workflow.matcher import DEFAULT_DELTA, DEFAULT_TAU, is_matchable, match_screen
+from artemis.workflow.store import Workflow, WorkflowIndexEntry
 
 AskText = Callable[[str], Awaitable[str]]
+WF = TypeVar("WF", Workflow, WorkflowIndexEntry)
 
 
-def build_prompt(goal: str, candidates: list[Workflow]) -> str:
+def _escape_ws(text: str) -> str:
+    if not text:
+        return ""
+    # Preserve leading/trailing whitespace sensitivity as \s* / \s+ and collapse internal whitespace.
+    lead = r"\s+" if text[0].isspace() else ""
+    trail = r"\s+" if len(text) > 1 and text[-1].isspace() else (r"\s+" if text[-1].isspace() and not lead else "")
+    core = text.strip()
+    if not core:
+        return r"\s+"
+    parts = re.split(r"\s+", core)
+    return lead + r"\s+".join(re.escape(p) for p in parts) + trail
+
+
+def match_goal_template(
+    goal: str, wf_goal: str, wf_slots: dict[str, str]
+) -> dict[str, str] | None:
+    """Matches ``goal`` against ``wf_goal`` without an LLM when only slot values differ.
+
+    Requires every slot value to sit between exact static text anchors (no two
+    slots adjacent without non-whitespace separator). Returns ``{slot: value}``
+    on match, else ``None``.
+    """
+    g_new = (goal or "").strip()
+    g_old = (wf_goal or "").strip()
+    if not g_new or not g_old:
+        return None
+    if g_old.casefold() == g_new.casefold():
+        return dict(wf_slots)
+    active_slots = {k: v.strip() for k, v in (wf_slots or {}).items() if v and v.strip()}
+    if not active_slots:
+        return None
+
+    # Find non-overlapping occurrences of each slot value in g_old (longest values first).
+    spans: list[tuple[int, int, str]] = []
+    occupied = [False] * len(g_old)
+    for name, val in sorted(active_slots.items(), key=lambda kv: len(kv[1]), reverse=True):
+        if not re.fullmatch(r"[A-Za-z0-9_]+", name):
+            return None
+        left_b = r"(?<!\w)" if val[0].isalnum() else ""
+        right_b = r"(?!\w)" if val[-1].isalnum() else ""
+        pat = left_b + re.escape(val) + right_b
+        found_for_slot = 0
+        for m in re.finditer(pat, g_old, re.IGNORECASE):
+            s, e = m.start(), m.end()
+            if any(occupied[s:e]):
+                continue
+            for idx in range(s, e):
+                occupied[idx] = True
+            spans.append((s, e, name))
+            found_for_slot += 1
+        if found_for_slot == 0:
+            return None
+
+    spans.sort(key=lambda item: item[0])
+    # Require non-whitespace static separator between any two slots, and some static frame overall.
+    for i in range(len(spans) - 1):
+        between = g_old[spans[i][1] : spans[i + 1][0]]
+        if not between.strip():
+            return None
+
+    regex_parts: list[str] = []
+    static_chars = 0
+    seen_slots: set[str] = set()
+    cursor = 0
+    for s, e, name in spans:
+        seg = g_old[cursor:s]
+        static_chars += len(seg.strip())
+        regex_parts.append(_escape_ws(seg))
+        if name not in seen_slots:
+            seen_slots.add(name)
+            regex_parts.append(f"(?P<{name}>.+?)")
+        else:
+            regex_parts.append(f"(?P={name})")
+        cursor = e
+    tail = g_old[cursor:]
+    static_chars += len(tail.strip())
+    regex_parts.append(_escape_ws(tail))
+
+    if static_chars < 3:
+        return None
+
+    compiled = re.compile("^" + "".join(regex_parts) + "$", re.IGNORECASE | re.DOTALL)
+    m = compiled.match(g_new)
+    if not m:
+        return None
+    extracted: dict[str, str] = {}
+    for name in active_slots:
+        val = (m.group(name) or "").strip()
+        if not val:
+            return None
+        extracted[name] = val
+    return extracted
+
+
+def select_workflow_fast(
+    goal: str, candidates: Sequence[WF]
+) -> tuple[WF | None, dict[str, str]]:
+    """Deterministic zero-LLM selection across ``candidates``."""
+    if not candidates:
+        return None, {}
+    for wf in candidates:
+        if wf.goal.strip().casefold() == goal.strip().casefold():
+            return wf, dict(wf.slots)
+    matches: list[tuple[WF, dict[str, str]]] = []
+    for wf in candidates:
+        extracted = match_goal_template(goal, wf.goal, wf.slots)
+        if extracted is not None:
+            matches.append((wf, extracted))
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        # Prefer the candidate with more successful runs if clearly ahead.
+        ranked = sorted(matches, key=lambda item: (-getattr(item[0], "ok_runs", 0), getattr(item[0], "workflow_id", "")))
+        if getattr(ranked[0][0], "ok_runs", 0) > getattr(ranked[1][0], "ok_runs", 0):
+            return ranked[0]
+    return None, {}
+
+
+def filter_by_live_screen(
+    candidates: Sequence[Workflow],
+    live_fp: ScreenFingerprint | None,
+    *,
+    tau: float = DEFAULT_TAU,
+    delta: float = DEFAULT_DELTA,
+) -> list[Workflow]:
+    """Prioritizes workflows having a node matching ``live_fp``; falls back to all if none match."""
+    cands = list(candidates)
+    if not cands or live_fp is None or not is_matchable(live_fp):
+        return cands
+    matched: list[Workflow] = []
+    for wf in cands:
+        fps = wf.node_fps()
+        if fps and match_screen(live_fp, fps, tau=tau, delta=delta, min_app_tokens=1).matched:
+            matched.append(wf)
+    return matched if matched else cands
+
+
+def build_prompt(goal: str, candidates: Sequence[Workflow | WorkflowIndexEntry]) -> str:
     lines = [
         "You map a new phone task onto a workflow recorded earlier in the same app.",
         "Recorded workflows:",
@@ -59,24 +203,30 @@ def _parse(text: str) -> dict:
 
 
 async def select_workflow(
-    goal: str, candidates: list[Workflow], ask: AskText | None
-) -> tuple[Workflow | None, dict[str, str]]:
+    goal: str,
+    candidates: Sequence[WF],
+    ask: AskText | None,
+    *,
+    live_fp: ScreenFingerprint | None = None,
+) -> tuple[WF | None, dict[str, str]]:
     if not candidates:
         return None, {}
-    # Same goal verbatim: no LLM needed, the recorded values apply as-is.
-    for wf in candidates:
-        if wf.goal.strip().casefold() == goal.strip().casefold():
-            return wf, dict(wf.slots)
+    wf_fast, vals_fast = select_workflow_fast(goal, candidates)
+    if wf_fast is not None:
+        return wf_fast, vals_fast
     if ask is None:
         return None, {}
+    pool: Sequence[WF] = candidates
+    if live_fp is not None and all(isinstance(c, Workflow) for c in candidates):
+        pool = filter_by_live_screen(candidates, live_fp)  # type: ignore[arg-type]
     try:
-        data = _parse(await ask(build_prompt(goal, candidates)))
+        data = _parse(await ask(build_prompt(goal, pool)))
     except Exception:
         return None, {}
     idx = data.get("workflow")
-    if not isinstance(idx, int) or not 1 <= idx <= len(candidates):
+    if not isinstance(idx, int) or not 1 <= idx <= len(pool):
         return None, {}
-    wf = candidates[idx - 1]
+    wf = pool[idx - 1]
     g = goal.casefold()
     values: dict[str, str] = {}
     raw = data.get("slots") if isinstance(data.get("slots"), dict) else {}

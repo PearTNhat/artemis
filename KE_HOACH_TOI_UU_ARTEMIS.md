@@ -28,6 +28,17 @@
   - **Khóa cứng chuẩn mực trong `AGENTS.md`:** Thêm các mục 2.7, 2.8, 2.9 cấm hardcode tên nút/từ khóa, bắt buộc tư duy theo UI Pattern và thuộc tính Accessibility chuẩn.
 - **Kiểm thử hồi quy:** Vượt qua 100% các bộ unit test (toàn bộ 263 tests trong `mcp` và `agents/flash`). Test mới: bỏ chờ ngay khi màn hình đã đổi cho `my_action`, giữ chờ cho `external`, chặn lặp qua thao tác xen giữa, lọc text cắt mép màn hình/ẩn.
 
+### 📌 Bản 3.12 (App workflow v6: W0–W4 + sửa L-021..L-026 — Flash, 2026-11-27)
+- **W0 (`scripts/workflow_replay_eval.py`, L-022):** chạy lại offline các phiên `completed` trong `traces/data_engine.db` (chế độ chỉ đọc `?mode=ro`) qua recorder + autopilot; siết `input_text` đúng ô (đối chiếu `gt.post` khi trace cũ gõ nhầm overlay) và chuyển thiết bị giả sang `gt.post` khi bước bấm/phím lệch GT để bắt mọi lỗi tự nhận sai (`Undet`). Kết quả trên 35 phiên / 6 nhóm lặp lại: `GT=305`, `AP=23 (7.5%)`, `Mis=3`, **`Undet=0`**.
+- **L-026 (`workflow/store.py`, `workflow/recorder.py`, `workflow/autopilot.py`):** thêm `stats.seen` đếm số lần chạy độc lập; trong workflow có `commitment_stop` hoặc phân nhánh `judgement`, bước `nav` khởi đầu là `provisional` và chỉ tự chạy (`active`) khi `seen >= 2` (chặn bước phụ thuộc trạng thái 1 lần như `"Make another"` trên Grab).
+- **W1b (`workflow/recorder.py`, `workflow/targets.py`, `agents/flash/loop_guard.py`):** dùng chung `screen_content_key`, cắt chu trình đi nhầm `n_X → … → n_X` không có slot ở giữa và không đổi trạng thái/nội dung.
+- **W1 (`workflow/playbook.py`, `workflow/store.py`, `workflow/recorder.py`, `agents/flash/workflow_hook.py`):** lưu `label` + `description` cho mọi edge, `start_nodes`; sinh playbook tất định từ Turn 1 và đánh dấu `[done]`/`[NEXT]`.
+- **W2 (`workflow/selector.py`, `workflow/store.py`):** fast-path chọn workflow không gọi LLM bằng regex neo khung chữ tĩnh (0 LLM calls khi chỉ đổi slot); thêm `index.json` gọn mỗi app + xếp hạng ưu tiên màn live (`filter_by_live_screen`).
+- **W3 (`workflow/recorder.py`, `workflow/fingerprint.py`, `workflow/targets.py`, L-021, L-025):** mở rộng `detect_slots` cho thao tác bấm chọn option/tab (`selected`/`checked` trong `app_fingerprint()`); lọc tên app lấy trực tiếp từ `manage_app(app_name=...)`, nhãn icon Launcher khi vào app và `ctx.package_cache` (không dùng từ khoá viết cứng); nhận diện dòng `wrap_content` trong `RecyclerView`/`ListView`/`GridView` kể cả `scrollable=False` (`_inside_list_container`) là mục danh sách.
+- **W4 (`agents/flash/workflow_hook.py`, L-024):** hỏi Android launcher mặc định một lần mỗi thiết bị (`cmd package resolve-activity -a android.intent.action.MAIN -c android.intent.category.HOME`) và chỉ tự `manage_app(action="launch")` khi đang đứng ở chính package launcher đó + khớp mẫu câu tất định (`select_workflow_fast`, 0 LLM calls).
+- **L4 / L-023 (`workflow/targets.py`, `utils/coordinates.py`, `mcp/action_executor.py`, `workflow/autopilot.py`):** `safe_swipe_in_norm` vuốt trong vùng cuộn tránh FAB/control và bàn phím/cửa sổ khác dùng chung cho Flash `swipe` và `Autopilot`.
+- **Kiểm chứng:** bổ sung 6 file unit test mới (`test_w1b_pruning.py`, `test_w1_playbook.py`, `test_w2_selector_index.py`, `test_w3_tap_slots_selected.py`, `test_w4_launcher_open.py`, `test_l1_l4_fixes.py`); `W5` (benchmark máy ảo `qwen3-vl:8b-32k`) sẵn sàng chạy trên `emulator-5554`.
+
 ### 📌 Bản 3.11 (Chống lặp vô hạn + chờ UI đứng yên — Flash, 2026-11-26)
 - **Trả lời model hỏng JSON (Ollama 500 "invalid character … looking for beginning of object key"):** phân loại riêng `MALFORMED_OUTPUT` trong `llm/reliability.py` (không thử lại y hệt, không Pause); Flash hỏi lại kèm lời nhắc (prompt khác → câu trả lời khác ở temperature 0), 3 lần liên tiếp → `failed`. 3 unit test.
 - **Workflow "chỉ đi tiến":** đổi từ thứ tự bước trong file sang tập bước đã chạy trong lần này (workflow gộp nhiều lần chạy không giữ thứ tự đường đi).
@@ -520,7 +531,7 @@ Giới hạn Qwen 4B quan sát được (không do autopilot): lặp gõ lại /
 |:--|:-:|:--|
 | **Chống lặp vô hạn Flash** (chốt vòng lặp theo nội dung màn + thao tác) | ✅ Xong | Bản 3.11; bắt 2/2 vòng lặp thật, chặn nhầm 1/57 phiên offline; chưa chạy lại trên máy (Colab hết giờ) |
 | **Chờ UI đứng yên** (thay settle cố định, Flash) | ✅ Xong | Bản 3.11; 0.7–1.8 s/thao tác trên emulator |
-| **App workflow** (ghi luồng + autopilot phát lại có kiểm màn đích, Flash, cờ `agent.flash.workflow.mode`) | ✅ Xong (thử nghiệm, mặc định off) | Bản 3.10; 29 unit test mới; emulator Đồng hồ: 9→3 lượt AI, 98→46 s (1 lần/bên). Chưa đo trên app thương mại thật. |
+| **App workflow** (ghi luồng + autopilot phát lại có kiểm màn đích, Flash, cờ `agent.flash.workflow.mode`) | ✅ Code + unit test W0–W4 xong (mặc định off), chờ `W5` emulator | Bản 3.10 + 3.12 (`docs/KE_HOACH_APP_WORKFLOW.md` v6): 82 unit test workflow; offline W0 `0` lỗi bấm sai không phát hiện trên 33 phiên; hồi quy 1028 pass, 2 fail có sẵn. |
 | **A.** Làm mới session agy (≥ 80k **và** tăng ≥ 15k; trần cứng 120k) | ✅ Xong | Đã thấy chạy đúng trong trace cờ vua |
 | **C.** Settle theo loại action (`manage_app` 1500ms, ENTER 1000ms, còn lại 400ms) | ✅ Xong | |
 | **C.** Bấm mà màn hình không đổi → chờ 800ms chụp lại 1 lần (XML + dHash, ngưỡng từ config) | ✅ Xong | |

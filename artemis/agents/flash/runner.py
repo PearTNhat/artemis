@@ -1131,6 +1131,12 @@ class FlashRunner:
                 # Stamped verbatim on the step it reached: the chunk ledger
                 # keeps it as a never-evicted line at every compression level.
                 extra_metadata["injected_instruction"] = injected
+            wf_hook = getattr(self, "_wf", None)
+            if wf_hook is not None and getattr(wf_hook, "_in_autopilot", False):
+                extra_metadata["workflow_autopilot"] = True
+                extra_metadata["workflow_mode"] = wf_hook.mode
+                if getattr(wf_hook, "workflow", None) is not None:
+                    extra_metadata["workflow_id"] = wf_hook.workflow.workflow_id
 
             recorded_step_id = self.ctx.data_engine.record_step(
                 pre_screenshot_bytes=pre_screenshot_bytes,
@@ -1213,6 +1219,10 @@ class FlashRunner:
             action_dict = (
                 self._build_action_record(name, args, exec_result) if name in action_names else None
             )
+            if action_dict is not None and wf_hook is not None and getattr(wf_hook, "_in_autopilot", False):
+                action_dict["autopilot"] = True
+                if getattr(wf_hook, "workflow", None) is not None:
+                    action_dict["workflow_id"] = wf_hook.workflow.workflow_id
             if wf_hook is not None and wf_hook.enabled and name in action_names:
                 wf_hook.after_action(name, args, action_dict, exec_result, wf_pre)
             if loop_guard is not None and name in action_names:

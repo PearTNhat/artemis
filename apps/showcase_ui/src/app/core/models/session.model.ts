@@ -84,6 +84,17 @@ export interface AgentStatusResponse {
   paused_error?: string | null;
 }
 
+/** Workflow execution / recording metadata persisted on `device_info.workflow`. */
+export interface SessionWorkflowInfo {
+  mode?: 'off' | 'record' | 'replay' | string | null;
+  workflow_id?: string | null;
+  package?: string | null;
+  autopilot_steps?: number;
+  selector_calls?: number;
+  slots?: Record<string, string>;
+  saved?: boolean;
+}
+
 /** Per-run Pro tuning persisted with the session (`device_info.run_tuning`). */
 export interface SessionRunTuning {
   verification_level?: string | null;

@@ -91,6 +91,9 @@ limitations under the License.
                 }
                 {{ getTaskStatus(session) === 'awaiting_user' ? 'Đang chờ bạn' : (getTaskStatus(session) | uppercase) }}
               </span>
+              @if (getSessionWorkflowBadge(session); as wfBadge) {
+                <span class="task-badge is-workflow" [title]="wfBadge">⚡ {{ wfBadge }}</span>
+              }
               <div class="item-header-actions">
                 @if (getDeviceSerial(session)) {
                   <span class="item-device" [title]="'Device: ' + getDeviceSerial(session)">
@@ -159,6 +162,9 @@ limitations under the License.
                   }
                   {{ getTaskStatus(session) | uppercase }}
                 </span>
+                @if (getSessionWorkflowBadge(session); as wfBadge) {
+                  <span class="task-badge is-workflow" [title]="wfBadge">⚡ {{ wfBadge }}</span>
+                }
                 <div class="item-header-actions">
                   @if (getDeviceSerial(session)) {
                     <span class="item-device" [title]="'Device: ' + getDeviceSerial(session)">
@@ -424,6 +430,14 @@ limitations under the License.
           </div>
         }
 
+        @if (runWorkflowBadgeLabel(); as wfLabel) {
+          <div class="model-info-chip workflow-chip" [title]="runWorkflowTooltip()">
+            <span class="material-symbols-outlined model-icon">account_tree</span>
+            <span class="model-label">Workflow:</span>
+            <span class="model-name">{{ wfLabel }}</span>
+          </div>
+        }
+
         <!-- Timing: where this session's time went, step by step -->
         <button
           type="button"
@@ -481,6 +495,13 @@ limitations under the License.
                         <td>{{ s.step }}</td>
                         <td class="timing-action" [title]="s.target">
                           {{ s.action }}<span class="timing-target">{{ s.target }}</span>
+                          @if (s.autopilot) {
+                            @if (s.workflow_verified === false) {
+                              <span class="timing-tag wf" title="Workflow đã bấm nhưng màn sau không như lúc ghi — AI tiếp quản">⚡ Workflow (chưa xác nhận)</span>
+                            } @else {
+                              <span class="timing-tag wf" [title]="s.workflow_id ? ('Workflow ' + s.workflow_id + ' — không gọi AI') : 'Workflow — không gọi AI'">⚡ Workflow (không hỏi AI)</span>
+                            }
+                          }
                           @if (s.agy) {
                             <span class="timing-tag">agy {{ s.agy.model_calls }} lần gọi · {{ s.agy.opened_screenshot ? 'mở ảnh' : 'không mở ảnh' }}</span>
                           }
@@ -594,6 +615,12 @@ limitations under the License.
               </div>
             } @else {
               <div class="run-info-note">No extra settings for Flash.</div>
+            }
+            @if (runWorkflowBadgeLabel(); as wfLabel) {
+              <div class="run-info-row" [title]="runWorkflowTooltip()">
+                <span class="run-info-label">Workflow</span>
+                <span class="run-info-value">{{ wfLabel }}</span>
+              </div>
             }
           </div>
         </ng-template>
@@ -976,12 +1003,28 @@ limitations under the License.
                                 <div class="step-android-action-card"
                                   [class.is-running]="isItemRunning(item, block)"
                                   [class.is-failed]="isActionFailed(item.data, block.data)"
+                                  [class.is-autopilot]="isAutopilotAction(item.data, block.data)"
                                   [class.is-user-choice]="isUserChoiceAction(item.data)"
                                   [class.is-expanded]="isActionExpanded('action-' + block.id + '-' + itemIdx)"
                                   >
                                   <div class="action-card-header" (click)="toggleActionExpanded('action-' + block.id + '-' + itemIdx, $event)">
                                     <span class="material-symbols-outlined action-icon" [class.is-failed]="isActionFailed(item.data, block.data)">{{ getActionIcon(item.data) }}</span>
                                     <span class="action-title">{{ getActionTitle(item.data) }}</span>
+                                    @if (isAutopilotAction(item.data, block.data)) {
+                                      @if (getAutopilotVerified(block.data) === false) {
+                                        <span class="action-status-badge is-autopilot is-unverified"
+                                          title="Workflow đã bấm nhưng màn hình sau đó không như lúc ghi, nên đã giao lại cho AI xử lý">
+                                          <span class="material-symbols-outlined status-icon">help</span>
+                                          Workflow · Chưa xác nhận — AI tiếp quản
+                                        </span>
+                                      } @else {
+                                        <span class="action-status-badge is-autopilot"
+                                          [title]="(getActionWorkflowId(item.data, block.data) ? ('Chạy theo workflow ' + getActionWorkflowId(item.data, block.data)) : 'Chạy theo workflow') + (getAutopilotVerified(block.data) === true ? ' (không gọi AI, đã kiểm màn đích)' : ' (không gọi AI)')">
+                                          <span class="material-symbols-outlined status-icon">{{ getAutopilotVerified(block.data) === true ? 'verified' : 'account_tree' }}</span>
+                                          Workflow · Không hỏi AI
+                                        </span>
+                                      }
+                                    }
                                     @if (isActionFailed(item.data, block.data)) {
                                       <span class="action-status-badge is-failed">
                                         <span class="material-symbols-outlined status-icon">error</span>

@@ -966,3 +966,21 @@ async def test_three_malformed_replies_in_a_row_stop_the_run(mock_context):
 
     assert result["status"] == "failed" and "malformed" in result["explanation"]
     assert runner._invoke_model.await_count == 3
+
+
+def test_swipe_step_records_the_coordinates_actually_sent(mock_context):
+    """L-030: the action record (trace + UI overlay) carries the safe swipe the
+    executor sent, not the [600,700 -> 600,300] direction default."""
+    runner = FlashRunner(mock_context, goal="g")
+    result = ToolExecutionResult(
+        tool_call_id="t", tool_name="swipe", status="success", text_summary="Swiped up.",
+        metadata={"target_semantics": {"coordinates": [200, 722, 200, 254],
+                                       "normalized_coordinates": [200, 722, 200, 254],
+                                       "normalized_start_coordinates": [200, 722],
+                                       "normalized_end_coordinates": [200, 254]}},
+    )
+    with patch("artemis.controllers.unified_controller.get_driver"):
+        rec = runner._build_action_record("swipe", {"direction": "up"}, result)
+    assert rec["normalized_coordinates"] == [200, 722, 200, 254]
+    assert rec["normalized_start_coordinates"] == [200, 722]
+    assert rec["coordinates"] == [200, 722, 200, 254]

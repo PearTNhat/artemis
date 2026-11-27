@@ -28,12 +28,9 @@ quantity, swipe down a list, type into successive fields) never matches.
 
 from __future__ import annotations
 
-import hashlib
 from typing import Any
 
-from artemis.utils.screen_diff import flatten_hierarchy
-from artemis.workflow.fingerprint import foreground_package, normalize
-from artemis.workflow.targets import node_label, visible_app_nodes
+from artemis.workflow.targets import screen_content_key
 
 WARN_AT = 2
 STOP_AT = 3
@@ -48,34 +45,6 @@ _IGNORED = frozenset(
         "report_task_status",
     }
 )
-
-
-def screen_content_key(raw: dict[str, Any] | None) -> str | None:
-    """Hash of the foreground app's visible labels AND element states (checked,
-    selected, enabled, error): picking an option changes the key even when no
-    text changes. None when there is no usable tree."""
-    if not isinstance(raw, dict) or not raw.get("elements"):
-        return None
-    norm = normalize(raw["elements"], width=raw.get("width"), height=raw.get("height"))
-    fg = foreground_package(norm)
-    labels = sorted(
-        node_label(n) for n in visible_app_nodes(norm) if node_label(n) and (not fg or n.get("package") == fg)
-    )
-    if not labels:
-        return None
-    states = []
-    for n in flatten_hierarchy(raw["elements"]) or []:
-        if not isinstance(n, dict) or (fg and n.get("package") not in (fg, None, "")):
-            continue
-        flags = "".join(
-            k[0] for k in ("checked", "selected", "error") if str(n.get(k) or "").lower() not in ("", "false", "none", "0")
-        )
-        if str(n.get("enabled", "true")).lower() == "false":
-            flags += "d"
-        if flags:
-            states.append(f"{n.get('resource-id') or n.get('text') or n.get('bounds')}:{flags}")
-    body = "\x1f".join([fg] + labels + ["#"] + sorted(states))
-    return hashlib.sha1(body.encode("utf-8")).hexdigest()[:16]
 
 
 def _pt(p: Any) -> str:

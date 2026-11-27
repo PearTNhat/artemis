@@ -1286,6 +1286,32 @@ class DataEngine:
 
         self._publish("step_updated", update_payload)
 
+    def merge_step_extra_metadata(
+        self, step_id: UUID | str, patch: dict[str, Any], *, retries: int = 15, delay_s: float = 0.2
+    ) -> None:
+        """Merges ``patch`` into a recorded step's ``extra_metadata`` in background.
+
+        The step row itself is written by a background thread with no ordering
+        guarantee, so a missing row is retried for up to ``retries * delay_s``.
+        Publishes ``step_updated`` so live UIs refresh the step.
+        """
+        if not step_id or not self.storage or not hasattr(self.storage, "merge_step_extra_metadata"):
+            return
+
+        def _merge():
+            for _ in range(max(1, retries)):
+                if self.storage.merge_step_extra_metadata(step_id, patch):
+                    step_num = self.get_step_number(step_id)
+                    self._publish(
+                        "step_updated",
+                        {"step_id": str(step_id), "step_number": step_num, "extra_metadata": patch},
+                    )
+                    return
+                time.sleep(delay_s)
+            logger.warning(f"Step {step_id} not found to merge metadata {list(patch)}")
+
+        self._run_in_background(_merge)
+
     def get_step_number(self, step_id: UUID | int | str | None) -> int | None:
         """Resolve the 1-based sequential step number for a step ID."""
         if step_id is None:

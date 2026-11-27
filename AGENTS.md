@@ -74,6 +74,9 @@ Không suy đoán theo loại app, chỉ phân loại theo điều kiện mà t�
 
 ## 3. Quy trình làm việc bắt buộc cho AI Agent sau khi hoàn thành nhiệm vụ
 
+> [!IMPORTANT]
+> **Trước khi sửa** phần điều khiển thiết bị (capture, observe, executor, swipe/settle) hoặc app workflow (`artemis/workflow/`, `workflow_hook.py`, `loop_guard.py`): đọc [`docs/LOI_DA_GAP.md`](docs/LOI_DA_GAP.md) — các lỗi đã gặp, nguyên nhân gốc, test hồi quy và bài học chung. **Sau khi sửa một lỗi** thuộc phạm vi đó: thêm một mục `[L-NNN]` (triệu chứng, nguyên nhân gốc, cách sửa, tên test hồi quy).
+
 Mỗi khi AI Agent hoàn thành bất kỳ thay đổi mã nguồn, tính năng mới hoặc vá lỗi nào:
 
 1. **Kiểm tra hồi quy toàn diện (Regression Test):**

@@ -30,7 +30,9 @@ import {
   contextPercent,
   formatCompactTokens,
   formatElapsed,
+  formatWorkflowBadge,
   parseRunTuning,
+  parseSessionWorkflow,
   sessionElapsedSeconds,
   tuningLabel
 } from '../../utils/run-info.util';
@@ -175,6 +177,9 @@ import {
   extractActionExtraParams,
   getStepPreImageUrl,
   getStepPostImageUrl,
+  isAutopilotAction,
+  getActionWorkflowId,
+  getAutopilotVerified,
   isUserChoiceAction,
   isReportStatusAction,
   getReportStatusValue,
@@ -304,6 +309,37 @@ export class AgentStreamComponent implements AfterViewInit {
       return usage.run_tuning;
     }
     return parseRunTuning(this.agentService.currentSession()?.device_info);
+  });
+
+  public autopilotStepCount = computed(() => {
+    let count = 0;
+    for (const block of this.consolidatedBlocks()) {
+      if (block.type !== 'step' || !block.data) continue;
+      if (isAutopilotAction(block.data.action_taken, block.data)) {
+        count++;
+      }
+    }
+    return count;
+  });
+
+  public runInfoWorkflow = computed(() => {
+    return parseSessionWorkflow(this.agentService.currentSession()?.device_info);
+  });
+
+  public runWorkflowBadgeLabel = computed(() => {
+    return formatWorkflowBadge(this.runInfoWorkflow(), this.autopilotStepCount());
+  });
+
+  public runWorkflowTooltip = computed(() => {
+    const wf = this.runInfoWorkflow();
+    const count = this.autopilotStepCount();
+    const parts: string[] = [];
+    if (wf?.mode) parts.push(`Mode: ${wf.mode}`);
+    if (wf?.workflow_id) parts.push(`Workflow: ${wf.workflow_id}`);
+    const steps = Math.max(Number(wf?.autopilot_steps || 0), count);
+    if (steps > 0) parts.push(`${steps} bước chạy không cần hỏi AI`);
+    if (wf?.saved) parts.push('Đã lưu workflow');
+    return parts.join(' · ') || 'App Workflow';
   });
 
   public runInfoContextPercent = computed(() => {
@@ -1372,6 +1408,23 @@ export class AgentStreamComponent implements AfterViewInit {
 
   public isUserChoiceAction(action: any): boolean {
     return isUserChoiceAction(action);
+  }
+
+  public isAutopilotAction(action: any, stepData?: any): boolean {
+    return isAutopilotAction(action, stepData);
+  }
+
+  public getActionWorkflowId(action: any, stepData?: any): string {
+    return getActionWorkflowId(action, stepData);
+  }
+
+  /** false: the workflow step did not reach the recorded screen (AI took over). */
+  public getAutopilotVerified(stepData?: any): boolean | null {
+    return getAutopilotVerified(stepData);
+  }
+
+  public getSessionWorkflowBadge(session: Session): string {
+    return formatWorkflowBadge(parseSessionWorkflow(session?.device_info), 0);
   }
 
   public getActionIcon(action: any): string {

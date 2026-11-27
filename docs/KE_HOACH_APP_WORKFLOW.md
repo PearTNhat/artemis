@@ -9,7 +9,14 @@ Trạng thái: ĐÃ ĐỒNG THUẬN v4 (agents-debate phiên 0906a23d, 2026-11-2
 ### Hiện trạng (sau test emulator 26/11, xem KE_HOACH_TOI_UU_ARTEMIS.md 1.15)
 - Đã có: ghi workflow từ phiên `completed`, autopilot phát lại có kiểm màn đích, chọn workflow 1 lần LLM chỉ-chữ, chốt vòng lặp, chờ UI đứng yên, xử lý JSON hỏng của model, nhận diện ô nhập bằng `hint`, gộp trạng thái cuộn/gõ của cùng màn, ẩn bàn phím che target, chế độ `record` gộp tác vụ lặp lại (không đẻ file mới). 60 unit test workflow; regression 1006 pass / 2 fail có sẵn.
 - Kết quả: có lợi rõ ở luồng app gốc lặp lại (Đồng hồ: 2–3 lượt AI / 48–59 s so với 6–9 lượt / 71–98 s); web (Chrome) không lợi, không hại; Danh bạ: Qwen 4B không tự làm được, Gemini ghi → Qwen phát lại thì autopilot gõ được các ô nhưng chưa bấm được Lưu. 0 lần autopilot bấm sai không phát hiện sau các bản sửa.
+- Lỗi đã sửa sau phản biện 27/11: autopilot cuộn tìm target bằng swipe mặc định (y≈896/1280) khi bàn phím đang mở → cú vuốt thành vuốt-gõ trên Gboard ("Lan" → "Lan Hu Hu Hu", trace f68c5042) — bấm sai không bị phát hiện. Sửa: bàn phím mở (nhận bằng vùng bao các phần tử của cửa sổ khác ở nửa dưới, vì Gboard có thể không có khung gốc) → BACK ẩn trước; swipe tính trong vùng cuộn của app, cắt phần bị cửa sổ khác phủ, không có dải an toàn → không vuốt, giao AI. Bài Danh bạ chưa tới bước Lưu là do lỗi này (autopilot kẹt ở cuộn tìm ô Họ), không phải nhãn "Save" mơ hồ.
 - Hạn chế: mỗi ô chỉ 1–2 lần chạy (chưa đủ kết luận); màn có dữ liệu khác lúc ghi không khớp; khi autopilot dừng, model yếu không có hướng dẫn nên loay hoay; chọn workflow luôn cần LLM; slot chỉ bắt từ chữ gõ; luôn mất lượt AI đầu để mở app.
+
+### Kịch bản vận hành: MỘT model (quyết định 2026-11-27)
+- Production dùng một model duy nhất, mạnh hơn Qwen 4B: `qwen3-vl:8b-32k` (Colab T4, `control-android/scripts/8b-colab-start.sh`, cổng 11435). Không dùng model mạnh ghi hộ cho model yếu.
+- Hệ quả: cùng một model **tự ghi** ở lần đầu và **tự phát lại** từ lần sau. Lần ghi do chính model này làm sẽ có đi nhầm / sửa sai nhiều hơn → recorder phải tự làm sạch (W1b); số liệu benchmark phải đo đúng kịch bản tự ghi → tự phát lại, cùng model cho đối chứng (W5).
+- Số liệu Qwen 4B ở mục 1.15 chỉ là tham khảo lịch sử; lần Gemini ghi → Qwen phát lại (Danh bạ) là thử nghiệm, không phải cách vận hành.
+- Tuỳ chọn (không bắt buộc): workflow "mẫu" do chính model 8B ghi trong lúc test, đóng gói kèm cho app hay dùng — runtime vẫn chỉ một model.
 
 ### Thứ tự làm
 
@@ -18,15 +25,22 @@ Trạng thái: ĐÃ ĐỒNG THUẬN v4 (agents-debate phiên 0906a23d, 2026-11-2
 - Đo: % bước autopilot làm được (coverage), số lần bước autopilot khác bước thật mà không bị kiểm màn bắt (phải = 0), lý do dừng phổ biến.
 - Xong khi: chạy được trên mọi phiên có ≥ 2 lần cùng loại tác vụ, in bảng theo app.
 
+**W1b — Làm sạch lần ghi (cắt vòng đi nhầm)** — đi cùng W1
+- Khi chuỗi bước quay về một màn đã qua (n_X → … → n_X) mà ở giữa không có giá trị slot nào được nhập/giữ lại VÀ trạng thái n_X lúc quay về giống hệt lúc đi (cùng nội dung + checked/selected/text, so bằng chữ ký nội dung của loop_guard), bỏ cả đoạn vòng đó. Không cắt nếu trạng thái đã đổi (bật toggle, xác nhận qua dialog rồi quay lại, bước cuối quay về màn đầu như n4 → n1): không thành bước của workflow, không vào playbook. Mở rộng luật đã có (bước bị BACK hoàn tác ngay, gõ sai rồi gõ lại chỉ giữ lần còn trong ô).
+- Xong khi: unit test vòng đi nhầm bị cắt, vòng có nhập giá trị được giữ; chạy W0 trên các phiên thật để xem số bước bị cắt.
+
 **W1 — Playbook (hướng dẫn bằng chữ sinh từ workflow)** — ưu tiên cao nhất
 - Recorder lưu thêm cho mọi bước (kể cả `judgement`): nhãn phần tử đã bấm và `target_description` AI ghi lúc làm (chỉ để làm hướng dẫn, autopilot vẫn không tự bấm bước judgement).
+- Workflow là đồ thị (gộp nhiều lần chạy, có nhánh, có bước disabled): playbook lấy MỘT đường chính từ màn đầu tới `end_nodes` (bỏ bước disabled, ưu tiên bước có stats.ok cao), không liệt kê toàn bộ `edges`. Khi autopilot dừng, notice đánh dấu rõ bước nào của playbook đã xong để model không làm lại.
 - Sinh playbook tất định từ các bước đã ghi (không gọi LLM), slot thay bằng giá trị mới, ví dụ: "1) bấm 'Add city' 2) gõ Dublin vào ô tìm 3) bấm tìm trên bàn phím 4) chọn dòng đúng thành phố (nhiều kết quả: chọn theo quốc gia) 5) mục vừa thêm có thể ở cuối danh sách — cuộn kiểm rồi báo xong".
 - Đưa vào prompt ngay lượt đầu khi đã chọn được workflow, và nhắc bước kế tiếp trong notice khi autopilot dừng.
-- Xong khi: unit test sinh playbook; emulator Qwen: Danh bạ (Gemini ghi) và Chrome có playbook, so số lượt với không playbook.
+- Xong khi: unit test sinh playbook; emulator với `qwen3-vl:8b-32k` tự ghi rồi tự phát lại (Đồng hồ, Danh bạ, Chrome), so số lượt có / không playbook.
 
 **W2 — Chọn workflow không cần LLM + index**
 - So câu yêu cầu mới với `goal` đã ghi theo từ: chỉ khác đúng chỗ của slot → chọn luôn, lấy giá trị slot từ phần khác (ví dụ "Madrid" → "Dublin"); khác nhiều → mới gọi LLM như hiện tại.
-- `index.json` mỗi app (workflow_id, goal, slots, số bước, thống kê) để không phải đọc toàn bộ vân tay khi chọn; lọc trước theo màn hiện tại (chỉ xét workflow có node khớp).
+- `index.json` mỗi app (workflow_id, goal, slots, số bước, thống kê) để không phải đọc toàn bộ vân tay khi chọn.
+- Lọc theo màn hiện tại chỉ là **ưu tiên**, không phải điều kiện cứng: đang ở trong app và có workflow khớp màn → xét các workflow đó trước; không có workflow nào khớp màn (đang ở màn hình chính, trang web khác lúc ghi) → vẫn chọn theo câu yêu cầu trên index (cần cho W4 và để có playbook W1 ngay lượt đầu).
+- Fast-path không LLM chỉ khi khung chữ tĩnh quanh mọi slot khớp 100%: thay từng giá trị slot trong goal cũ bằng nhóm bắt (regex) neo giữa phần chữ tĩnh hai bên, câu mới phải khớp trọn; khác khung (thứ tự khác, thêm/bớt chữ, hai slot sát nhau không có chữ ngăn cách) → gọi LLM như hiện tại.
 - Xong khi: unit test so câu (đúng/sai/nhiều slot); đếm số lần gọi LLM chọn workflow trên các bài test Đồng hồ = 0.
 
 **W3 — Slot chọn bằng bấm + trạng thái `selected`**
@@ -39,7 +53,8 @@ Trạng thái: ĐÃ ĐỒNG THUẬN v4 (agents-debate phiên 0906a23d, 2026-11-2
 - Xong khi: bài test Đồng hồ bắt đầu từ màn hình chính không tốn lượt AI để mở app.
 
 **W5 — Benchmark trên máy (sau W1–W4)**
-- 3 app (Đồng hồ, Danh bạ, Chrome) × 3 giá trị, Gemini ghi 1 lần, Qwen phát lại; mỗi ô ≥ 3 lần; đối chứng `mode=off` cùng model.
+- Model: `qwen3-vl:8b-32k` (một model cho cả ghi, phát lại và đối chứng). 3 app (Đồng hồ, Danh bạ, Chrome) × 3 giá trị: lần 1 tự ghi, các lần sau tự phát lại; mỗi ô ≥ 3 lần; đối chứng `mode=off` cùng model, cùng điều kiện (app mở sẵn, tắt app giữa các bài).
+- Báo riêng: tỉ lệ lần ghi đầu thành công (không thành công thì không có workflow để phát lại).
 - Chỉ số: lượt AI, thời gian, tỉ lệ thành công, số lần autopilot bấm sai không phát hiện (= 0), số lần chốt vòng lặp dừng.
 - Chạy từng đợt nhỏ, tắt app giữa các bài, dừng daemon khi hết giờ (máy ảo từng tự tắt khi chạy lâu).
 
@@ -47,6 +62,38 @@ Trạng thái: ĐÃ ĐỒNG THUẬN v4 (agents-debate phiên 0906a23d, 2026-11-2
 - Đa package (hộp thoại quyền, bộ chọn file, chuyển app): hộp thoại xin quyền vẫn để AI xử lý, không tự bấm "Cho phép".
 - Desktop: lõi (vân tay, so khớp, recorder, autopilot, bộ chọn, chốt vòng lặp) dùng lại qua một `normalize()` riêng; cần chuẩn hoá toạ độ theo cửa sổ đang dùng, xử lý nhiều cửa sổ, thêm double-click/right-click/phím tắt vào recorder, lớp thực thi riêng. Chỉ thiết kế, chưa làm.
 - Lỗi LLM "JSON hỏng": nếu còn gặp nhiều với Qwen, thử hỏi lại với temperature cao hơn một chút.
+
+### Quy trình giao việc và phản biện (người code ≠ người phản biện)
+Người code làm từng bước một, theo đúng thứ tự; người phản biện (Claude) đánh giá xong bước trước mới làm bước sau.
+
+| Vòng | Bước | Người code nộp | Phản biện kiểm thêm |
+|:-:|:--|:--|:--|
+| 0 | (trước khi bắt đầu) | — | Commit trạng thái hiện tại làm mốc; người code làm trên nhánh mới từ mốc đó |
+| 1 | W0 công cụ đo offline | script + bảng số liệu hiện trạng (coverage, bấm sai không phát hiện, lý do dừng) theo app | Tự chạy lại script; số liệu phải tái lập được; kiểm script không đọc/ghi gì ngoài DB ở chế độ chỉ đọc |
+| 2 | W1b làm sạch lần ghi | code + unit test + số liệu W0 trước/sau | Đọc các ca bị cắt trên phiên thật: không cắt nhầm đoạn có nhập giá trị |
+| 3 | W1 playbook | code + unit test + ví dụ playbook sinh ra cho 3 workflow có sẵn | Playbook đúng thứ tự bước, không bịa bước, thay đúng giá trị slot; chạy thử trên emulator với `qwen3-vl:8b-32k` |
+| 4 | W2 chọn workflow không LLM + index | code + unit test (câu khác đúng chỗ slot / khác nhiều / nhiều slot) | Tìm ca chọn nhầm (câu giống nhưng khác loại tác vụ) |
+| 5 | W3 slot chọn bằng bấm + `selected` | code + unit test nhãn ngắn ("OK", "1") không thành slot | Thử nhãn trùng một từ trong câu yêu cầu |
+| 6 | W4 tự mở app từ màn hình chính | code + unit test | Không tự mở nhầm app khi câu yêu cầu không khớp workflow nào |
+| 7 | W5 benchmark | — (phản biện tự chạy trên emulator) | Theo mục W5; báo cáo số liệu cuối |
+
+**Mỗi lần nộp phải có:**
+1. Danh sách file đã sửa; không sửa ngoài phạm vi bước đó (có lý do thì ghi rõ).
+2. Unit test mới cho từng hành vi mới, kể cả ca phải TỪ CHỐI (không chỉ ca chạy được).
+3. Kết quả `uv run pytest tests/unit/mcp/ tests/unit/agents/ tests/unit/llm/ tests/unit/workflow` — được phép đúng 2 lỗi có sẵn: `test_explorer_tiers.py::test_gemini_model_without_google_key_uses_universal_engine`, `test_flash_turn_log.py::test_final_summary_wait_caps_the_shutdown_flush`.
+4. Số liệu W0 trước/sau (từ vòng 2 trở đi).
+5. Cập nhật tài liệu theo AGENTS.md mục 3 (KE_HOACH_TOI_UU_ARTEMIS.md, docs/FLOW_DIEU_KHIEN_THIET_BI.md nếu chạm luồng điều khiển).
+6. Báo cáo ngắn: làm gì, quyết định gì và vì sao, còn thiếu gì.
+
+**Phản biện từ chối nếu vi phạm bất biến nào:**
+- Lưu / dùng toạ độ cố định để bấm; bỏ kiểm màn đích sau bước autopilot.
+- Autopilot tự bấm nút cam kết, tự chọn trong danh sách ≥ 2 mục, tự bấm "Cho phép" hộp thoại quyền.
+- Hardcode chữ / tên nút / package của một app cụ thể (AGENTS.md 2.7).
+- Tạo AIMessage/ToolMessage giả, phá bất biến 1-1 ToolMessage (AGENTS.md 2.6).
+- Tính năng workflow bật mặc định; thay đổi hành vi Pro.
+- Số liệu "0 lần bấm sai không phát hiện" bị vi phạm trên W0.
+
+**Kết quả mỗi vòng:** Chấp nhận / Cần sửa (kèm `file:dòng` và lý do) / Từ chối. Người code sửa rồi nộp lại trong cùng vòng.
 
 ### Không đổi
 - Mọi tính năng workflow vẫn tắt mặc định (`agent.flash.workflow.mode = off`); chốt vòng lặp, chờ UI đứng yên, xử lý JSON hỏng đang bật cho Flash.

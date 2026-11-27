@@ -79,6 +79,9 @@ export interface SessionTimingStep {
   shared_model_call: boolean;
   llm_resumes: number;
   agy: { model_calls?: number; opened_screenshot?: boolean } | null;
+  autopilot?: boolean;
+  workflow_verified?: boolean | null;
+  workflow_id?: string | null;
   prompt_tokens: number | null;
   completion_tokens: number | null;
 }
