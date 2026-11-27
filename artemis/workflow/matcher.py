@@ -25,6 +25,22 @@ from artemis.workflow.fingerprint import ScreenFingerprint
 DEFAULT_TAU = 0.80
 DEFAULT_DELTA = 0.10
 MIN_APP_TOKENS = 5
+# A sparse screen (a search page: back, field, clear) is still matchable when
+# its few app nodes carry resource ids; WebView / canvas trees carry none.
+MIN_APP_TOKENS_WITH_IDS = 3
+MIN_RESOURCE_IDS_SPARSE = 2
+
+
+def is_matchable(fp: ScreenFingerprint) -> bool:
+    """Condition (5) of Mục 2.3, relaxed for sparse but id-rich native screens."""
+    if not fp.package:
+        return False
+    if fp.app_token_count >= MIN_APP_TOKENS:
+        return True
+    return (
+        fp.app_token_count >= MIN_APP_TOKENS_WITH_IDS
+        and len(fp.resource_ids) >= MIN_RESOURCE_IDS_SPARSE
+    )
 
 WEIGHT_RESOURCE_ID = 3
 WEIGHT_STATIC_TEXT = 2

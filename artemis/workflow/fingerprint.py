@@ -204,6 +204,7 @@ def normalize(
                 "editable": _to_bool(node.get("editable"), False),
                 "text": text,
                 "content-desc": desc,
+                "hint": str(node.get("hint") or node.get("hint_text") or node.get("hintText") or "").strip(),
                 "in_scrollable": bool(node.get("_in_scrollable", False)),
             }
         )
@@ -273,8 +274,15 @@ def _static_text_hash(text: str) -> str:
 def tokenize(
     normalized: list[dict[str, Any]],
     static_texts: Iterable[str] | None = None,
+    *,
+    foreground_only: bool = False,
 ) -> ScreenFingerprint:
-    """Converts normalized nodes into a structural multiset fingerprint (Mục 2.2)."""
+    """Converts normalized nodes into a structural multiset fingerprint (Mục 2.2).
+
+    ``foreground_only`` keeps only the foreground app's nodes: other windows
+    (the soft keyboard, an overlay) change independently of the app screen
+    and would otherwise dominate a sparse screen's fingerprint.
+    """
     fg_pkg = foreground_package(normalized)
     static_set = {str(s).strip() for s in static_texts if str(s).strip()} if static_texts else set()
 
@@ -287,6 +295,8 @@ def tokenize(
     for node in normalized:
         pkg = node.get("package") or ""
         if pkg == SYSTEMUI_PACKAGE:
+            continue
+        if foreground_only and fg_pkg and pkg != fg_pkg:
             continue
         if not node.get("visible-to-user", True):
             continue
@@ -349,3 +359,51 @@ def fingerprint_from_raw(
 ) -> ScreenFingerprint:
     """Convenience helper: normalize raw UI hierarchy and tokenize in one call."""
     return tokenize(normalize(raw, width=width, height=height), static_texts=static_texts)
+
+
+def app_fingerprint(normalized: list[dict[str, Any]]) -> ScreenFingerprint:
+    """Workflow fingerprint of a screen's *layout*, robust to its data.
+
+    - Only the foreground app's nodes: the keyboard or an overlay window
+      changes independently of the app screen.
+    - Presence, not counts: how many results / rows / cards a list shows
+      depends on the data (a short result list does not even scroll).
+    - A node with a resource id is named by it (no position: a keyboard
+      resizing the window moves it across grid cells).
+    - Unnamed nodes repeated down a column (rows) collapse into one token;
+      other unnamed nodes keep their grid cell.
+    """
+    fg = foreground_package(normalized)
+    tokens: Counter[tuple[Any, ...]] = Counter()
+    resource_ids: set[str] = set()
+    columns: dict[tuple[Any, ...], set[int]] = {}
+    kept = 0
+    for node in normalized:
+        if not fg or node.get("package") != fg or not node.get("visible-to-user", True):
+            continue
+        l, t, r, b = node.get("bounds") or (0, 0, 0, 0)
+        if r <= l or b <= t or (r - l) * (b - t) < MIN_AREA_NORM:
+            continue
+        kept += 1
+        cls = node.get("class") or ""
+        rid = node.get("resource-id") or ""
+        role = node_role(node)
+        if rid:
+            resource_ids.add(rid)
+            tokens[("node", cls, rid, role)] = 1
+            continue
+        cx, cy = (l + r) // 2, (t + b) // 2
+        key = (cls, role, min(9, max(0, cx // 100)), size_bucket(r - l))
+        columns.setdefault(key, set()).add(min(9, max(0, cy // 100)))
+    for (cls, role, gx, _w), rows in columns.items():
+        if len(rows) >= 2:
+            tokens[("rep", cls, role, gx)] = 1
+        else:
+            tokens[("node", cls, "", role, (gx, next(iter(rows))))] = 1
+    return ScreenFingerprint(
+        package=fg,
+        tokens=tokens,
+        app_token_count=kept,
+        resource_ids=frozenset(resource_ids),
+        node_count=kept,
+    )

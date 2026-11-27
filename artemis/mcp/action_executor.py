@@ -468,8 +468,9 @@ class McpActionExecutor:
                 if (res.ok or self._observe_despite_failure(raw_name, res)) and not skip_observe:
                     observe_started = time.monotonic()
                     settle_ms = self._determine_settle_ms(raw_name, args, target_semantics)
-                    obs = await session.observe(settle_ms=settle_ms)
-                    observe_detail.append({"why": "post", **_timings(obs)})
+                    settled = await self._wait_screen_settled(session, raw_name, args, settle_ms)
+                    obs = await session.observe(settle_ms=0 if settled else settle_ms)
+                    observe_detail.append({"why": "post", **_timings(obs), **(settled or {})})
                     if is_device_offline_result(obs):
                         device_offline = True
                         if res.ok:
@@ -521,7 +522,10 @@ class McpActionExecutor:
                         screen_unchanged, curr_sig, curr_hash = _calc_unchanged(obs, img_bytes)
 
                         # Retry observation if screen is unchanged immediately after a tap (permits page transition / bottom sheet to finish animation)
-                        if raw_name in _POINT_TARGET_ACTIONS and screen_unchanged:
+                        already_waited = bool(
+                            settled and settled.get("expects_change") and not settled.get("changed")
+                        )
+                        if raw_name in _POINT_TARGET_ACTIONS and screen_unchanged and not already_waited:
                             logger.info(
                                 "Screen unchanged immediately after tap; waiting 800ms for potential page transition..."
                             )
@@ -655,6 +659,83 @@ class McpActionExecutor:
                 "observe_detail": observe_detail or None,
             },
         )
+
+    # --- Wait for the UI to settle (Flash) ---------------------------------------------
+    # Measured on an emulator (dHash, 64 bits): consecutive frames of a still
+    # screen differ by 0-2 bits (blinking cursor, clock), frames of a transition
+    # by 12-35; a tap's effect starts ~0.3-0.5 s after it is injected.
+    _SETTLE_STILL_BITS = 2
+    _SETTLE_CHANGE_WINDOW_S = 1.0
+    _SETTLE_CAP_S = 3.0
+    # Actions that usually move to another screen: first wait for the change to
+    # start, else a still frame of the OLD screen would pass as "settled".
+    _SETTLE_EXPECTS_CHANGE = frozenset({"click", "long_press", "click_sequence", "press_key", "manage_app"})
+
+    async def _wait_screen_settled(
+        self, session: Any, raw_name: str, args: dict[str, Any], settle_ms: int
+    ) -> dict[str, Any] | None:
+        """Waits until the screen stopped moving instead of a fixed delay.
+
+        Phase 1 (actions that usually change the screen): poll quick
+        screenshots until the frame differs from the pre-action baseline, up to
+        ``_SETTLE_CHANGE_WINDOW_S``. Phase 2: until two consecutive frames are
+        within ``_SETTLE_STILL_BITS``, up to ``_SETTLE_CAP_S`` in total. Returns
+        the measurements, or None when quick screenshots are unavailable (the
+        caller then falls back to the fixed settle delay). Flash only.
+        """
+        if self.agent_name != "flash" or not hasattr(session, "screenshot_b64"):
+            return None
+        import base64 as _b64
+
+        async def _frame_hash() -> str | None:
+            b64 = await session.screenshot_b64(timeout=2.0)
+            if not isinstance(b64, str):
+                raise TypeError("screenshot_b64 returned no string")
+            return dhash_hex(_b64.b64decode(b64))
+
+        started = time.monotonic()
+        try:
+            if raw_name == "manage_app":
+                # A splash screen can sit still before the app's first screen.
+                await asyncio.sleep(settle_ms / 1000.0)
+            key = str(args.get("key") or "").upper()
+            expects_change = raw_name in self._SETTLE_EXPECTS_CHANGE and not (
+                raw_name == "press_key" and key not in ("ENTER", "66", "SEARCH", "84", "BACK", "4", "HOME", "3")
+            )
+            baseline = self._last_image_hash
+            changed = False
+            prev = await _frame_hash()
+            frames = 1
+            if expects_change and baseline and prev:
+                change_deadline = time.monotonic() + self._SETTLE_CHANGE_WINDOW_S
+                while (hamming_distance_hex(prev, baseline) or 0) <= self._SETTLE_STILL_BITS:
+                    if time.monotonic() >= change_deadline:
+                        break
+                    prev = await _frame_hash()
+                    frames += 1
+                changed = (hamming_distance_hex(prev, baseline) or 0) > self._SETTLE_STILL_BITS
+            stable = False
+            cap = started + self._SETTLE_CAP_S + (settle_ms / 1000.0 if raw_name == "manage_app" else 0.0)
+            while time.monotonic() < cap:
+                cur = await _frame_hash()
+                frames += 1
+                if baseline and not changed:
+                    changed = (hamming_distance_hex(cur, baseline) or 0) > self._SETTLE_STILL_BITS
+                dist = hamming_distance_hex(prev, cur)
+                prev = cur
+                if dist is not None and dist <= self._SETTLE_STILL_BITS:
+                    stable = True
+                    break
+        except Exception as exc:
+            logger.debug(f"Settle wait unavailable, using fixed delay: {exc}")
+            return None
+        waited = round(time.monotonic() - started, 3)
+        logger.info(
+            f"UI settle after {raw_name}: {'stable' if stable else 'still moving (cap)'}"
+            f" in {waited}s, {frames} frames, changed={changed}"
+        )
+        return {"settle_s": waited, "frames": frames, "stable": stable, "changed": changed,
+                "expects_change": expects_change}
 
     @staticmethod
     def _observe_despite_failure(raw_name: str, res: ActionResult) -> bool:

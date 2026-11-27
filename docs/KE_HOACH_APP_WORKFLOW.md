@@ -1,8 +1,75 @@
-# KẾ HOẠCH: APP WORKFLOW — PHÁT LẠI LUỒNG THAO TÁC CÓ FALLBACK AI (v4)
+# KẾ HOẠCH: APP WORKFLOW — PHÁT LẠI LUỒNG THAO TÁC CÓ FALLBACK AI (v6)
 
 File: /home/nhat/Workspace/control-android/artemis/docs/KE_HOACH_APP_WORKFLOW.md
 Phạm vi: chỉ Flash (theo KE_HOACH_TOI_UU_ARTEMIS.md Mục 0.1: tối ưu Flash, Pro chỉ sửa lỗi).
 Trạng thái: ĐÃ ĐỒNG THUẬN v4 (agents-debate phiên 0906a23d, 2026-11-26; author Claude, critic Gemini, 6/6 tiêu chí đạt). Báo cáo: ~/.review-room/report-0906a23d-7567-4046-af6e-192fd380c738.md
+
+## v6 (2026-11-27) — Kế hoạch tiếp theo
+
+### Hiện trạng (sau test emulator 26/11, xem KE_HOACH_TOI_UU_ARTEMIS.md 1.15)
+- Đã có: ghi workflow từ phiên `completed`, autopilot phát lại có kiểm màn đích, chọn workflow 1 lần LLM chỉ-chữ, chốt vòng lặp, chờ UI đứng yên, xử lý JSON hỏng của model, nhận diện ô nhập bằng `hint`, gộp trạng thái cuộn/gõ của cùng màn, ẩn bàn phím che target, chế độ `record` gộp tác vụ lặp lại (không đẻ file mới). 60 unit test workflow; regression 1006 pass / 2 fail có sẵn.
+- Kết quả: có lợi rõ ở luồng app gốc lặp lại (Đồng hồ: 2–3 lượt AI / 48–59 s so với 6–9 lượt / 71–98 s); web (Chrome) không lợi, không hại; Danh bạ: Qwen 4B không tự làm được, Gemini ghi → Qwen phát lại thì autopilot gõ được các ô nhưng chưa bấm được Lưu. 0 lần autopilot bấm sai không phát hiện sau các bản sửa.
+- Hạn chế: mỗi ô chỉ 1–2 lần chạy (chưa đủ kết luận); màn có dữ liệu khác lúc ghi không khớp; khi autopilot dừng, model yếu không có hướng dẫn nên loay hoay; chọn workflow luôn cần LLM; slot chỉ bắt từ chữ gõ; luôn mất lượt AI đầu để mở app.
+
+### Thứ tự làm
+
+**W0 — Công cụ đo offline (làm trước, để mọi bước sau đo được)**
+- `scripts/workflow_replay_eval.py`: chạy lại các phiên trong `traces/data_engine.db` qua recorder + autopilot (thiết bị giả từ cây UI đã lưu), không cần máy/GPU.
+- Đo: % bước autopilot làm được (coverage), số lần bước autopilot khác bước thật mà không bị kiểm màn bắt (phải = 0), lý do dừng phổ biến.
+- Xong khi: chạy được trên mọi phiên có ≥ 2 lần cùng loại tác vụ, in bảng theo app.
+
+**W1 — Playbook (hướng dẫn bằng chữ sinh từ workflow)** — ưu tiên cao nhất
+- Recorder lưu thêm cho mọi bước (kể cả `judgement`): nhãn phần tử đã bấm và `target_description` AI ghi lúc làm (chỉ để làm hướng dẫn, autopilot vẫn không tự bấm bước judgement).
+- Sinh playbook tất định từ các bước đã ghi (không gọi LLM), slot thay bằng giá trị mới, ví dụ: "1) bấm 'Add city' 2) gõ Dublin vào ô tìm 3) bấm tìm trên bàn phím 4) chọn dòng đúng thành phố (nhiều kết quả: chọn theo quốc gia) 5) mục vừa thêm có thể ở cuối danh sách — cuộn kiểm rồi báo xong".
+- Đưa vào prompt ngay lượt đầu khi đã chọn được workflow, và nhắc bước kế tiếp trong notice khi autopilot dừng.
+- Xong khi: unit test sinh playbook; emulator Qwen: Danh bạ (Gemini ghi) và Chrome có playbook, so số lượt với không playbook.
+
+**W2 — Chọn workflow không cần LLM + index**
+- So câu yêu cầu mới với `goal` đã ghi theo từ: chỉ khác đúng chỗ của slot → chọn luôn, lấy giá trị slot từ phần khác (ví dụ "Madrid" → "Dublin"); khác nhiều → mới gọi LLM như hiện tại.
+- `index.json` mỗi app (workflow_id, goal, slots, số bước, thống kê) để không phải đọc toàn bộ vân tay khi chọn; lọc trước theo màn hiện tại (chỉ xét workflow có node khớp).
+- Xong khi: unit test so câu (đúng/sai/nhiều slot); đếm số lần gọi LLM chọn workflow trên các bài test Đồng hồ = 0.
+
+**W3 — Slot chọn bằng bấm + trạng thái `selected`**
+- `detect_slots` xét cả bước bấm: nhãn ≥ 3 ký tự, khớp nguyên từ trong câu yêu cầu, không phải nút điều hướng cố định đã ghi → slot (ví dụ "size L", "tab Timer").
+- Thêm trạng thái `selected`/`checked` vào vai trò trong vân tay (phân biệt tab đang chọn); không thêm chữ tĩnh vào vân tay (đã có `anchors`).
+- Xong khi: unit test nhãn ngắn/từ chung ("OK", "1") không thành slot; tab khác nhau không khớp nhầm.
+
+**W4 — Tự mở app từ màn hình chính**
+- Ở màn hình chính (launcher): chọn workflow trên index của mọi app theo câu yêu cầu (W2); chọn được → autopilot gọi `manage_app` mở app rồi chạy tiếp; không chọn được → AI như cũ.
+- Xong khi: bài test Đồng hồ bắt đầu từ màn hình chính không tốn lượt AI để mở app.
+
+**W5 — Benchmark trên máy (sau W1–W4)**
+- 3 app (Đồng hồ, Danh bạ, Chrome) × 3 giá trị, Gemini ghi 1 lần, Qwen phát lại; mỗi ô ≥ 3 lần; đối chứng `mode=off` cùng model.
+- Chỉ số: lượt AI, thời gian, tỉ lệ thành công, số lần autopilot bấm sai không phát hiện (= 0), số lần chốt vòng lặp dừng.
+- Chạy từng đợt nhỏ, tắt app giữa các bài, dừng daemon khi hết giờ (máy ảo từng tự tắt khi chạy lâu).
+
+**Để sau**
+- Đa package (hộp thoại quyền, bộ chọn file, chuyển app): hộp thoại xin quyền vẫn để AI xử lý, không tự bấm "Cho phép".
+- Desktop: lõi (vân tay, so khớp, recorder, autopilot, bộ chọn, chốt vòng lặp) dùng lại qua một `normalize()` riêng; cần chuẩn hoá toạ độ theo cửa sổ đang dùng, xử lý nhiều cửa sổ, thêm double-click/right-click/phím tắt vào recorder, lớp thực thi riêng. Chỉ thiết kế, chưa làm.
+- Lỗi LLM "JSON hỏng": nếu còn gặp nhiều với Qwen, thử hỏi lại với temperature cao hơn một chút.
+
+### Không đổi
+- Mọi tính năng workflow vẫn tắt mặc định (`agent.flash.workflow.mode = off`); chốt vòng lặp, chờ UI đứng yên, xử lý JSON hỏng đang bật cho Flash.
+- Nguyên tắc an toàn: không toạ độ cố định; kiểm màn đích sau mỗi bước; không tự bấm nút cam kết; danh sách ≥ 2 mục luôn giao AI/người dùng; không hardcode chữ theo app (AGENTS.md 2.7).
+
+## v5 (2026-11-26) — thay đổi so với v4 (ưu tiên hơn các mục bên dưới khi mâu thuẫn)
+Lý do: cổng M0 (Mục 2.4) trượt — precision 0.597 so với yêu cầu ≥ 0.98. Thử thêm "chỉ tự bấm màn mà mọi lần trước AI đều bấm cùng nút" (scratchpad nav_only_eval.py) chỉ phủ 1–2% số bước, vì trace cũ ít phiên lặp lại cùng màn và hành vi AI bị nhiễu (lúc cuộn, lúc chờ, lúc bấm). Kết luận: không suy luật từ trace cũ, không đo bằng "trùng thao tác AI", mà ghi chủ động và kiểm tra sau mỗi bước.
+- V5.1 Ghi chủ động: sau 1 phiên Flash báo `completed`, runner ghi workflow từ chính các thao tác của phiên (cây UI gốc trước/sau mỗi thao tác lấy từ `ctx.last_raw_observation` do observe() công bố; không cần đọc DataEngine). Phân loại tất định, không gọi LLM, không chuỗi cứng: gõ chữ có trong goal → slot; bấm phần tử có nhãn chứa giá trị slot → slot; bấm mục trong vùng cuộn, bấm ngay sau ask_user_choice, gõ chữ không có trong goal → judgement; nút cam kết → commitment_stop; còn lại (và ENTER/SEARCH/BACK) → nav. Cuộn/chờ/click_sequence không tạo bước. (thay 3.2)
+- V5.2 Bước nav/slot dùng được ngay từ lần chạy thứ 2 (bỏ "provisional → active sau 2 lần", 3.5), vì mỗi bước đều được kiểm tra màn đích.
+- V5.3 Kiểm màn đích kép sau mỗi bước autopilot: màn mới phải khớp node đích (vân tay, τ/δ như 2.3) VÀ có ít nhất 1 "neo" (resource-id hoặc nhãn ngắn có ở màn đích mà không có ở màn trước, ngoài vùng cuộn, không chứa giá trị slot). Bước gõ chữ kiểm bằng giá trị đã nằm trong ô nhập. Không dùng wait_for_text (chỉ đọc XML, chờ mặc định 8 s): poll tối đa 4 lần cách 0.6 s bằng ui_hierarchy. Sai → dừng, giao AI, edge.fail+1; 2 lần sai liên tiếp → disabled.
+- V5.4 Điều kiện "đã gõ": gõ chữ không đổi cấu trúc màn hình nên "gõ từ khoá" và "bấm tìm" cùng một node. Edge ghi kèm `typed=<slot>` khi ô nhập ở màn trước đã chứa giá trị slot; autopilot chỉ chạy edge đó khi ô nhập live chứa giá trị, và bỏ qua bước gõ khi đã gõ rồi (không bao giờ bấm tìm với ô trống).
+- V5.5 Một node có cả bước judgement và bước nav → luôn giao AI (màn đó từng cần lựa chọn). Node có commitment_stop → luôn giao AI.
+- V5.6 Chọn workflow: 1 lần gọi LLM chỉ-chữ / package / phiên; goal trùng nguyên văn → không gọi. Giá trị slot LLM trả về phải xuất hiện nguyên văn trong goal mới, nếu không coi như thiếu (chống bịa).
+- V5.7 Bàn giao: khối `[Autopilot] … Stopped: <lý do>` vào notices của tail + ép gửi ảnh ở lượt đó (`_force_image`), quan sát lại màn hình trước khi gọi AI.
+- V5.8 Popup chen ngang: popup xin quyền thuộc package hệ thống khác → không bao giờ khớp workflow của app (tự loại). Popup trong app được AI đóng bằng BACK/nút đóng sẽ được ghi như bước nav và chỉ phát lại khi khớp đúng màn popup + kiểm màn đích. KHÔNG tự bấm "cho phép/đồng ý" — chốt cam kết + màn đích vẫn áp dụng. (Mở rộng có giới hạn mẹo (2) của Gemini.)
+- V5.9 Cổng mới thay 2.4 (đo trên máy/emulator, không offline): (a) 0 lần autopilot bấm sai mà không bị phát hiện; (b) 0 lần bấm nút cam kết; (c) ≥ 90% bước autopilot tới đúng màn đích; (d) số lượt LLM ở lần chạy lại giảm so với mode=off cùng tác vụ.
+- V5.10 (bổ sung sau chạy emulator 2026-11-26) Vân tay workflow = bố cục, không dữ liệu (`fingerprint.app_fingerprint`): chỉ node của app foreground (bàn phím/overlay đổi độc lập), có/không thay vì số lượng (danh sách ngắn không cuộn → các dòng không được gộp), node có resource-id không kèm vị trí (bàn phím đổi cỡ cửa sổ làm lệch ô lưới), dòng không id lặp theo cột gộp thành 1 token. Màn thưa khớp được khi ≥ 3 node app và ≥ 2 resource-id (`matcher.is_matchable`). Vân tay M0 (`tokenize`) không đổi.
+- V5.11 Chọn trong danh sách chỉ tự động khi danh sách có đúng 1 mục cùng loại và so khớp bỏ dấu; ≥ 2 mục → giao AI/người dùng (lỗi thật: chọn "Reykjavik, MB, Canada" thay "Reykjavík, Iceland" — kiểm màn đích không bắt được lựa chọn sai).
+- V5.12 Chỉ đi tiến trong 1 lần chạy: không chạy lại bước đã chạy, không quay lùi (lỗi thật: sau khi xong, app về màn đầu → autopilot làm lại từ đầu). Về lại màn đã qua → nhắc AI 1 lần, kèm nhắc cuộn nếu màn cuộn được.
+- V5.13 Hễ autopilot đã gửi thao tác (kể cả chưa xác nhận được màn đích) → luôn quan sát lại và báo AI. Che khuất: chỉ xét trong cùng package (thứ tự dump không phải thứ tự vẽ giữa các cửa sổ); target của app bị cửa sổ khác (bàn phím, hộp thoại) phủ ≥ 50% → không bấm.
+- Kết quả emulator: xem KE_HOACH_TOI_UU_ARTEMIS.md mục 1.15.
+- Hoãn: gọi AI chỉ-chữ ở màn danh sách (đề xuất B), nhớ sở thích người dùng (mẹo (5)), truyền raw_elements qua State (2.1 — v5 dùng `ctx.last_raw_observation` thay thế, đủ cho Flash).
+- Cờ: `agent.flash.workflow.mode = off | record | replay` (mặc định off), env `ARTEMIS_WORKFLOW_MODE`, `ARTEMIS_WORKFLOW_DIR`. File: artemis/workflow/{targets,store,recorder,autopilot,selector}.py, artemis/agents/flash/workflow_hook.py.
 
 ## 0. Mục tiêu và non-goals
 Mục tiêu: lần đầu AI làm một tác vụ trên một app (vd đặt cơm, ~20 lượt LLM) → lưu luồng. Lần sau tác vụ tương tự (vd trà sữa) → máy tự phát lại bước có màn hình khớp (cùng bố cục, khác chữ), chỉ gọi AI ở bước lệch. Đo bằng số lượt gọi LLM / tác vụ và tổng thời gian.

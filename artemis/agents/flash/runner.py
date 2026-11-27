@@ -57,6 +57,9 @@ from langchain_core.messages import (
 
 from artemis.core.tool_declaration import ToolDeclaration
 from artemis.agents.flash.summarizer import VisualStepSummarizer, build_focus_context
+from artemis.agents.flash.loop_guard import LoopGuard
+from artemis.agents.flash.workflow_hook import FlashWorkflowHook
+from artemis.agents.flash.workflow_hook import resolve_mode as resolve_workflow_mode
 from artemis.agents.flash.user_choice import (
     ASK_USER_CHOICE_TOOL,
     choice_signature,
@@ -105,6 +108,7 @@ from artemis.mcp.action_types import is_device_offline_result
 from artemis.mcp.screen_effect import NO_EFFECT_MARKER
 from artemis.mcp.observation import observe
 from artemis.memory.transcript import PRO_UI_LIST_MARKER, TranscriptLedger, mark_ephemeral
+from artemis.llm.reliability import FailureCategory, LLMPermanentError
 from artemis.services.llm import (
     LLMResumedError,
     RobustChatModelWrapper,
@@ -192,6 +196,12 @@ _NO_TOOL_CALL_NOTICE = (
     " action tool or 'report_task_status'."
 )
 
+_MAX_MALFORMED_REPLIES = 3
+_MALFORMED_REPLY_NOTICE = (
+    "[System] Your previous reply could not be parsed as a tool call (malformed JSON in"
+    " the tool arguments). Reply again with exactly ONE valid tool call whose arguments"
+    " are plain JSON."
+)
 _FINAL_TURN_WARNING = "[WARNING] This is your final turn; only 'report_task_status' is available."
 
 _INTERACTION_TOOLS = frozenset(
@@ -338,7 +348,9 @@ class FlashRunner:
             self._stuck_after_no_progress_turns = int(
                 getattr(uc_cfg, "stuck_after_no_progress_turns", 2)
             )
+            wf_cfg = getattr(cfg.flash, "workflow", None)
         except Exception:
+            wf_cfg = None
             self.max_turns = max_turns if max_turns is not None else 0
             self.max_silent_turns = 5
             self.fast_burst = False
@@ -365,6 +377,11 @@ class FlashRunner:
             self._default_ask_when_stuck = bool(self.ctx.ask_when_stuck)
         self._user_choice_poll_interval_s = 0.5
         self._reset_user_choice_state()
+        # App workflow: record successful runs, replay verified steps (off by default).
+        wf_mode, wf_dir, wf_max_steps = resolve_workflow_mode(wf_cfg)
+        self._wf = FlashWorkflowHook(self, wf_mode, wf_dir, wf_max_steps)
+        # Stops a run that keeps redoing the same action on the same screen.
+        self._loop_guard = LoopGuard()
 
         # Observations made during this run (the runner's own and the executor's)
         # format the element list in the compact form; Pro never sets the flag.
@@ -1173,6 +1190,12 @@ class FlashRunner:
         # Dynamic dispatch set: manifest device actions plus any backend
         # extension tools, so extension steps are recorded like actions.
         action_names = self.executor.action_tool_names
+        wf_hook = getattr(self, "_wf", None)
+        wf_pre = wf_hook.snapshot() if wf_hook is not None and wf_hook.enabled else None
+        loop_guard = getattr(self, "_loop_guard", None)
+        if wf_hook is not None and getattr(wf_hook, "_in_autopilot", False):
+            loop_guard = None  # the autopilot only moves forward on its own
+        loop_pre = getattr(self.ctx, "last_raw_observation", None) if loop_guard is not None else None
         try:
             exec_result = await self.executor.execute(
                 name, args, tc_id, state, index_elements=index_elements, skip_observe=skip_observe,
@@ -1190,6 +1213,15 @@ class FlashRunner:
             action_dict = (
                 self._build_action_record(name, args, exec_result) if name in action_names else None
             )
+            if wf_hook is not None and wf_hook.enabled and name in action_names:
+                wf_hook.after_action(name, args, action_dict, exec_result, wf_pre)
+            if loop_guard is not None and name in action_names:
+                loop_guard.note(
+                    name,
+                    args,
+                    loop_pre,
+                    (getattr(exec_result, "metadata", None) or {}).get("target_coordinates"),
+                )
 
             # Record telemetry / step in DataEngine
             recorded_step_id = None
@@ -1288,6 +1320,8 @@ class FlashRunner:
             raise
         except Exception as e:
             logger.error(f"Error executing tool {name}: {e}")
+            if loop_guard is not None and name in action_names:
+                loop_guard.note(name, args, loop_pre)
             rec = getattr(self, "_turn_rec", None)
             if rec is not None:
                 rec["actions"].append(
@@ -2303,6 +2337,8 @@ class FlashRunner:
             self._allowed_stuck_steps = labels
             self._try_budget = 2 * len(labels)
 
+        if getattr(self, "_wf", None) is not None:
+            self._wf.note_user_choice()
         recorded_step_id = self._record_user_choice_step(
             norm_args=norm_args,
             answer=answer,
@@ -2565,9 +2601,13 @@ class FlashRunner:
         report_only_tools = [t for t in tools_declaration if t.name == "report_task_status"]
 
         try:
-            return await self._run_reactive_loop(
+            result = await self._run_reactive_loop(
                 state, llm, tools_declaration, report_only_tools, limit
             )
+            wf_hook = getattr(self, "_wf", None)
+            if wf_hook is not None and wf_hook.enabled:
+                await wf_hook.finish(result)
+            return result
         except DeviceOfflineError as offline_err:
             logger.error(f"FlashRunner stopping due to device disconnect: {offline_err}")
             await self._flush_history_jobs()
@@ -2595,6 +2635,8 @@ class FlashRunner:
         pending_notices: list[str] = []
         silent_turns = 0
         silent_carry = {"llm_s": 0.0, "prep_s": 0.0, "turns": 0, "resumes": 0}
+        malformed_replies = 0
+        malformed_give_up = False
 
         while limit is None or counted_turns < limit:
             turns += 1
@@ -2607,6 +2649,17 @@ class FlashRunner:
             # Commit the previous turn: its step ids and outcomes exist now.
             self._commit_turn(ledger, previous_turn)
             previous_turn = None
+
+            # App workflow autopilot: replay recorded, verifiable steps before
+            # asking the model; the next tail carries the hand-over notice.
+            wf_hook = getattr(self, "_wf", None)
+            if wf_hook is not None and wf_hook.mode == "replay":
+                handed = await wf_hook.maybe_autopilot(
+                    state, current_pre_screenshot_bytes, current_xml_list
+                )
+                if handed is not None:
+                    current_pre_screenshot_bytes, current_xml_list, wf_notice = handed
+                    pending_notices.append(wf_notice)
 
             # Tool restriction on the final turn (bounded loops only)
             is_final = limit is not None and (counted_turns + 1) == limit
@@ -2645,6 +2698,7 @@ class FlashRunner:
                     previous_turn_silent=previous_turn_silent,
                     scrollable=getattr(state, "screen_scrollable", None),
                 )
+                turn_notices = [n for n in pending_notices if n != _MALFORMED_REPLY_NOTICE]
                 pending_notices = []
 
                 # S + F + A + tail: chunk compression and the scrub edge advance here.
@@ -2677,7 +2731,28 @@ class FlashRunner:
                 try:
                     response = await self._invoke_model(llm, current_tools, messages)
                     llm_s += time.monotonic() - llm_started
+                    malformed_replies = 0
                     break
+                except LLMPermanentError as malformed:
+                    failure = getattr(malformed, "failure", None)
+                    if getattr(failure, "category", None) is not FailureCategory.MALFORMED_OUTPUT:
+                        raise
+                    # The server could not parse the reply as a tool call. The
+                    # same prompt would regenerate it: re-ask with a note
+                    # (a changed prompt), and give up after a few in a row.
+                    llm_s += time.monotonic() - llm_started
+                    malformed_replies += 1
+                    logger.warning(
+                        f"Model reply was not a valid tool call ({malformed_replies}/"
+                        f"{_MAX_MALFORMED_REPLIES}): {str(malformed)[:160]}"
+                    )
+                    if malformed_replies >= _MAX_MALFORMED_REPLIES:
+                        response = None
+                        malformed_give_up = True
+                        break
+                    # Re-ask with this turn's notices kept (e.g. an autopilot hand-over).
+                    pending_notices = turn_notices + [_MALFORMED_REPLY_NOTICE]
+                    continue
                 except LLMResumedError:
                     llm_s += time.monotonic() - llm_started
                     resumes += 1
@@ -2692,6 +2767,15 @@ class FlashRunner:
                     pending_notices = [_RESUMED_NOTICE]
 
             if response is None:
+                if malformed_give_up:
+                    final_report = {
+                        "status": "failed",
+                        "explanation": (
+                            f"The model returned {_MAX_MALFORMED_REPLIES} replies in a row that the"
+                            " server could not parse as a tool call (malformed JSON); stopped"
+                            " instead of retrying the same request."
+                        ),
+                    }
                 break
 
             # Where this turn's time went; stamped on the turn's first step.
@@ -2832,6 +2916,16 @@ class FlashRunner:
             self._log_turn_timing(turns, time.monotonic() - turn_started)
             if final_report_from_calls is not None:
                 return final_report_from_calls
+            loop_guard = getattr(self, "_loop_guard", None)
+            if loop_guard is not None:
+                if loop_guard.stop_reason:
+                    logger.warning(f"FlashRunner stopping: {loop_guard.stop_reason}")
+                    self._commit_turn(ledger, previous_turn)
+                    await self._flush_history_jobs()
+                    return {"status": "failed", "explanation": loop_guard.stop_reason}
+                loop_notice = loop_guard.pop_notice()
+                if loop_notice:
+                    pending_notices.append(loop_notice)
 
         await self._flush_history_jobs()
 

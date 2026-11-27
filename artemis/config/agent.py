@@ -901,6 +901,26 @@ class FlashUserChoiceConfig(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class FlashWorkflowConfig(BaseModel):
+    """App workflow record / verified replay for the Flash runner (KE_HOACH_APP_WORKFLOW)."""
+
+    mode: Literal["off", "record", "replay"] = Field(
+        default="off",
+        description=(
+            "'record': a run the AI reports completed is saved as a workflow."
+            " 'replay': also replays recorded steps whose destination screen can be"
+            " verified, without calling the model. Env ARTEMIS_WORKFLOW_MODE overrides."
+        ),
+    )
+    dir: str | None = Field(
+        default=None, description="Workflow folder (default: <app dir>/workflows)."
+    )
+    max_steps: int = Field(
+        default=15, ge=1, description="Most autopilot steps replayed in one run."
+    )
+    model_config = {"extra": "allow"}
+
+
 class FlashProfileConfig(BaseModel):
     """Configuration options specific to the ⚡ Flash execution profile (FlashRunner/ReactiveRunner)."""
 
@@ -967,6 +987,10 @@ class FlashProfileConfig(BaseModel):
     user_choice: FlashUserChoiceConfig = Field(
         default_factory=FlashUserChoiceConfig,
         description="Human-in-the-loop choice settings for the Flash runner.",
+    )
+    workflow: FlashWorkflowConfig = Field(
+        default_factory=FlashWorkflowConfig,
+        description="Record successful runs as app workflows and replay verified steps.",
     )
     model_config = {"extra": "allow"}
 

@@ -42,6 +42,7 @@ class FailureCategory(StrEnum):
     CONNECTION = "connection"
     AUTHENTICATION = "authentication"
     BAD_REQUEST = "bad_request"
+    MALFORMED_OUTPUT = "malformed_output"
     CANCELLED = "cancelled"
     UNKNOWN = "unknown"
 
@@ -95,6 +96,25 @@ def is_daily_quota_message(message: str) -> bool:
     return any(marker in lowered for marker in _DAILY_QUOTA_MARKERS)
 
 
+# The server could not parse the model's own reply as a tool call (Ollama /
+# OpenAI-compatible servers return 500 for this). Re-sending the same prompt at
+# temperature 0 regenerates the same broken reply, so it is not a transient
+# provider fault: the caller must change the prompt (see FlashRunner).
+_MALFORMED_OUTPUT_MARKERS = (
+    "looking for beginning of object key",
+    "looking for beginning of value",
+    "unexpected end of json input",
+    "error parsing tool call",
+    "failed to parse tool call",
+    "invalid tool call",
+)
+
+
+def is_malformed_output_message(message: str) -> bool:
+    lowered = (message or "").lower()
+    return any(marker in lowered for marker in _MALFORMED_OUTPUT_MARKERS)
+
+
 def classify_failure(error: BaseException) -> Failure:
     """Convert a provider/transport exception into explicit recovery decisions."""
     if isinstance(error, KeyboardInterrupt) or type(error).__name__ == "CancelledError":
@@ -102,6 +122,11 @@ def classify_failure(error: BaseException) -> Failure:
 
     code = extract_status_code(error)
     message = str(error).lower()
+
+    if is_malformed_output_message(message):
+        # Not retryable as-is (same prompt -> same broken reply) and no pause:
+        # the agent re-asks with a corrective note instead.
+        return Failure(FailureCategory.MALFORMED_OUTPUT, False, False)
 
     if code == 429 or any(marker in message for marker in _RATE_LIMIT_MARKERS):
         if is_daily_quota_message(message):

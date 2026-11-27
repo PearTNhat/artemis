@@ -28,7 +28,20 @@
   - **Khóa cứng chuẩn mực trong `AGENTS.md`:** Thêm các mục 2.7, 2.8, 2.9 cấm hardcode tên nút/từ khóa, bắt buộc tư duy theo UI Pattern và thuộc tính Accessibility chuẩn.
 - **Kiểm thử hồi quy:** Vượt qua 100% các bộ unit test (toàn bộ 263 tests trong `mcp` và `agents/flash`). Test mới: bỏ chờ ngay khi màn hình đã đổi cho `my_action`, giữ chờ cho `external`, chặn lặp qua thao tác xen giữa, lọc text cắt mép màn hình/ẩn.
 
-### 📌 Bản 3.9 (Hỏi người dùng chọn khi gặp phân vân hoặc bí đường — Flash, 2026-11-25)
+### 📌 Bản 3.11 (Chống lặp vô hạn + chờ UI đứng yên — Flash, 2026-11-26)
+- **Trả lời model hỏng JSON (Ollama 500 "invalid character … looking for beginning of object key"):** phân loại riêng `MALFORMED_OUTPUT` trong `llm/reliability.py` (không thử lại y hệt, không Pause); Flash hỏi lại kèm lời nhắc (prompt khác → câu trả lời khác ở temperature 0), 3 lần liên tiếp → `failed`. 3 unit test.
+- **Workflow "chỉ đi tiến":** đổi từ thứ tự bước trong file sang tập bước đã chạy trong lần này (workflow gộp nhiều lần chạy không giữ thứ tự đường đi).
+- **Chốt vòng lặp (`agents/flash/loop_guard.py`, luôn bật):** chữ ký mỗi thao tác của AI = nội dung + trạng thái (checked/selected/enabled/error) màn của app foreground, công cụ, điểm bấm (bậc 25/1000) / phím / chữ gõ, kèm thao tác ngay trước. Trùng lần 2 → notice `[Loop warning]`; lần 3 → phiên dừng `failed` kèm lý do. Lặp hợp lệ làm đổi màn (bấm "+" tăng số lượng) không bị tính. Kiểm offline 72 phiên: bắt 2/2 vòng lặp thật (Qwen làm lại việc đã xong), chặn nhầm 1/57 phiên thành công (Lichess). 8 unit test + 1 test tích hợp runner.
+- **Chờ UI đứng yên (`McpActionExecutor._wait_screen_settled`, chỉ Flash):** thay settle cố định 400 ms bằng chụp nhanh dHash: chờ màn bắt đầu đổi (≤ 1 s) rồi chờ 2 khung liền nhau lệch ≤ 2 bit (≤ 3 s). Đo emulator: màn đứng yên 0–2 bit, chuyển cảnh 12–35 bit, hiệu ứng bắt đầu ~0.3–0.5 s sau khi bấm. 5 unit test.
+- **Workflow:** nhớ màn kết thúc của lần chạy thành công → báo AI "đã xong, đừng làm lại"; autopilot cuộn tìm target tối đa 3 lần; prompt Flash thêm luật "không thấy thì cuộn ≤ 3 lần, màn không đổi = hết danh sách".
+
+### 📌 Bản 3.10 (App workflow: ghi luồng + autopilot phát lại có kiểm màn đích — Flash, 2026-11-26, thử nghiệm, mặc định tắt)
+- **Ý tưởng:** lần đầu AI làm một tác vụ trên một app → ghi luồng; lần sau tác vụ cùng loại (giá trị khác) → máy tự bấm các bước điều hướng / gõ giá trị đã ghi, chỉ gọi AI ở bước cần chọn, cần phán đoán hoặc khi màn không như đã ghi. Kế hoạch chi tiết: `docs/KE_HOACH_APP_WORKFLOW.md` (v5).
+- **Ghi (record):** phân loại tất định, không chuỗi cứng: chữ gõ có trong goal → slot; bấm mục có nhãn chứa giá trị slot → slot; mục danh sách (lặp theo mẫu), bấm ngay sau `ask_user_choice` → judgement; nút cam kết → commitment_stop; còn lại + ENTER/SEARCH/BACK → nav.
+- **Phát lại (replay):** mỗi bước: khớp màn (vân tay bố cục, chỉ node app foreground) → bước duy nhất → target duy nhất, không bị che (cả bởi bàn phím/hộp thoại), không chữ cam kết → thực thi qua executor → kiểm màn đích (node + neo; gõ chữ: giá trị nằm trong ô). Chọn trong danh sách chỉ khi danh sách có đúng 1 mục; so khớp bỏ dấu. Chỉ đi tiến trong 1 lần chạy. Bàn giao: notice `[Autopilot]` + ép gửi ảnh, nhắc cuộn khi màn cuộn được.
+- **Kiểm chứng:** 29 unit test mới `tests/unit/workflow/test_autopilot.py` (tổng `tests/unit/workflow` 48); regression `tests/unit/mcp agents llm workflow` 982 pass, 2 fail có sẵn từ trước. Số liệu emulator ở mục 1.15.
+
+ khi gặp phân vân hoặc bí đường — Flash, 2026-11-25)
 - **Tool `ask_user_choice` (chỉ Flash):** Khi AI gặp nhiều lựa chọn ngang nhau (`kind="pick_item"`, tối thiểu 2 lựa chọn) hoặc bí đường không có nút khớp rõ (`kind="stuck"`, tối thiểu 1 hướng thử), gọi `ask_user_choice` sẽ tạm dừng vòng lặp trên máy (giữ nguyên `status="running"` trong `status.json`/DB và giữ lock thiết bị theo PID sống) và ghi IPC nguyên tử (`pending_choice.json` ↔ `choice_answer.json`), đồng thời phát SSE `user_choice_requested`/`user_choice_resolved` (Admin Console) và thông báo `needs_input` (MCP). Bật/tắt độc lập `ask_on_choice` và `ask_when_stuck` ở `config/agent.py` (`FlashUserChoiceConfig`), `user_choice_mode.json` (đổi nóng khi đang chạy), Showcase UI, CLI (`--no-ask-user`, `--ask-on-choice`, `--ask-when-stuck`), và MCP (`mobile_run_task`, `mobile_manage_task`).
 - **Quy tắc bấm an toàn & chống lặp vòng:** Bổ sung bảng phân biệt hành động hiển nhiên vs. hành động phải hỏi vào `flash_runner.md` (khi `ask_user_choice` bật); bổ sung chế độ "thử có kiểm soát" cho `stuck + auto` với ngân sách `2 × số hướng` lượt có thao tác máy; tính `back` vào `_no_progress_turns` để bắt vòng bấm nhầm rồi quay lại (ngưỡng 2 lượt); chỉ lượt có thao tác máy mới đếm vào `max_turns` (`turns.jsonl` ghi thêm `user_wait_s`, lượt 1-2-3 không trùng); gán `extra_metadata["injected_instruction"]` và `extra_metadata["user_choice"]` để bền vững qua nén lịch sử; ép `_force_image = True` ở lượt ngay sau khi người dùng trả lời.
 
@@ -473,10 +486,41 @@ Bộ test tự chứa `benchmarks/payload_grounding/` (18 lần bấm thật t�
 - **Thử trên máy thật — Grab đặt món tới nút Place Order (không bấm), Flash + Gemini 3.5 Flash-Lite API, 1 key, máy `25069PTEBG` (2026-11-23):** (a) *Bỏ ảnh khi list không đổi* (`skip_unchanged`, thử rồi **gỡ bỏ**): mỗi lượt không nhanh hơn (2.94 s so với 2.83–3.03 s; ảnh ~1k / ~20k token mỗi lượt) và **gây báo xong sai** — viền đỏ "bắt buộc" chỉ đổi màu, list chữ y nguyên → bỏ ảnh đúng lúc cần, Explorer chọn nút "Place Order" của màn hình bị che. (b) Lỗi kẹt ở tấm "Address details": nút "Confirm address" không có trong cây, cây trộn màn checkout bên dưới, AI bấm nhầm control không nhãn dẹt (nút đổi thanh toán) 6 lần → 15–20 lượt kẹt. **Sửa** (list gọn biết tấm đè, xác minh bằng OCR + lấp chỗ trống OCR + ghi chú control bị cắt): bước này 8 lượt, cả task **29 lượt / 201 s** (trước 38–43 lượt / 272–293 s), tới đúng trang Place Order. (c) Máy tắt vị trí → Grab hỏi địa chỉ, model bịa "Orchard Road" (Singapore) → thêm luật prompt "không bịa dữ liệu cá nhân".
 - **Desktop không cây UI**: OCR + dò icon OpenCV chỉ 26–29/52 (bộ dò bỏ sót nút "+" đè trên ảnh, icon mảnh "⋯") → chưa dùng được; ưu tiên cây accessibility của OS (UIA/AX/AT-SPI), OCR + dò icon chỉ là phương án cuối và cần bộ dò tốt hơn (model dò icon).
 
+### 1.15. App workflow — emulator `Grab_API34` (720×1280, Android 14), app Đồng hồ, Qwen3-VL 4B (Colab T4, `qwen3-vl:4b-32k`), 2026-11-26
+Tác vụ: "thêm thành phố X vào đồng hồ thế giới". Workflow ghi từ 1 phiên Madrid (4 bước: nút "+" nav → gõ X slot → phím tìm trên bàn phím nav → chọn kết quả slot).
+
+| Lần | Chế độ | Lượt AI | Thời gian | Autopilot | Ghi chú |
+|:--|:-:|:-:|:-:|:--|:--|
+| Madrid | ghi | 7 | 84 s | — | AI tự mở app |
+| Lagos | off, app mở sẵn | 9 | 98 s | — | đối chứng |
+| Kathmandu | replay, app mở sẵn | 3 | 46 s | 2 bước (+, gõ), bàn giao khi màn kết quả chưa khớp | thành công |
+| Lima | replay (trước sửa) | 4 | 58 s | 1 bước, dừng vì nhiều kết quả "Lima" | thành công |
+
+Lỗi tìm ra khi chạy thật và đã sửa (mỗi lỗi có unit test): (1) nút nổi đè danh sách bị coi là mục danh sách; (2) màn tìm kiếm thưa (4 node) bị loại khỏi so khớp → chấp nhận ≥ 3 node nếu ≥ 2 resource-id; (3) vân tay bị bàn phím ảo (~40 phím) chi phối → chỉ node app foreground; (4) ô lưới / kích thước lệch khi bàn phím đổi cỡ cửa sổ, số dòng kết quả khác nhau → vân tay bố cục (id không kèm vị trí, có/không thay số lượng, dòng lặp gộp); (5) autopilot bấm mà không xác nhận được màn → trước đây không báo AI → nay luôn quan sát lại + báo; (6) **quay về màn đầu sau khi xong → autopilot làm lại từ đầu** → chỉ đi tiến trong 1 lần chạy; (7) **chọn nhầm "Reykjavik, MB, Canada"** (bản Iceland viết "Reykjavík") — kiểm màn đích không bắt được → so khớp bỏ dấu + danh sách ≥ 2 mục luôn giao AI. Chưa đạt cổng V5.9(a) "0 bấm sai không phát hiện" trước sửa (7); sau sửa chưa đủ số lần chạy để kết luận.
+**Đợt test mở rộng (2026-11-26 chiều, sau chốt vòng lặp, chờ UI đứng yên, màn kết thúc; Qwen3-VL 4B, app mở sẵn):**
+
+| App / tác vụ | Chế độ | Lượt AI | Thời gian | Ghi chú |
+|:--|:-:|:-:|:-:|:--|
+| Đồng hồ — Dublin | replay | 2 | 59 s | autopilot 3 bước, dừng ở danh sách nhiều mục → AI chọn |
+| Đồng hồ — Prague | replay | 3 | 48 s | autopilot 3 bước |
+| Đồng hồ — Athens | off | 6 | 71 s | đối chứng |
+| Đồng hồ — Lagos | off | 9 | 98 s | đối chứng (lần trước) |
+| Đồng hồ — hẹn giờ 5 phút | replay | 5 | 138 s | khác loại tác vụ: bộ chọn trả none, autopilot 0 thao tác (đúng) |
+| Danh bạ — tạo liên hệ | replay/off | — | — | Qwen thất bại cả 5 lần (gõ nhầm, bấm mãi ô Tên); chốt vòng lặp dừng sau 1–3 phút; không có lần thành công để ghi |
+| Chrome — tìm "weather in X" | replay ×4 | 4–5 (1 lần 15) | 59–71 s | không lợi: trang kết quả web khác nhau theo truy vấn (vân tay 0.70–0.77 < τ) và ô gợi ý là judgement → autopilot dừng an toàn; lần 15 lượt do lỗi "chỉ đi tiến theo thứ tự file" (đã sửa: chỉ chặn bước đã chạy) + Qwen xoá chữ vừa gõ |
+| Chrome — tìm "weather in X" | off ×2 | 5 | 60–61 s | đối chứng |
+
+Kết luận: autopilot giúp rõ ở luồng native lặp lại (Đồng hồ: 2–3 lượt / 48–59 s so với 6–9 lượt / 71–98 s); với web không có lợi nhưng không gây sai. 0 lần autopilot bấm sai không phát hiện sau các bản sửa. Lỗi LLM "invalid character" (Ollama không parse được tool call của Qwen) trước đây làm phiên treo ở trạng thái Paused → nay hỏi lại kèm lời nhắc, 3 lần liên tiếp → failed.
+
+Giới hạn Qwen 4B quan sát được (không do autopilot): lặp gõ lại / bấm lại cùng điểm hàng chục lượt khi tắt hỏi người dùng; mở app qua ô tìm kiếm launcher thay vì `manage_app`.
+
 ## 2. TRẠNG THÁI TRIỂN KHAI (đến bản 3)
 
 | Hạng mục | Trạng thái | Ghi chú |
 |:--|:-:|:--|
+| **Chống lặp vô hạn Flash** (chốt vòng lặp theo nội dung màn + thao tác) | ✅ Xong | Bản 3.11; bắt 2/2 vòng lặp thật, chặn nhầm 1/57 phiên offline; chưa chạy lại trên máy (Colab hết giờ) |
+| **Chờ UI đứng yên** (thay settle cố định, Flash) | ✅ Xong | Bản 3.11; 0.7–1.8 s/thao tác trên emulator |
+| **App workflow** (ghi luồng + autopilot phát lại có kiểm màn đích, Flash, cờ `agent.flash.workflow.mode`) | ✅ Xong (thử nghiệm, mặc định off) | Bản 3.10; 29 unit test mới; emulator Đồng hồ: 9→3 lượt AI, 98→46 s (1 lần/bên). Chưa đo trên app thương mại thật. |
 | **A.** Làm mới session agy (≥ 80k **và** tăng ≥ 15k; trần cứng 120k) | ✅ Xong | Đã thấy chạy đúng trong trace cờ vua |
 | **C.** Settle theo loại action (`manage_app` 1500ms, ENTER 1000ms, còn lại 400ms) | ✅ Xong | |
 | **C.** Bấm mà màn hình không đổi → chờ 800ms chụp lại 1 lần (XML + dHash, ngưỡng từ config) | ✅ Xong | |

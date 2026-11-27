@@ -210,6 +210,28 @@ async def _flash_ocr_list(
     return text, elements, reads
 
 
+def _publish_raw_observation(ctx: Any, elements: Any, width: Any, height: Any) -> None:
+    """Keeps the raw (unformatted) hierarchy of the latest capture on ``ctx``.
+
+    The app-workflow autopilot matches screens on the raw tree (containers,
+    resource ids, flags) that the formatted element list drops. ``seq`` grows
+    on every capture so a reader can tell a fresh observation from a stale one.
+    """
+    if ctx is None:
+        return
+    try:
+        prev = getattr(ctx, "last_raw_observation", None) or {}
+        ctx.last_raw_observation = {
+            "elements": elements,
+            "width": width,
+            "height": height,
+            "seq": int(prev.get("seq", 0)) + 1,
+            "ts": time.monotonic(),
+        }
+    except (AttributeError, TypeError, ValueError):
+        pass
+
+
 async def observe(
     ctx: ArtemisContext,
     controller: UnifiedMobileController,
@@ -279,6 +301,7 @@ async def observe(
             ctx.device.device_width = width
             ctx.device.device_height = height
 
+        _publish_raw_observation(ctx, xml_hierarchy, width, height)
         scrollable = has_large_scrollable(xml_hierarchy, width, height)
         compact = getattr(ctx, "flash_compact_list", False) is True
         if compact and not ocr_results and isinstance(xml_hierarchy, list):

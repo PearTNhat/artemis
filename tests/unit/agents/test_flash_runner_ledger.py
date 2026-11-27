@@ -859,3 +859,110 @@ async def test_run_silent_turn_counter_resets_on_a_tool_call(mock_context):
 
     assert result == {"status": "completed"}
     assert runner._invoke_model.await_count == 6
+
+
+@pytest.mark.asyncio
+async def test_loop_guard_stops_a_model_that_repeats_itself_forever(mock_context):
+    """Unlimited turns + a model sending the same tap on an unchanged screen:
+    the run must end as failed by itself (warning first), not loop forever."""
+    tap = lambda i: AIMessage(  # noqa: E731
+        content="Tap the search hint again.",
+        tool_calls=[{"name": "click", "args": {"target": [500, 378], "target_description": "hint"}, "id": f"tc{i}"}],
+    )
+    responses = [tap(i) for i in range(50)]
+    raw = {
+        "elements": [
+            {"package": "com.example.app", "class": "android.widget.FrameLayout",
+             "bounds": "[0,0][1000,1000]", "visible-to-user": "true"},
+            {"package": "com.example.app", "class": "android.widget.TextView",
+             "bounds": "[100,350][900,400]", "visible-to-user": "true", "text": "Search for a city"},
+        ],
+        "width": 1000,
+        "height": 1000,
+        "seq": 1,
+    }
+    with (
+        patch("artemis.controllers.unified_controller.get_driver"),
+        patch(
+            "artemis.agents.flash.runner.capture_screenshot_and_parse_ui",
+            AsyncMock(return_value=_INITIAL_OBSERVATION),
+        ),
+    ):
+        runner = _make_runner(mock_context, responses, max_turns=0)
+        runner.ctx.last_raw_observation = raw
+        result = await runner.run(State(initial_goal="Open Settings"))
+
+    assert result["status"] == "failed"
+    assert "Loop detected" in result["explanation"]
+    assert runner._invoke_model.await_count == 4  # warned after the 3rd tap, stopped at the 4th
+    warned = runner.calls[3]["messages"][-1]
+    assert any("Loop warning" in b.get("text", "") for b in warned.content if isinstance(b, dict))
+
+
+def _malformed_error():
+    from artemis.llm.reliability import classify_failure, LLMPermanentError
+
+    raw = Exception(
+        "Error code: 500 - {'error': {'message': \"invalid character '6' looking for beginning of"
+        " object key string\", 'type': 'api_error'}}"
+    )
+    return LLMPermanentError(str(raw), failure=classify_failure(raw), cause=raw)
+
+
+def test_malformed_tool_call_is_classified_not_retryable_and_not_paused():
+    from artemis.llm.reliability import FailureCategory
+
+    err = _malformed_error()
+    assert err.failure.category is FailureCategory.MALFORMED_OUTPUT
+    assert err.failure.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_malformed_reply_is_re_asked_with_a_note_then_continues(mock_context):
+    responses = [_malformed_error(), _report(explanation="ok")]
+    with (
+        patch("artemis.controllers.unified_controller.get_driver"),
+        patch(
+            "artemis.agents.flash.runner.capture_screenshot_and_parse_ui",
+            AsyncMock(return_value=_INITIAL_OBSERVATION),
+        ),
+    ):
+        runner = _make_runner(mock_context, responses, max_turns=0)
+        orig = runner._invoke_model.side_effect
+
+        async def _invoke(llm, tools, messages):
+            r = await orig(llm, tools, messages)
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        runner._invoke_model.side_effect = _invoke
+        result = await runner.run(State(initial_goal="Open Settings"))
+
+    assert result == {"status": "completed", "explanation": "ok"}
+    second_tail = runner.calls[1]["messages"][-1]
+    texts = " ".join(b.get("text", "") for b in second_tail.content if isinstance(b, dict))
+    assert "could not be parsed as a tool call" in texts
+
+
+@pytest.mark.asyncio
+async def test_three_malformed_replies_in_a_row_stop_the_run(mock_context):
+    responses = [_malformed_error() for _ in range(5)]
+    with (
+        patch("artemis.controllers.unified_controller.get_driver"),
+        patch(
+            "artemis.agents.flash.runner.capture_screenshot_and_parse_ui",
+            AsyncMock(return_value=_INITIAL_OBSERVATION),
+        ),
+    ):
+        runner = _make_runner(mock_context, responses, max_turns=0)
+        orig = runner._invoke_model.side_effect
+
+        async def _invoke(llm, tools, messages):
+            raise await orig(llm, tools, messages)
+
+        runner._invoke_model.side_effect = _invoke
+        result = await runner.run(State(initial_goal="Open Settings"))
+
+    assert result["status"] == "failed" and "malformed" in result["explanation"]
+    assert runner._invoke_model.await_count == 3
