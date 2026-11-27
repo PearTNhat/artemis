@@ -40,11 +40,14 @@ from artemis.workflow.recorder import (
     TAP_TOOLS,
     RawScreen,
     RecordedStep,
+    _screen as _rec_screen,
     detect_slots,
+    inconsistent_typing,
     record_run,
 )
 from artemis.workflow.targets import (
     _same_kind,
+    editable_field_keys,
     fold,
     iou,
     is_editable,
@@ -264,6 +267,14 @@ def _same_node(el: dict[str, Any] | None, gt_node: dict[str, Any] | None, gt_act
         if el.get("resource-id") and el.get("resource-id") == gt_node.get("resource-id"):
             if not node_label(el) or fold(node_label(el)) == fold(node_label(gt_node)):
                 return True
+        if is_editable(el) and is_editable(gt_node):
+            eh = fold(str(el.get("hint") or ""))
+            gh = fold(str(gt_node.get("hint") or ""))
+            if eh and eh == gh and (
+                not (el.get("resource-id") and gt_node.get("resource-id"))
+                or el.get("resource-id") == gt_node.get("resource-id")
+            ):
+                return True
     gt_box = gt_action.get("target_bounds")
     if isinstance(gt_box, (list, tuple)) and len(gt_box) == 4:
         gb2 = tuple(int(x) for x in gt_box)
@@ -347,8 +358,8 @@ def _matches_ground_truth(
     return False
 
 
-def _simulate_wrong_input_screen(pre: RawScreen, element: dict[str, Any] | None, typed_text: str) -> RawScreen:
-    """Builds a realistic post-screen where ``typed_text`` landed in ``element`` (the wrong field)."""
+def _apply_input_to_screen(pre: RawScreen, element: dict[str, Any] | None, typed_text: str) -> RawScreen:
+    """Builds a realistic post-screen where ``typed_text`` landed in ``element``."""
     norm = normalize(pre.elements, width=pre.width, height=pre.height)
     target_bounds = tuple(int(x) for x in (element or {}).get("bounds") or (0, 0, 0, 0))
     for n in norm:
@@ -383,6 +394,7 @@ class _OfflineTraceDriver:
         self.mismatches = 0
         self.mismatch_details: list[str] = []
         self._mismatch_pending: int | None = None
+        self._matched_form_idxs: set[int] = set()
 
     def current(self) -> RawScreen | None:
         if self._mismatch_pending is not None:
@@ -391,6 +403,36 @@ class _OfflineTraceDriver:
 
     async def refresh(self) -> RawScreen | None:
         return self.screen
+
+    def _is_form_aux(self, gt: RecordedStep) -> bool:
+        if gt.tool == "swipe" or _is_focus_tap(gt):
+            return True
+        if gt.tool == "press_key" and str(gt.args.get("key") or "").upper() in ("BACK", "4"):
+            return True
+        if gt.tool in TAP_TOOLS and gt.pre is not None and gt.post is not None:
+            pre_n = normalize(gt.pre.elements, width=gt.pre.width, height=gt.pre.height)
+            post_n = normalize(gt.post.elements, width=gt.post.width, height=gt.post.height)
+            if editable_field_keys(pre_n) & editable_field_keys(post_n):
+                return True
+        return False
+
+    def _find_unordered_form_match(
+        self, tool: str, args: dict[str, Any], element: dict[str, Any] | None
+    ) -> int | None:
+        """Within the current form (before the next submit/navigation step),
+        allows matching input steps on different fields regardless of field order (L-033)."""
+        if tool not in INPUT_TOOLS:
+            return None
+        for k in range(self.idx, len(self.gt_steps)):
+            g = self.gt_steps[k]
+            if g.tool in INPUT_TOOLS:
+                if k not in self._matched_form_idxs and _matches_ground_truth(tool, args, element, g):
+                    return k
+                continue
+            if self._is_form_aux(g):
+                continue
+            break
+        return None
 
     async def act(
         self, tool: str, args: dict[str, Any], element: dict[str, Any] | None
@@ -416,6 +458,36 @@ class _OfflineTraceDriver:
                 return True, "offline aux matched"
             return False, f"offline: aux {tool} not in ground truth"
 
+        form_k = self._find_unordered_form_match(tool, args, element)
+        if form_k is not None:
+            self._matched_form_idxs.add(form_k)
+            self.matched += 1
+            has_later_matched = any(j > self.idx and j in self._matched_form_idxs for j in range(self.idx + 1, len(self.gt_steps)))
+            if form_k == self.idx and not has_later_matched:
+                self.screen = gt.post
+                self.idx += 1
+            else:
+                if self.screen is not None:
+                    self.screen = _apply_input_to_screen(self.screen, element, str(args.get("text") or ""))
+                jumped = False
+                while self.idx < len(self.gt_steps):
+                    if self.idx in self._matched_form_idxs:
+                        self.idx += 1
+                        jumped = True
+                    elif self._is_form_aux(self.gt_steps[self.idx]) and any(
+                        j in self._matched_form_idxs for j in range(self.idx + 1, len(self.gt_steps))
+                    ):
+                        self.idx += 1
+                        jumped = True
+                    else:
+                        break
+                if jumped and self.idx < len(self.gt_steps) and not any(
+                    j in self._matched_form_idxs for j in range(self.idx, len(self.gt_steps))
+                ):
+                    if self.gt_steps[self.idx].pre is not None:
+                        self.screen = self.gt_steps[self.idx].pre
+            return True, "offline matched"
+
         if _matches_ground_truth(tool, args, element, gt):
             self.matched += 1
             self.screen = gt.post
@@ -429,7 +501,7 @@ class _OfflineTraceDriver:
         # - wrong tap / key: transition to gt.post (what the real AI action actually led to)
         #   so we expose any wrong tap whose destination still passes _verified().
         if tool in INPUT_TOOLS and gt.pre is not None:
-            self.screen = _simulate_wrong_input_screen(gt.pre, element, str(args.get("text") or ""))
+            self.screen = _apply_input_to_screen(gt.pre, element, str(args.get("text") or ""))
         elif gt.post is not None:
             self.screen = gt.post
             self.idx += 1
@@ -489,9 +561,15 @@ async def evaluate_db(db_path: Path, *, verbose: bool = False) -> dict[str, AppS
             gt_steps = _effective_steps(sess)
             if not gt_steps:
                 continue
+            slot_values = _align_slots(wf.slots, sess.slots)
+            # L-033: exclude runs whose own ground truth recorded corrupted typing.
+            rec_screens = [(st, _rec_screen(st.pre), _rec_screen(st.post)) for st in sess.steps]
+            if inconsistent_typing(rec_screens, slot_values):
+                if verbose:
+                    print(f"  - {sess.session_id[:8]}: SKIPPED (inconsistent recorded typing)")
+                continue
             app.sessions += 1
             app.gt_steps += len(gt_steps)
-            slot_values = _align_slots(wf.slots, sess.slots)
             ap = Autopilot(wf, slot_values, verify_polls=1, poll_interval_s=0.0)
             drv = _OfflineTraceDriver(gt_steps)
             sess_matched = 0

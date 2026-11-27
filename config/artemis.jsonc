@@ -138,6 +138,7 @@
     // Best for: Simple, fast, deterministic tasks; runs unbounded by default.
     // Execution: Observe-Think-Act single LLM reactive loop without graph overhead.
     "flash": {
+      "workflow": {"mode": "off", "dir": "/tmp/claude-1000/-home-nhat-Workspace-artemis/cd939204-882f-4177-ad1c-38c6abb977b3/scratchpad/wf_gem"},
       "max_turns": 0, // Maximum reactive turns before stopping (0 = unlimited; history is bounded by transcript compression, not by a turn cap)
       "explorer_mode": "flash", // Explorer tier for the Flash runner: 'flash' | 'pro' | 'ultra' (see top-level "explorer")
       // 🖼️ Screenshot sent to the AI each turn (only the AI's copy)

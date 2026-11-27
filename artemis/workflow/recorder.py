@@ -44,11 +44,15 @@ from artemis.workflow.targets import (
     TargetDescriptor,
     anchors_for,
     descriptor_for,
+    editable_field_keys,
+    field_has_value,
+    field_target_matches,
     fold,
     resolve,
     is_commitment_at,
     is_editable,
     is_list_item,
+    keyboard_box,
     node_at,
     node_label,
     screen_content_key,
@@ -334,6 +338,76 @@ def _node_for(wf: Workflow, fp: ScreenFingerprint, tau: float, delta: float) -> 
     return nid
 
 
+def _same_form_screens(pre: _Screen, post: _Screen) -> bool:
+    """True when both screens share an identified field of a multi-field form (L-031)."""
+    pre_fields = editable_field_keys(pre.norm)
+    post_fields = editable_field_keys(post.norm)
+    return bool(pre_fields & post_fields) and len(pre_fields | post_fields) >= 2
+
+
+def _conflicts_with_other_node(wf: Workflow, nid: str, fp: ScreenFingerprint, tau: float, delta: float) -> bool:
+    """True when another node already sits within ``tau - delta`` of ``fp``."""
+    limit = max(0.0, tau - delta)
+    for other_id, node in wf.nodes.items():
+        if other_id == nid:
+            continue
+        if any(weighted_jaccard(fp, existing) >= limit for existing in node.fps):
+            return True
+    return False
+
+
+def _form_node_for_dest(
+    wf: Workflow,
+    src: str,
+    post: _Screen,
+    kind: str,
+    st: RecordedStep,
+    target: TargetDescriptor | None,
+    key: str,
+    *,
+    tau: float,
+    delta: float,
+) -> str | None:
+    """Unifies a form's initial and scrolled states when the destination shows
+    the form's next typing field (L-031), without lowering general tau."""
+    if kind not in ("nav", "slot") or st.tool in INPUT_TOOLS:
+        return None
+    post_fields = editable_field_keys(post.norm)
+    if not post_fields:
+        return None
+    target_dict = target.to_dict() if target is not None else None
+    from_src_dsts = {
+        e.dst
+        for e in wf.edges_from(src)
+        if e.dst
+        and e.kind == kind
+        and e.tool == st.tool
+        and e.key == key
+        and (e.target.to_dict() if e.target is not None else None) == target_dict
+    }
+    candidates: list[tuple[int, float, str]] = []
+    for nid, node in wf.nodes.items():
+        in_edges = [
+            e
+            for e in wf.edges_from(nid)
+            if e.state != "disabled"
+            and e.tool in INPUT_TOOLS
+            and e.target is not None
+            and (e.target.resource_id or e.target.hint)
+        ]
+        distinct_fields = {(e.target.resource_id.strip(), e.target.hint.strip()) for e in in_edges}
+        if len(distinct_fields) < 2 or not field_target_matches(in_edges[0].target, post_fields):
+            continue
+        best_j = max((weighted_jaccard(post.fp, f) for f in node.fps), default=0.0)
+        candidates.append((1 if nid in from_src_dsts else 0, best_j, nid))
+    if not candidates:
+        return None
+    _, _, chosen = max(candidates)
+    if not _conflicts_with_other_node(wf, chosen, post.fp, tau, delta):
+        wf.nodes[chosen].add_fp(post.fp)
+    return chosen
+
+
 def _point(action: dict[str, Any]) -> tuple[int, int] | None:
     pt = action.get("normalized_coordinates")
     if isinstance(pt, (list, tuple)) and len(pt) == 2:
@@ -565,11 +639,9 @@ def inconsistent_typing(screens: list, values: dict[str, str]) -> str:
     """Why a run's form filling cannot be trusted, or "" (L-029).
 
     For every task value, its LAST typing must still be in that field when the
-    form is submitted (the screen before the next non-typing action, or the last
-    screen of the run). If not, a later typing overwrote it: the AI may report
-    success, but what it submitted is not what the task asked, and a workflow
-    learned from it would replay the overwrite. A mistake corrected later (value
-    typed again into the right field) is fine: only the last typing counts.
+    form is submitted (or on the most recent screen before submit that still
+    displays that field, in case it scrolled out of view). Also rejects when two
+    different slots' last typings on the same form landed in the same field key.
     """
     last: dict[str, int] = {}
     for i, (st, pre, _) in enumerate(screens):
@@ -577,23 +649,47 @@ def inconsistent_typing(screens: list, values: dict[str, str]) -> str:
             slot = _slot_for_text(str(st.args.get("text") or ""), values)
             if slot:
                 last[slot] = i
+
+    def _find_submit_index(start_idx: int) -> int | None:
+        for k in range(start_idx + 1, len(screens)):
+            st2, pre2, _ = screens[k]
+            if st2.tool in INPUT_TOOLS or st2.tool in (
+                "swipe",
+                "wait",
+                "wait_for_screen_change",
+                "wait_for_text",
+                "wait_until_gone",
+                "wait_for_delay",
+            ):
+                continue
+            if (
+                st2.tool == "press_key"
+                and str(st2.args.get("key") or "").upper() in ("BACK", "4")
+                and pre2 is not None
+                and keyboard_box(pre2.norm) is not None
+            ):
+                continue
+            return k
+        return None
+
+    submit_indices: dict[str, int | None] = {slot: _find_submit_index(i) for slot, i in last.items()}
+    seen_field_per_submit: dict[tuple[int | None, tuple[Any, ...]], str] = {}
+
     for slot, i in last.items():
         st, pre, post = screens[i]
         key = _typed_field_key(st, pre)
-        if key is None:
-            continue
-        # the screen at submit time: pre-screen of the next non-typing action
-        submit = None
-        for st2, pre2, _ in screens[i + 1 :]:
-            if st2.tool not in INPUT_TOOLS and st2.tool not in ("swipe", "wait", "wait_for_screen_change",
-                                                                 "wait_for_text", "wait_until_gone",
-                                                                 "wait_for_delay"):
-                submit = pre2
-                break
-        if submit is None:
-            submit = post
-        if submit is None:
-            continue
+        sub_idx = submit_indices[slot]
+        if key is not None:
+            combo = (sub_idx, key)
+            prev_slot = seen_field_per_submit.get(combo)
+            if prev_slot is not None and fold(values[prev_slot]) != fold(values[slot]):
+                label = key[1] or key[0] or key[2] or "input field"
+                return (
+                    f"'{values[prev_slot]}' ({prev_slot}) and '{values[slot]}' ({slot}) were both typed"
+                    f" into the same field ({label})"
+                )
+            seen_field_per_submit[combo] = slot
+
         node = node_at(pre.norm, point=_point(st.action), box=_box(st.action))
         fields = [n for n in visible_app_nodes(pre.norm) if is_editable(n)]
         if node is None or not is_editable(node):
@@ -602,15 +698,33 @@ def inconsistent_typing(screens: list, values: dict[str, str]) -> str:
             continue
         desc = descriptor_for(node)
         desc.text = ""
-        field, status = resolve(desc, submit.norm)
-        if field is None:
-            continue  # field not shown at submit time: cannot tell
-        if fold(values[slot]) not in fold(str(field.get("text") or "")):
-            label = desc.hint or desc.resource_id or desc.class_name
-            return (
-                f"'{values[slot]}' ({slot}) is no longer in its field ({label}) when the form is submitted"
-                f" (it holds '{field.get('text') or ''}'): a later typing overwrote it"
-            )
+
+        # Check submit pre-screen first; if the field scrolled off-screen by submit
+        # time, walk backwards to the latest screen after step i that still shows it.
+        check_screens: list[_Screen] = []
+        end_k = sub_idx if sub_idx is not None else len(screens) - 1
+        if sub_idx is not None and screens[sub_idx][1] is not None:
+            check_screens.append(screens[sub_idx][1])
+        for k in range(end_k, i - 1, -1):
+            _, sk_pre, sk_post = screens[k]
+            if k > i and sk_post is not None and (sub_idx is None or k < sub_idx):
+                check_screens.append(sk_post)
+            if k > i and sk_pre is not None and k != sub_idx:
+                check_screens.append(sk_pre)
+        if post is not None:
+            check_screens.append(post)
+
+        for scr in check_screens:
+            field, _ = resolve(desc, scr.norm)
+            if field is None:
+                continue
+            if fold(values[slot]) not in fold(str(field.get("text") or "")):
+                label = desc.hint or desc.resource_id or desc.class_name
+                return (
+                    f"'{values[slot]}' ({slot}) is no longer in its field ({label}) when the form is submitted"
+                    f" (it holds '{field.get('text') or ''}'): a later typing overwrote it"
+                )
+            break
     return ""
 
 
@@ -666,7 +780,7 @@ def record_run(
     why_inconsistent = inconsistent_typing(screens, values)
     if why_inconsistent:
         _log.warning(f"Workflow recording skipped, inconsistent run: {why_inconsistent}")
-        return None if workflow is None else workflow
+        return None
 
     # A slot typed more than once (a mistake corrected, a wrong field fixed):
     # keep the typing whose value is still in its field on the last screen
@@ -694,22 +808,32 @@ def record_run(
     first_src: str | None = None
     typed_on_screen: dict[str, set[str]] = {}  # node -> slots typed into its fields
     for i, (st, pre, post) in enumerate(screens):
+        merged_dst: str | None = None
+        kb_hide = (
+            st.tool == "press_key"
+            and str(st.args.get("key") or st.args.get("keycode") or "").strip().upper() in ("BACK", "4")
+            and pre is not None
+            and keyboard_box(pre.norm) is not None
+        )
         if (
-            st.tool in ("swipe",) + tuple(INPUT_TOOLS)
+            i not in skip
+            and (st.tool in ("swipe",) + tuple(INPUT_TOOLS) or kb_hide)
             and st.ok
             and pre is not None
             and post is not None
             and pre.fp.package == post.fp.package == package
-            and weighted_jaccard(pre.fp, post.fp) >= SAME_SCREEN_SCROLLED
+            and (weighted_jaccard(pre.fp, post.fp) >= SAME_SCREEN_SCROLLED or _same_form_screens(pre, post))
         ):
-            # Scrolling inside a screen (a long form) shows other parts of the
-            # same screen (also when typing opened the keyboard): one node, so steps recorded after the scroll apply
-            # from the top too (the autopilot scrolls to off-screen targets).
-            # Typing too: the keyboard opening auto-scrolls a form.
+            # Scrolling inside a screen (a long form), typing (keyboard
+            # opening auto-scrolls a form), or hiding the keyboard over a form
+            # keeps all form states in one node, so steps recorded across
+            # scrolls share one node.
             nid = _node_for(wf, pre.fp, tau, delta)
-            if not match_screen(post.fp, {nid: wf.nodes[nid].fps}, tau=tau, delta=0.0, min_app_tokens=1).matched:
-                wf.nodes[nid].add_fp(post.fp)
-            if st.tool == "swipe":
+            if not _conflicts_with_other_node(wf, nid, post.fp, tau, delta):
+                if not match_screen(post.fp, {nid: wf.nodes[nid].fps}, tau=tau, delta=0.0, min_app_tokens=1).matched:
+                    wf.nodes[nid].add_fp(post.fp)
+                merged_dst = nid
+            if st.tool == "swipe" or kb_hide:
                 continue
         if i in skip or st.autopilot or not st.ok or st.no_effect:
             continue
@@ -724,7 +848,19 @@ def record_run(
         dst = None
         anchors: list[dict[str, str]] = []
         if post is not None and post.fp.package == package:
-            dst = _node_for(wf, post.fp, tau, delta)
+            if merged_dst is not None and st.tool in INPUT_TOOLS:
+                dst = merged_dst
+            else:
+                fps = wf.node_fps()
+                matched = match_screen(post.fp, fps, tau=tau, delta=delta, min_app_tokens=1) if fps else None
+                if matched is not None and matched.matched and matched.node_id:
+                    wf.nodes[matched.node_id].add_fp(post.fp)
+                    dst = matched.node_id
+                else:
+                    if matched is None or matched.reason in ("below_tau", "no_nodes", ""):
+                        dst = _form_node_for_dest(wf, src, post, kind, st, target, key, tau=tau, delta=delta)
+                    if dst is None:
+                        dst = _node_for(wf, post.fp, tau, delta)
             anchors = anchors_for(post.norm, pre.norm, exclude_texts=values.values())
         if kind == "focus":
             if dst is None or dst == src:
@@ -748,6 +884,18 @@ def record_run(
             # waits for all of them. Values typed on other screens do not count.
             typed = ",".join(sorted(typed_slots(pre.norm, values) | typed_on_screen.get(src, set())))
         step_label, step_desc = _step_hints(st, pre, values)
+        empty_on_record = False
+        if st.tool in INPUT_TOOLS and kind == "slot":
+            fields = [n for n in visible_app_nodes(pre.norm) if is_editable(n)]
+            node = node_at(pre.norm, point=_point(st.action), box=_box(st.action))
+            if node is None or not is_editable(node):
+                if len(fields) == 1:
+                    node = fields[0]
+                else:
+                    focused = [n for n in fields if n.get("focused")]
+                    node = focused[0] if len(focused) == 1 else None
+            if node is not None:
+                empty_on_record = not field_has_value(node, target.hint if target else "")
         edge = Edge(
             id="",
             typed=typed,
@@ -761,6 +909,7 @@ def record_run(
             anchors=anchors if kind in ("nav", "slot") else [],
             label=step_label,
             description=step_desc,
+            empty_on_record=empty_on_record,
         )
         if st.tool in INPUT_TOOLS and slot:
             typed_on_screen.setdefault(src, set()).add(slot)
@@ -770,6 +919,8 @@ def record_run(
             if sig not in seen_this_run:
                 existing.seen += 1
                 seen_this_run.add(sig)
+            if st.tool in INPUT_TOOLS:
+                existing.empty_on_record = existing.empty_on_record and empty_on_record
             if not existing.label and step_label:
                 existing.label = step_label
             if not existing.description and step_desc:

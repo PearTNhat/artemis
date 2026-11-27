@@ -34,7 +34,11 @@ from artemis.workflow.store import Edge, Workflow
 from third_party.mobile_use.utils.logger import get_logger
 from artemis.workflow.targets import (
     anchors_present,
+    editable_field_keys,
+    field_has_value,
+    field_target_matches,
     fold,
+    is_editable,
     keyboard_box,
     keyboard_covers,
     node_label,
@@ -48,10 +52,9 @@ from artemis.workflow.targets import (
 logger = get_logger(__name__)
 
 MAX_STEPS = 15
-# Target recorded below the visible part (the AI scrolled before tapping): look
-# for it with at most this many swipes per screen; an unchanged screen after a
-# swipe is the end of the list.
-MAX_SCROLL_SEARCH = 3
+# Stop scrolling primarily when a swipe leaves the screen unchanged (end of
+# the list); this cap only prevents infinite scrolling (L-041).
+MAX_SCROLL_SEARCH = 10
 DISABLE_AFTER_CONSEC_FAIL = 2
 
 
@@ -73,21 +76,54 @@ class AutopilotReport:
     stop_detail: str = ""
     elapsed_s: float = 0.0
     done_edge_ids: set[str] = field(default_factory=set)
+    verified_found: list[str] = field(default_factory=list)
+    verified_missing: list[str] = field(default_factory=list)
+    verify_scrolls: int = 0
 
     @property
     def steps(self) -> int:
         return len(self.ran)
 
+    def end_check_summary(self) -> str:
+        """Concise factual summary of what the end-screen check observed (L-039)."""
+        scroll_note = f" after scrolling ({self.verify_scrolls} swipe(s))" if self.verify_scrolls else ""
+        if self.verified_found and not self.verified_missing:
+            items = ", ".join(repr(v) for v in self.verified_found)
+            return f"End-screen check CONFIRMED: verified {items} on screen{scroll_note}."
+        if self.verified_missing:
+            found_part = (
+                f"found {', '.join(repr(v) for v in self.verified_found)}; "
+                if self.verified_found
+                else ""
+            )
+            missing_part = ", ".join(repr(v) for v in self.verified_missing)
+            return (
+                f"End-screen check: {found_part}did NOT see {missing_part} on screen"
+                f"{scroll_note or ' (checked visible screen)'}."
+            )
+        return ""
+
     def notice(self, workflow_id: str, *, scrollable: bool = False) -> str:
         done = "; ".join(f"{i + 1}) {s}" for i, s in enumerate(self.ran)) or "none"
         if self.finished:
+            check = self.end_check_summary()
+            if self.verified_found and not self.verified_missing:
+                return (
+                    f"[Autopilot] workflow {workflow_id}: steps replayed without the model in this run:"
+                    f" {done}. {check} Do NOT repeat the workflow or tap to add/create again;"
+                    " call report_task_status(status='completed')."
+                )
+            if check:
+                return (
+                    f"[Autopilot] workflow {workflow_id}: steps replayed without the model in this run:"
+                    f" {done}. This is the recorded end screen. {check}"
+                    " Inspect the live screen before calling report_task_status. Do NOT repeat completed steps."
+                )
             return (
                 f"[Autopilot] workflow {workflow_id}: steps replayed without the model in this run:"
-                f" {done}. Together with the steps you took yourself, the recorded path is complete, and"
-                " this is the screen the earlier successful run was reported completed on: the task is"
-                " most likely done."
+                f" {done}. Together with the steps you took yourself, the recorded path reached the recorded end screen."
                 " Confirm the goal on this screen"
-                + (" (it scrolls: swipe to find a just-added item before deciding)" if scrollable else "")
+                + (" (it scrolls: swipe until you see the result or reach the end)" if scrollable else "")
                 + " and call report_task_status. Do NOT repeat the steps above."
             )
         if self.acted > self.steps:
@@ -130,7 +166,11 @@ def _scroll_swipe(norm) -> list[int] | None:
 
 
 def _labels(norm) -> frozenset:
-    return frozenset(node_label(n) for n in visible_app_nodes(norm or []) if node_label(n))
+    return frozenset(
+        node_label(n) or str(n.get("hint") or "").strip()
+        for n in visible_app_nodes(norm or [])
+        if node_label(n) or str(n.get("hint") or "").strip()
+    )
 
 
 def _describe(edge: Edge, element: dict[str, Any] | None, value: str) -> str:
@@ -176,6 +216,51 @@ class Autopilot:
         self._typed_ok: set[str] = set()
         self._revisit = ""
         self._finished = False
+        self._assumed_node: str | None = None
+
+    def _form_field_targets(self, node_id: str) -> list[Any]:
+        return [
+            e.target
+            for e in self.wf.edges_from(node_id)
+            if e.state == "active"
+            and e.id not in self._done
+            and e.tool in INPUT_TOOLS
+            and e.target is not None
+            and (e.target.resource_id or e.target.hint)
+        ]
+
+    def _is_multi_field_form(self, node_id: str) -> bool:
+        keys = {
+            (e.target.resource_id.strip(), e.target.hint.strip())
+            for e in self.wf.edges_from(node_id)
+            if e.state == "active"
+            and e.tool in INPUT_TOOLS
+            and e.target is not None
+            and (e.target.resource_id or e.target.hint)
+        }
+        return len(keys) >= 2
+
+    def _matches_form_fields(self, node_id: str, norm) -> bool:
+        """True when a multi-field form ``node_id`` expects a field (hint/id) visible on ``norm``."""
+        if not self._is_multi_field_form(node_id):
+            return False
+        targets = self._form_field_targets(node_id)
+        if not targets:
+            return False
+        live_keys = editable_field_keys(norm or [])
+        return field_target_matches(targets[0], live_keys)
+
+    def _shares_form_fields(self, node_id: str, norm) -> bool:
+        """True when ``norm`` displays any active input field of multi-field form ``node_id``."""
+        if not self._is_multi_field_form(node_id):
+            return False
+        live_keys = editable_field_keys(norm or [])
+        if not live_keys:
+            return False
+        return any(
+            e.state == "active" and e.tool in INPUT_TOOLS and field_target_matches(e.target, live_keys)
+            for e in self.wf.edges_from(node_id)
+        )
 
     def _match(self, fp) -> tuple[str | None, str]:
         if fp is None:
@@ -188,6 +273,76 @@ class Autopilot:
         if not m.matched:
             return None, f"screen not in the workflow ({m.reason}, similarity {m.score:.2f})"
         return m.node_id, ""
+
+    def _match_live(self, norm, fp) -> tuple[str | None, str]:
+        node_id, why = self._match(fp)
+        assumed = self._assumed_node
+        if assumed and assumed in self.wf.nodes:
+            if node_id == assumed:
+                return node_id, ""
+            if (
+                fp is not None
+                and fp.package == self.wf.package
+                and is_matchable(fp)
+                and self._shares_form_fields(assumed, norm)
+            ):
+                return assumed, ""
+        self._assumed_node = None
+        return node_id, why
+
+    def _field_for_target(self, target, norm) -> dict[str, Any] | None:
+        field, status = resolve(target, norm)
+        if field is not None:
+            return field
+        if status == "occluded":
+            return self._occluded_node(target, norm)
+        return None
+
+    def _slot_in_own_field(self, slot: str, value: str, node_id: str, norm) -> bool:
+        """True only when autopilot itself typed & verified ``slot`` in this run, or
+        the recorded field for ``slot`` (by id / hint) is visible and holds ``value`` (L-036)."""
+        if slot in self._typed_ok:
+            return True
+        targets = [
+            e.target
+            for e in self.wf.edges_from(node_id)
+            if e.tool in INPUT_TOOLS and e.slot == slot and e.target is not None
+        ]
+        if not targets:
+            targets = [
+                e.target
+                for e in self.wf.edges
+                if e.tool in INPUT_TOOLS and e.slot == slot and e.target is not None
+            ]
+        v = fold(value)
+        identified = [t for t in targets if not t.focused_editable and (t.resource_id or t.hint)]
+        if not identified:
+            return slot in typed_slots(norm, {slot: value})
+        for t in identified:
+            field = self._field_for_target(t, norm)
+            if field is not None and v in fold(str(field.get("text") or "")):
+                return True
+        return False
+
+    def _held_slots(self, node_id: str, norm) -> set[str]:
+        return {
+            slot
+            for slot, val in self.slot_values.items()
+            if val and self._slot_in_own_field(slot, val, node_id, norm)
+        }
+
+    def _all_slots_completed(self) -> bool:
+        """True when the workflow defines slot steps and every active slot has had
+        at least one step completed in this run (L-042)."""
+        active_slots = {
+            e.slot for e in self.wf.edges if e.state == "active" and e.kind == "slot" and e.slot
+        }
+        if not active_slots:
+            return False
+        done_slots = {
+            e.slot for e in self.wf.edges if e.id in self._done and e.slot
+        }
+        return active_slots <= done_slots
 
     def _pick(self, node_id: str, norm) -> tuple[Edge | None, dict[str, Any] | None, str, str]:
         """-> (edge, element, slot value, stop reason)."""
@@ -205,9 +360,22 @@ class Autopilot:
                     "",
                     "this navigation step was only seen once: waiting for 2 independent runs before auto-tapping",
                 )
+            if (
+                self._all_slots_completed()
+                and not any(e.kind == "commitment_stop" for e in all_edges)
+                and not self._form_still_open(norm)
+            ):
+                self._finished = True
+                return None, None, "", "all recorded slot steps are completed on a workflow screen"
             return None, None, "", "no recorded step from this screen"
         if all(e.id in self._done for e in edges):
             self._revisit = node_id
+            if (
+                self._all_slots_completed()
+                and not any(e.kind == "commitment_stop" for e in edges)
+                and not self._form_still_open(norm)
+            ):
+                self._finished = True
             return None, None, "", "the recorded steps from this screen were already replayed in this run"
         # Never replay a step twice in one run (merged workflows are graphs:
         # the file order is not the path order, so only what ran counts).
@@ -218,9 +386,9 @@ class Autopilot:
             return None, None, "", "this screen needs a choice or judgement (recorded as the AI's / user's decision)"
         cands: dict[tuple, tuple[Edge, dict[str, Any] | None, str]] = {}
         reasons: list[str] = []
-        # Typed values: visible in a field now, or typed and verified by the
-        # autopilot earlier in this run (the field may have scrolled away).
-        held = typed_slots(norm, self.slot_values) | self._typed_ok
+        # Typed values: verified in this run by autopilot, or visible in the
+        # exact field recorded for that slot (never in an unrelated field, L-036).
+        held = self._held_slots(node_id, norm)
         for e in edges:
             value = self.slot_values.get(e.slot, "") if e.slot else ""
             if e.slot and not value:
@@ -248,6 +416,13 @@ class Autopilot:
                 if clash:
                     reasons.append(f"field already holds {', '.join(sorted(clash))} typed in this run")
                     continue
+                if e.empty_on_record and field_has_value(el, e.target.hint if e.target else ""):
+                    return (
+                        None,
+                        None,
+                        "",
+                        "field already holds existing data (recorded when empty): handing over to AI",
+                    )
             if status == "occluded" and not self._kb_hidden:
                 hidden_el = self._occluded_node(e.target, norm)
                 if hidden_el is not None and keyboard_covers(hidden_el, norm):
@@ -266,9 +441,13 @@ class Autopilot:
             return first[0], first[1], first[2], ""
         if len(cands) > 1:
             return None, None, "", "several recorded steps apply here"
-        if not reasons or all(r == "target not_found" for r in reasons):
+        waiting = [r for r in reasons if r.startswith("waits for ")]
+        blocking = [r for r in reasons if not r.startswith("waits for ")]
+        if blocking and all(r == "target not_found" for r in blocking):
             return None, None, "", "recorded target not found"
-        return None, None, "", reasons[0]
+        if not reasons:
+            return None, None, "", "recorded target not found"
+        return None, None, "", (blocking[0] if blocking else waiting[0])
 
     @staticmethod
     def _occluded_node(desc, norm):
@@ -289,9 +468,11 @@ class Autopilot:
             v = fold(value)
             if edge.target is not None and not edge.target.focused_editable:
                 # The value must sit in the recorded field, not just anywhere.
-                field, _ = resolve(edge.target, norm)
+                field = self._field_for_target(edge.target, norm)
                 if field is not None:
                     return v in fold(str(field.get("text") or ""))
+                if edge.target.resource_id or edge.target.hint:
+                    return False
             return any(
                 v in fold(str(n.get("text") or ""))
                 for n in visible_app_nodes(norm)
@@ -304,11 +485,77 @@ class Autopilot:
         # know which screen should come), and the anchors confirm it.
         m = match_screen(fp, self.wf.node_fps(), tau=self.tau, delta=0.0, min_app_tokens=1)
         anchors = anchors_present(edge.anchors, norm)
+        form_ok = bool(anchors and edge.dst and self._matches_form_fields(edge.dst, norm))
         logger.info(
             f"Autopilot verify {edge.id}: expect {edge.dst}, best {m.node_id} ({m.score:.2f}),"
-            f" anchors={'ok' if anchors else 'missing'}, app_tokens={fp.app_token_count}"
+            f" anchors={'ok' if anchors else 'missing'}, form={'ok' if form_ok else 'no'},"
+            f" app_tokens={fp.app_token_count}"
         )
-        return m.matched and m.node_id == edge.dst and anchors
+        return ((m.matched and m.node_id == edge.dst) or form_ok) and anchors
+
+    def _expected_end_values(self) -> list[str]:
+        """Task slot values expected to appear on the workflow's end screen (L-039)."""
+        used_slots = {e.slot for e in self.wf.edges if e.kind == "slot" and e.slot}
+        out: list[str] = []
+        seen: set[str] = set()
+        for slot, val in self.slot_values.items():
+            if not val or (used_slots and slot not in used_slots):
+                continue
+            key = fold(val)
+            if key and key not in seen:
+                seen.add(key)
+                out.append(val)
+        return out
+
+    def _form_still_open(self, norm) -> bool:
+        """True when an editable field on screen still holds a typed task value (L-044)."""
+        return bool(typed_slots(norm or [], self.slot_values))
+
+    @staticmethod
+    def _values_on_screen(norm, values: list[str]) -> set[str]:
+        labels = [
+            fold(node_label(n))
+            for n in visible_app_nodes(norm or [])
+            if not is_editable(n) and node_label(n)
+        ]
+        return {v for v in values if fold(v) and any(fold(v) in lb for lb in labels)}
+
+    async def _verify_end_screen(self, driver: AutopilotDriver, norm, rep: AutopilotReport) -> None:
+        """Checks whether expected slot values appear on the end screen, scrolling
+        safely until found, list end, or ``MAX_SCROLL_SEARCH`` (L-039, L-041)."""
+        expected = self._expected_end_values()
+        if not expected:
+            return
+        found = self._values_on_screen(norm, expected)
+        cur_norm = norm
+        vscrolls = 0
+        while len(found) < len(expected) and _is_scrollable(cur_norm) and vscrolls < MAX_SCROLL_SEARCH:
+            swipe = _scroll_swipe(cur_norm)
+            if swipe is None:
+                break
+            before = _labels(cur_norm)
+            ok, _ = await driver.act(
+                "swipe",
+                {
+                    "coordinates": swipe,
+                    "target_description": "autopilot: scroll to verify recorded result on end screen",
+                },
+                None,
+            )
+            if not ok:
+                break
+            rep.acted += 1
+            vscrolls += 1
+            snorm, _ = _screen(driver.current())
+            if snorm is None:
+                break
+            found |= self._values_on_screen(snorm, expected)
+            if _labels(snorm) == before:
+                break
+            cur_norm = snorm
+        rep.verified_found = [v for v in expected if v in found]
+        rep.verified_missing = [v for v in expected if v not in found]
+        rep.verify_scrolls = vscrolls
 
     def _note(self, edge: Edge, ok: bool) -> None:
         if ok:
@@ -331,7 +578,7 @@ class Autopilot:
                     rep.stop_reason = f"replay limit of {self.max_steps} steps reached"
                     break
                 norm, fp = _screen(driver.current())
-                node_id, why = self._match(fp)
+                node_id, why = self._match_live(norm, fp)
                 if node_id is None:
                     rep.stop_reason = why
                     break
@@ -364,19 +611,28 @@ class Autopilot:
                         rep.stop_reason = "recorded target not found and no safe area to scroll"
                         break
                     before = _labels(norm)
-                    ok, _ = await driver.act("swipe", {"coordinates": swipe}, None)
+                    ok, _ = await driver.act(
+                        "swipe",
+                        {
+                            "coordinates": swipe,
+                            "target_description": "autopilot: scroll to find the recorded field",
+                        },
+                        None,
+                    )
                     rep.acted += 1
                     scrolls += 1
                     snorm, sfp = _screen(driver.current())
                     if not ok or _labels(snorm) == before:
                         rep.stop_reason = "recorded target not found (end of the list reached)"
                         break
-                    if self._match(sfp)[0] != node_id:
+                    if self._match(sfp)[0] != node_id and not self._shares_form_fields(node_id, snorm):
                         rep.stop_reason = "scrolling for the recorded target left the recorded screen"
                         break
                     rep.ran.append("swipe up (looking for the recorded target) -> ok")
                     continue
                 if edge is None:
+                    if self._finished:
+                        await self._verify_end_screen(driver, norm, rep)
                     rep.stop_reason = why
                     break
                 args: dict[str, Any] = {}
@@ -399,6 +655,7 @@ class Autopilot:
                     rep.stop_detail = summary[:160]
                     break
                 verified = False
+                vnorm = None
                 for attempt in range(self.verify_polls):
                     raw = driver.current() if attempt == 0 else await driver.refresh()
                     vnorm, vfp = _screen(raw)
@@ -406,6 +663,10 @@ class Autopilot:
                         verified = True
                         break
                     await asyncio.sleep(self.poll_interval_s)
+                if verified and edge.dst and self._shares_form_fields(edge.dst, vnorm):
+                    self._assumed_node = edge.dst
+                else:
+                    self._assumed_node = None
                 self._note(edge, verified)
                 report = getattr(driver, "note_verified", None)
                 if callable(report):

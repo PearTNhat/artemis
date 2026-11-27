@@ -195,8 +195,49 @@ class FlashWorkflowHook:
         self._done_steps: list[str] = []
         self._playbook_sent = False
         self._tried_cross_app = False
+        self._end_guard_armed = False
         self.selector_calls = 0
         self._publish_session_workflow()
+
+    def _arm_end_guard(self, rep: Any) -> None:
+        """Arms executor one-shot guard against restarting after reaching end screen (L-039)."""
+        if self._end_guard_armed or self.workflow is None:
+            return
+        executor = getattr(self.runner, "executor", None)
+        arm = getattr(executor, "arm_workflow_end_guard", None)
+        if not callable(arm):
+            return
+        from artemis.workflow.targets import resolve
+
+        snap = self.snapshot()
+        norm = normalize(snap.elements, width=snap.width, height=snap.height) if snap else None
+        node_ids = list(dict.fromkeys(list(self.workflow.start_nodes) + list(self.workflow.end_nodes)))
+        targets: list[dict[str, Any]] = []
+        seen_sigs: set[tuple] = set()
+        for nid in node_ids:
+            for e in self.workflow.edges_from(nid):
+                if e.state != "active" or e.kind != "nav":
+                    continue
+                sig = e.signature()
+                if sig in seen_sigs:
+                    continue
+                seen_sigs.add(sig)
+                entry: dict[str, Any] = {"tool": e.tool, "key": e.key}
+                if e.target is not None:
+                    entry.update({
+                        "resource_id": e.target.resource_id,
+                        "text": e.target.text,
+                        "class_name": e.target.class_name,
+                        "grid": list(e.target.grid),
+                    })
+                    if norm is not None:
+                        el, _ = resolve(e.target, norm)
+                        if el is not None:
+                            entry["bounds"] = list(el["bounds"])
+                targets.append(entry)
+        if targets:
+            self._end_guard_armed = True
+            arm(targets, rep.end_check_summary() or "Workflow already reached its recorded end screen.")
 
     def _publish_session_workflow(self, *, saved: bool = False) -> None:
         """Persists workflow metadata onto the session's ``device_info`` for UI/history badges."""
@@ -276,39 +317,43 @@ class FlashWorkflowHook:
         completed = str((final_report or {}).get("status", "")).lower() == "completed"
         try:
             wf = self.workflow
-            if wf is not None:
-                wf.runs += 1
-                wf.ok_runs += int(completed)
-            if completed and wf is None:
+            if not completed:
+                if wf is not None:
+                    wf.runs += 1
+                    path = self.store.save(wf)
+                    self.workflow = wf
+                    self._publish_session_workflow(saved=False)
+                return
+            if wf is None:
                 # No workflow was selected during the run (always the case in
                 # "record" mode, which never runs the selector): look for one
                 # of the same kind now, so a repeated task is merged into it
                 # instead of creating a new file each time.
                 wf = await self._select_for_merge()
-                if wf is not None:
-                    wf.runs += 1
-                    wf.ok_runs += 1
-            if completed:
-                app_names = _app_names_from_ctx(getattr(self.runner, "ctx", None))
-                built = record_run(
-                    self.steps,
-                    goal=self.runner.goal,
-                    workflow=wf,
-                    slot_values=self.slot_values if wf is not None else None,
-                    app_names=app_names,
-                )
-                if built is not None and wf is None:
-                    built.workflow_id = self.store.new_id(built.package)
-                    built.runs = built.ok_runs = 1
-                wf = built or wf
-            if wf is not None:
-                path = self.store.save(wf)
-                self.workflow = wf
-                self._publish_session_workflow(saved=True)
-                logger.info(
-                    f"Workflow {wf.workflow_id} saved ({len(wf.nodes)} screens, {len(wf.edges)} steps,"
-                    f" autopilot_steps_this_run={self.autopilot_steps}) -> {path}"
-                )
+            app_names = _app_names_from_ctx(getattr(self.runner, "ctx", None))
+            built = record_run(
+                self.steps,
+                goal=self.runner.goal,
+                workflow=wf,
+                slot_values=self.slot_values if wf is not None else None,
+                app_names=app_names,
+            )
+            if built is None:
+                return
+            if wf is None:
+                built.workflow_id = self.store.new_id(built.package)
+                built.runs = built.ok_runs = 1
+            else:
+                built.runs += 1
+                built.ok_runs += 1
+            wf = built
+            path = self.store.save(wf)
+            self.workflow = wf
+            self._publish_session_workflow(saved=True)
+            logger.info(
+                f"Workflow {wf.workflow_id} saved ({len(wf.nodes)} screens, {len(wf.edges)} steps,"
+                f" autopilot_steps_this_run={self.autopilot_steps}) -> {path}"
+            )
         except Exception as exc:
             logger.warning(f"Workflow recording failed: {exc}")
 
@@ -476,6 +521,7 @@ class FlashWorkflowHook:
             # Back on the end screen without acting (e.g. the AI did the last
             # pick itself): say once that the recorded run finished here.
             self._revisit_warned.add("finished")
+            self._arm_end_guard(rep)
             rep.ran = [f"(earlier in this run) {d}" for d in self._done_steps] or rep.ran
             notice = rep.notice(
                 self.workflow.workflow_id, scrollable=bool(getattr(state, "screen_scrollable", False))
@@ -519,6 +565,9 @@ class FlashWorkflowHook:
             self._done_steps.extend(rep.ran)
         if rep.finished:
             self._revisit_warned.add("finished")
+            self._arm_end_guard(rep)
+            if not rep.ran and self._done_steps:
+                rep.ran = [f"(earlier in this run) {d}" for d in self._done_steps]
         new_bytes, new_xml = await self.runner._reobserve_after_resume(state)
         self.runner._force_image = True
         scrollable = bool(getattr(state, "screen_scrollable", False))

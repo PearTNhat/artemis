@@ -975,6 +975,31 @@ def format_minimal_list_with_elements(
     required_ids, star_ids = (
         _required_markers(fused_xml, width) if compact and mark_required else (set(), set())
     )
+    # Row/container selection state (L-040): a RecyclerView/LinearLayout row often
+    # carries selected=true or checked=true while its child TextView does not.
+    screen_area = max(1, width * height)
+    selected_row_boxes: list[tuple[int, int, int, int]] = []
+    checked_row_boxes: list[tuple[int, int, int, int]] = []
+    for container in fused_xml:
+        if str(container.get("text") or container.get("content-desc") or "").strip():
+            continue
+        if _is_truthy(container.get("scrollable")):
+            continue
+        cb = parse_bounds(container.get("bounds"))
+        if not cb or cb[2] <= cb[0] or cb[3] <= cb[1]:
+            continue
+        if (cb[2] - cb[0]) * (cb[3] - cb[1]) > int(screen_area * 0.25) or (cb[3] - cb[1]) > int(height * 0.35):
+            continue
+        if _is_truthy(container.get("selected")):
+            selected_row_boxes.append(cb)
+        if _is_truthy(container.get("checked")):
+            checked_row_boxes.append(cb)
+
+    def _enclosed_by(b: tuple[int, int, int, int], boxes: list[tuple[int, int, int, int]]) -> bool:
+        return any(
+            box[0] - 4 <= b[0] and box[1] - 4 <= b[1] and b[2] <= box[2] + 4 and b[3] <= box[3] + 4
+            for box in boxes
+        )
 
     def is_duplicate(text_val: str, cx: int, cy: int) -> bool:
         text_clean = text_val.strip()
@@ -1059,13 +1084,18 @@ def format_minimal_list_with_elements(
             norm_bounds = normalize_bounds(left, top, right, bottom)
             kind = "Text" if text.strip() else "Hint"
             checkable = str(node.get("checkable") or "").strip().lower() == "true"
+            node_checked_true = _is_truthy(node.get("checked")) or _enclosed_by(bounds, checked_row_boxes)
+            node_selected = _is_truthy(node.get("selected")) or _enclosed_by(bounds, selected_row_boxes)
             if compact:
                 prefix = "" if text.strip() else "hint "
                 line = f"[{idx}] {prefix}{quote(shown)} {norm_bounds}"
                 # Only informative state: ON/OFF of a checkable control (#187),
-                # and a disabled control. Defaults (enabled, unchecked) are noise.
-                if checkable or str(node.get("checked") or "").strip().lower() == "true":
-                    line += f" checked:{state_token(node.get('checked'))}"
+                # selected rows/tabs (L-040), and a disabled control.
+                if checkable or node_checked_true:
+                    cval = "true" if node_checked_true else state_token(node.get("checked"))
+                    line += f" checked:{cval}"
+                if node_selected:
+                    line += " (selected)"
                 if str(node.get("enabled") or "").strip().lower() == "false":
                     line += " enabled:false"
                 if error:
@@ -1079,12 +1109,15 @@ def format_minimal_list_with_elements(
             # invalid attributes render as '?' — unknown, not implicitly OFF.
             if compact:
                 pass
-            elif checkable or node.get("checked") is not None:
+            elif checkable or node.get("checked") is not None or node_checked_true:
                 line += " | " + " ".join(
-                    f"{a}:{state_token(node.get(a))}" for a in ("checked", "enabled")
+                    f"{a}:{'true' if a == 'checked' and node_checked_true else state_token(node.get(a))}"
+                    for a in ("checked", "enabled")
                 )
             elif str(node.get("enabled") or "").strip().lower() == "false":
                 line += " | enabled:false"
+            if not compact and node_selected:
+                line += " (selected)"
             if error and not compact:
                 line += f" | Error: '{error}'"
             lines.append(line)
@@ -1099,11 +1132,17 @@ def format_minimal_list_with_elements(
                 "resource_id": node.get("resource-id"),
                 "is_ocr": False,
             }
+            if hint:
+                element["hint"] = hint
             # Raw uiautomator state attributes, carried on the element for
             # code-side verification (signatures, state predicates).
             for state_attr in ("checked", "checkable", "enabled", "selected", "package"):
                 if node.get(state_attr) is not None:
                     element[state_attr] = node.get(state_attr)
+            if node_selected and not _is_truthy(element.get("selected")):
+                element["selected"] = True
+            if node_checked_true and not _is_truthy(element.get("checked")):
+                element["checked"] = True
             if not text.strip():
                 element["is_hint"] = True
             if error:

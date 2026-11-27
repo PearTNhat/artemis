@@ -299,18 +299,24 @@ và test điền sau.
      workflow (đã có `_value_persisted`, cần dùng để LOẠI cả lần ghi chứ không chỉ chọn lần gõ).
   c. Autopilot: không bao giờ gõ vào ô đang chứa giá trị mà chính autopilot đã gõ cho slot khác trong lần chạy.
 - Cách sửa (đã làm, 3 lớp):
-  a. Executor (Flash): TRƯỚC khi gõ có chỉ định điểm, trên cùng màn hình: điểm không nằm trên ô nhập nào
-     mà ô đang focus chứa một giá trị chính lần chạy đã gõ → từ chối, báo AI dùng index ô hiện tại / ẩn
-     bàn phím / cuộn. (Kiểm SAU khi gõ thì sai: bàn phím làm form tự cuộn, ô dời chỗ.) Ô trống và nội dung
-     không do lần chạy gõ (URL, từ khoá cũ) vẫn cho gõ. Quét 111 lần gõ có điểm trong DB: chặn đúng 1 lần
-     (Gemini "Tran" đè "Minh"); bản đầu chặn nhầm 17, bản hai 3 (Chrome thay "about:blank").
-  b. Recorder (`inconsistent_typing`): lần gõ CUỐI của mỗi giá trị phải còn trong ô lúc gửi form (màn
-     trước thao tác không-gõ kế tiếp); không còn → không ghi workflow từ lần chạy đó (log lý do). Sửa sai
-     (gõ lại đúng ô) vẫn hợp lệ. Lần ghi c403e23a bị từ chối: "'Minh' không còn trong ô First name".
+  a. Executor (Flash, `action_executor.py`): TRƯỚC khi gõ (kể cả có chỉ định hay không chỉ định điểm), kiểm
+     ô đang focus (`_input_would_go_elsewhere`): nếu ô đang giữ một giá trị (`len >= 2`) chính lần chạy đã
+     gõ ở bước trước (khớp nguyên ô hoặc nguyên từ qua boundary, tránh chuỗi con quá ngắn kiểu `"1"` khớp
+     vào URL) → từ chối. Quét toàn bộ 134 bước `input_text` có cây UI trong DB: chặn đúng 4 lần ghi đè
+     (`4809e63a` bước 5 và bước 8, `c403e23a` bước 4 và bước 5), 0 lần chặn nhầm.
+  b. Recorder (`inconsistent_typing` & `record_run`): kiểm từng slot ở màn trước lúc gửi form; nếu ô đã
+     cuộn khuất khi bấm gửi, lùi ngược về màn gần nhất còn thấy ô đó (trước khi bấm gửi), đồng thời cấm
+     hai slot khác nhau dùng chung một ô (`(submit_idx, key)`). Vi phạm → trả `None` (từ chối cả khi gộp
+     vào workflow đã có). Sửa sai rồi gõ lại đúng ô vẫn hợp lệ. `FlashWorkflowHook.finish()` chỉ tăng
+     `runs` / `ok_runs` sau khi `record_run()` chấp nhận lần chạy.
   c. Autopilot: không gõ vào ô đang chứa giá trị nó đã gõ cho slot khác trong lần chạy.
 - Test: `test_l029_recorder_rejects_a_run_that_overwrote_its_own_typing`,
   `test_l029_executor_refuses_typing_over_this_runs_own_value`,
-  `test_l029_autopilot_never_types_over_a_value_it_typed_for_another_field`.
+  `test_l029_untargeted_typing_into_a_field_holding_this_runs_value_is_refused`,
+  `test_l029_autopilot_never_types_over_a_value_it_typed_for_another_field`,
+  `test_l029_executor_short_and_whole_word_matching`,
+  `test_l029_recorder_rejects_overwrite_then_scrolled_away_and_accepts_correction`,
+  `test_ok_runs_unchanged_when_rejected_by_inconsistent_typing`.
 
 ### [L-030] Bản ghi bước vuốt lưu toạ độ mặc định, không phải toạ độ đã gửi — ĐÃ SỬA (27/11)
 - Triệu chứng: UI vẽ cú vuốt ở `[600,700 → 600,300]`, đúng giữa nút "+" của Đồng hồ, nên trông như
@@ -323,20 +329,182 @@ và test điền sau.
 - Test: `test_directional_swipe_needs_no_description` (toạ độ ghi = toạ độ gửi),
   `test_swipe_step_records_the_coordinates_actually_sent`.
 
-### [L-031] Trạng thái đầu và trạng thái đã cuộn của cùng một form là hai màn khác nhau — ĐANG MỞ
+### [L-031] Trạng thái đầu và trạng thái đã cuộn của cùng một form là hai màn khác nhau — ĐÃ SỬA (27/11)
 - Triệu chứng (Gemini, Danh bạ, 27/11, trace 99cd3b7b): bước "Create contact" lần nào cũng
   "screen is not the recorded next screen", 2 lần → `disabled`; mất một bước tự động mỗi lần chạy.
-- Nguyên nhân gốc: lúc ghi, màn sau "Create contact" được lưu ở trạng thái bàn phím đã bật, form đã tự
-  cuộn (n2); lúc phát lại form mở ở trạng thái đầu (n4: có nút Close, phần tài khoản). Độ giống bố cục giữa
-  hai trạng thái dưới ngưỡng gộp nên thành hai node; verify khớp n4 (1.00) thay vì n2.
-- Hướng sửa đề xuất: khi một bước gõ chữ bắt đầu từ node A mà ô của nó (cùng hint / id) cũng có ở node B
-  liền trước trên cùng lần chạy, coi A và B là cùng một form (gộp vân tay); hoặc kiểm màn đích chấp nhận
-  node có chứa mọi ô của các bước gõ kế tiếp. CHƯA CÓ TEST.
+- Nguyên nhân gốc: lúc ghi, màn sau "Create contact" được lưu ở trạng thái bàn phím đã bật hoặc form đã
+  cuộn (ví dụ sau `input_text` Phone của 99cd3b7b độ giống chỉ còn 0.263); lúc phát lại form mở ở
+  trạng thái đầu (`First name`, `Last name`). Độ giống dưới ngưỡng `tau=0.80` nên bị tách hai node; khi
+  hợp nhất trạng thái đầu/cuộn cũng cần tránh ghi trùng vân tay sang node khác gây `ambiguous_margin`
+  hoặc áp nhầm lên ô tìm kiếm chỉ có 1 trường.
+- Cách sửa:
+  - `targets.py` thêm `editable_field_keys` và `field_target_matches` (so khớp theo `(resource-id, hint)`).
+  - `recorder.py`: `_same_form_screens` gộp các trạng thái của form nhiều trường (`>= 2` trường phân biệt)
+    qua gõ phím, cuộn và `BACK` ẩn bàn phím; `_form_node_for_dest` hợp nhất node đích của bước điều hướng
+    vào form khi có ô của bước gõ tiếp theo; chỉ thêm vân tay khi không trùng ngưỡng với node khác
+    (`_conflicts_with_other_node`), giữ nguyên `tau=0.80`.
+  - `autopilot.py`: `_verified` chấp nhận đích là form nhiều trường khi có neo và ô của bước gõ kế tiếp;
+    `_match_live` / `_shares_form_fields` giữ đúng node form qua các bước tự cuộn/bàn phím.
+- Test: `test_l031_99cd3b7b_scrolled_and_initial_form_share_node_and_verify`.
 
-### [L-032] Autopilot không cuộn tìm ô nhập bị bàn phím che khi màn còn bước khác đang chờ — ĐANG MỞ
+### [L-032] Autopilot không cuộn tìm ô nhập bị bàn phím che khi màn còn bước khác đang chờ — ĐÃ SỬA (27/11)
 - Triệu chứng (trace 99cd3b7b, eaa9055c): sau khi gõ ô đầu, autopilot dừng "target not_found" với ô Họ /
   Số điện thoại (bị bàn phím che, không có trong cây UI) → AI phải làm tiếp từng ô.
-- Nguyên nhân gốc: chỉ cuộn tìm khi MỌI lý do loại bước đều là `not_found`; màn còn bước "Lưu" với lý do
-  "chờ gõ đủ các ô" → điều kiện sai → dừng luôn.
-- Hướng sửa đề xuất: bỏ qua các lý do "chờ điều kiện" (waits for … typed, already typed) khi quyết định
-  cuộn; cuộn trong dải trên bàn phím (đã có `safe_swipe_in_norm`) hoặc ẩn bàn phím rồi thử lại. CHƯA CÓ TEST.
+- Nguyên nhân gốc: `_pick` chỉ trả `"recorded target not found"` để kích hoạt cuộn tìm khi MỌI lý do đều
+  là `not_found`; màn còn bước "Save" với lý do `"waits for ... to be typed"` → điều kiện sai → dừng
+  luôn. Ngoài ra `_labels` không tính `hint` của ô trống nên cuộn làm lộ ô mới dễ bị coi là không đổi,
+  và vòng cuộn thoát nếu màn sau cuộn không còn khớp `tau=0.80`.
+- Cách sửa: `_pick` bỏ qua các lý do `"waits for ..."` khi xét kích hoạt cuộn tìm (vẫn giữ thông báo
+  `"waits for ..."` nếu không có lý do chặn nào khác); `_labels` tính thêm `hint` của ô hiển thị;
+  vòng cuộn tiếp tục trong dải an toàn trên bàn phím (qua `safe_swipe_in_norm` hoặc `BACK` ẩn bàn phím)
+  và giữ nguyên node form nếu `_shares_form_fields` còn đúng.
+- Test: `test_l032_scrolls_above_keyboard_or_hides_it_to_fill_three_field_form`.
+
+### [L-033] W0 đếm "bấm sai không phát hiện" cả khi dữ liệu chuẩn bị sai hoặc chỉ khác thứ tự ô — ĐÃ SỬA (27/11)
+- Triệu chứng (27/11): Danh bạ Undet = 3 sau khi sửa L-031/L-032. Phân tích từng ca (script `review_w0.py`):
+  - c403e23a, 9d3661f4: lần chạy THẬT là các phiên đã lưu sai dữ liệu (L-029); autopilot gõ đúng giá trị
+    nên lệch với lần chạy thật → bị đếm là lỗi.
+  - eac2e233: autopilot gõ số điện thoại vào đúng ô Phone TRƯỚC ô Họ (AI làm ngược thứ tự) → khác thứ tự,
+    không sai (trước đó `_same_node` cũng chưa so `hint` khi ô `Phone` bị cuộn lệch toạ độ).
+  - Kịch bản xấu (chuyển sang màn thật của bước AI): 0/8 lần lệch được autopilot nhận là đúng.
+- Cách sửa (`scripts/workflow_replay_eval.py`):
+  1. `evaluate_db` gọi `inconsistent_typing` trước khi chấm từng phiên; loại khỏi dữ liệu chuẩn các phiên
+     bản thân lần chạy đã ghi đè dữ liệu (`c403e23a`, `9d3661f4`, `4809e63a`).
+  2. `_OfflineTraceDriver._find_unordered_form_match` cho phép khớp các bước gõ trong cùng một form (trước
+     bước gửi/điều hướng kế tiếp) không theo thứ tự miễn đúng giá trị và đúng ô; `_same_node` so thêm
+     `hint` cho `EditText` không có `resource-id` khi ô dịch vị trí do cuộn. Sau sửa: W0 `Undet = 0` trên
+     toàn bộ các app (`Contacts` 26/50 = 52.0%, `Total Undet = 0`).
+- Test: `test_l033_w0_matches_unordered_form_typing_and_flags_wrong_field`.
+
+### [L-034] Autopilot có thể gõ đè dữ liệu CÓ SẴN khi một form khác dùng cùng tên ô — ĐÃ SỬA (27/11)
+- Rủi ro (phát hiện khi soát L-031, chưa xảy ra trên máy): L-031 coi hai màn có ≥ 2 ô trùng (id / hint)
+  là cùng một form. Form "Sửa liên hệ" có cùng các ô "First name / Last name / Phone" với form "Tạo liên
+  hệ" → workflow "tạo liên hệ" phát lại trên màn sửa sẽ gõ đè tên / số của một liên hệ có sẵn rồi bấm Lưu.
+  Chốt L-029 chỉ bảo vệ giá trị chính lần chạy đã gõ, không bảo vệ dữ liệu có sẵn.
+- Cách sửa (quy tắc chung, AGENTS.md 2.8 trạng thái có sẵn):
+  - `targets.py`: `field_has_value(node, target_hint)` phân biệt ô đang chứa nội dung thật với ô trống hoặc
+    chỉ hiển thị chữ gợi ý (`text == hint`).
+  - `store.py` & `recorder.py`: `Edge.empty_on_record` (lưu JSON khi `true`; khi gộp nhiều lần chạy giữ
+    `existing.empty_on_record and empty_on_record`) ghi nhận ô có trống lúc ghi hay không.
+  - `autopilot.py`: trong `_pick`, nếu bất kỳ bước gõ nào có `empty_on_record=True` mà ô live hiện tại
+    đã có nội dung (`field_has_value` đúng) thì không gõ bước nào trên form và bàn giao AI ngay
+    (`"field already holds existing data (recorded when empty): handing over to AI"`).
+- Test: `test_l034_create_contact_workflow_does_not_overwrite_prefilled_edit_contact`.
+
+### [L-035] Autopilot cuộn tìm ô không chạy được trên máy thật — ĐÃ SỬA (27/11)
+- Triệu chứng (Gemini, Danh bạ "Trang Mai", trace ada566df, 27/11): bước 4 autopilot vuốt → executor báo
+  `Error during swipe: 'target_description' is required`; autopilot dừng giữa form, AI làm tiếp (và làm sai, L-037).
+- Nguyên nhân gốc: `_scroll_swipe` gửi `swipe(coordinates=[...])`; nhánh vuốt theo toạ độ của executor
+  bắt buộc `target_description`. Unit test dùng thiết bị giả nên không đi qua kiểm tra tham số của executor.
+- Cách sửa: bổ sung `"target_description": "autopilot: scroll to find the recorded field"` vào lệnh `swipe`
+  trong `autopilot.py` (mọi lệnh còn lại — `click`, `input_text`, `press_key`, `manage_app` — đều đã qua
+  được `McpActionExecutor._translate`).
+- Test: `test_l035_autopilot_commands_pass_real_executor_translation_contract` (test hợp đồng qua
+  `McpActionExecutor._translate` thật).
+
+### [L-036] Autopilot bấm Lưu khi một giá trị nằm SAI ô — ĐÃ SỬA (27/11)
+- Triệu chứng (ada566df bước 6): ô Last name chứa "Mai\n0907770007", ô Phone trống → autopilot vẫn bấm
+  Save → lưu "Trang Mai\n0907770007", không có số điện thoại; `workflow_verified=false` nhưng đã lưu.
+- Nguyên nhân gốc: điều kiện "đã gõ đủ" (`typed_slots`) coi một giá trị là đã gõ nếu nó nằm trong BẤT KỲ ô
+  nhập nào, không kiểm ĐÚNG ô của giá trị đó.
+- Cách sửa (`autopilot.py`): thêm `_slot_in_own_field` / `_held_slots` thay cho `typed_slots` đại trà trong
+  `_pick`; từng slot chỉ được tính là đã có khi chính autopilot đã gõ & xác nhận trong lần chạy
+  (`_typed_ok`), hoặc đúng ô đã ghi của slot đó (theo `resource-id` / `hint`, kể cả khi đang bị bàn phím
+  che) hiển thị trên màn hình và chứa giá trị của slot; đồng thời `_verified` với trường đã định danh không
+  chấp nhận rơi sang ô khác nếu không thấy đúng ô.
+- Test: `test_l036_save_refuses_when_phone_value_sits_in_last_name_field`.
+
+### [L-037] AI gõ giá trị của ô khác vào ô đang chứa giá trị chính lần chạy đã gõ — ĐÃ SỬA (27/11)
+- Triệu chứng (ada566df bước 5): AI `input_text(target=<ô Last name chứa "Mai">, text="\n0907770007")` →
+  "Mai\n0907770007". Chốt L-029 không chặn vì điểm gõ nằm TRÊN một ô thật.
+- Cách sửa (`action_executor.py`): thêm `_input_overwrites_typed_field` (dùng chung `_matching_typed_value`
+  với L-029) trong nhánh `flash` của `input_text`: nếu điểm đích nằm trên một ô nhập đang giữ giá trị `V`
+  (`len >= 2`, khớp nguyên ô / nguyên từ) do chính lần chạy đã gõ, mà chữ mới không chứa / không nằm trong
+  `V` và tỉ lệ giống `SequenceMatcher` < 0.5 → từ chối với thông báo rõ giá trị hiện tại và yêu cầu dùng
+  đúng index ô khác. Sửa chính tả hoặc mở rộng/rút gọn cùng giá trị vẫn cho phép. Quét toàn bộ DB: chặn
+  đúng `6/6` lần ghi đè thật (`1fe20ffa` bước 3 & 5, `810e3cf3` bước 4, `9d3661f4` bước 3 & 4, `ada566df`
+  bước 5), `0` lần chặn nhầm.
+- Test: `test_l037_executor_refuses_unrelated_overwrite_on_targeted_field_but_allows_typo_fix`.
+
+### [L-038] Dữ liệu test tích luỹ qua các đợt làm AI loay hoay — ĐANG MỞ (quy trình test)
+- Triệu chứng (27/11): danh sách đồng hồ thế giới và danh bạ trên máy ảo dài dần qua các đợt; thành phố
+  mới thêm nằm cuối danh sách dài → AI vuốt nhiều lần, không thấy, thêm lại (Budapest: 17 lượt AI so với
+  10 khi đối chứng). Kết quả đo bị nhiễu bởi trạng thái máy, không phải bởi workflow.
+- Việc cần làm: đầu mỗi đợt test đưa app về trạng thái sạch giống nhau (xoá các thành phố / liên hệ do test
+  tạo, hoặc `pm clear` app test trên máy ảo test — cần người dùng đồng ý vì xoá hết dữ liệu của app đó).
+
+### [L-039] Autopilot báo "việc gần như đã xong" nhưng không tự kiểm; AI làm lại luồng — ĐÃ SỬA (27/11)
+- Triệu chứng (Gemini, Đồng hồ "Budapest", trace 1f14e556): tới màn kết thúc autopilot nhắn "the task is
+  most likely done"; AI không thấy Budapest (khuất cuối danh sách), bấm "+" thêm lại.
+- Cách sửa (mọi app):
+  1. `autopilot.py`: khi tới `end_nodes`, `_verify_end_screen` kiểm tra các giá trị slot của workflow trên
+     màn kết thúc (tự cuộn an toàn tới khi thấy hết, chạm đáy không đổi hoặc đạt `MAX_SCROLL_SEARCH`);
+     `AutopilotReport.notice` báo sự thật đã kiểm (`End-screen check CONFIRMED: verified 'Budapest'...` hoặc
+     `did NOT see ...`), không phỏng đoán `"most likely done"`.
+  2. `workflow_hook.py` & `action_executor.py`: `arm_workflow_end_guard` nạp bước đầu/lặp lại của workflow
+     vào executor sau khi chạm màn kết thúc; nếu AI vẫn bấm lại bước đó thì `_check_workflow_end_guard`
+     từ chối **một lần** kèm kết quả kiểm ở (1) (nếu AI thật sự bấm lại lần nữa thì vẫn cho phép).
+- Test: `test_l039_autopilot_verifies_end_screen_by_scrolling_and_executor_blocks_entry_once`.
+
+### [L-040] Danh sách phần tử gửi AI bỏ mất trạng thái "đã chọn" → AI bấm vào dòng đã chọn, bỏ chọn nó — ĐÃ SỬA (27/11)
+- Triệu chứng (1f14e556 bước 11): ở màn tìm thành phố, dòng "Budapest, Hungary" có dấu ✓ (đã thêm), cây UI
+  `selected=true` cho cả dòng; danh sách gửi AI chỉ có `[4] "Budapest, Hungary"` → AI bấm → app BỎ CHỌN (xoá
+  thành phố). Lần thêm đầu đã thành công, chính lần "thêm lại" này xoá nó.
+- Nguyên nhân gốc: định dạng list gọn chỉ in `checked:` khi "cần", không in `selected`.
+- Cách sửa (tầng quan sát & prompt, mọi phiên Flash):
+  - `visualization.py`: `generate_minimal_list_and_elements` in ` (selected)` cho mọi phần tử có
+    `selected=true` hoặc nằm gọn trong dòng chứa không nhãn (`<= 25%` màn hình, không phải container cuộn)
+    có `selected=true` / `checked=true`; đồng thời gắn `element["selected"] = True`.
+  - `flash_runner.md`: hướng dẫn rõ mục mang `(selected)` hoặc `checked:true` là đã chọn/đã thêm, bấm lại
+    thường sẽ bỏ chọn/xoá.
+- Test: `test_l040_compact_list_shows_selected_on_item_and_enclosing_row`.
+
+### [L-041] Luật "vuốt tối đa 3 lần" quá ít với danh sách dài — ĐÃ SỬA (27/11)
+- Triệu chứng (1f14e556 lượt 2–6): AI vuốt 4 lần, dừng khi Budapest còn ngay dưới Warsaw (khuất sau thanh tab)
+  → tưởng chưa thêm, làm lại.
+- Nguyên nhân gốc: quy tắc prompt "at most 3 swipes" (thêm ở phiên trước) và `MAX_SCROLL_SEARCH = 3` của
+  autopilot: dừng theo SỐ LẦN thay vì theo TÍN HIỆU hết danh sách.
+- Cách sửa: điều kiện dừng chính là vuốt mà màn không đổi (tới cuối danh sách); nâng trần chống lặp vô hạn
+  lên `10` trong cả `flash_runner.md` và `autopilot.py` (`MAX_SCROLL_SEARCH = 10`). Với feed tải thêm
+  vô hạn (gợi ý / kết quả không liên quan), `flash_runner.md` ưu tiên Search nếu có thanh tìm kiếm và
+  chỉ cuộn tối đa 4–5 lần khi không có tín hiệu khớp thay vì đợi chạm trần 10 lần.
+- Test: `test_l041_autopilot_scrolls_beyond_three_until_end_or_found`.
+
+### [L-042] Kiểm màn kết thúc (L-039) không chạy khi AI quay về màn danh sách — ĐÃ SỬA (27/11)
+- Triệu chứng (Gemini, Đồng hồ "Kyiv", trace 69f6a853): autopilot làm 3 bước, AI chọn "Kyiv, Ukraine" →
+  về màn danh sách; autopilot chỉ báo "các bước của màn này đã chạy rồi", không kiểm gì; AI vuốt 4 lần,
+  bấm "+" gõ lại Kyiv (8 lượt AI, bằng bản tắt workflow 9 lượt). Dữ liệu cuối vẫn đúng (may: lần 2 không bấm dòng đã chọn).
+- Nguyên nhân gốc: (1) phiên ghi kết thúc ở màn TÌM KIẾM (AI báo xong ngay sau khi gõ) nên `end_nodes` =
+  màn tìm kiếm, còn màn danh sách là `start_node`; (2) kiểm L-039 và chốt chặn executor chỉ bật khi khớp `end_nodes`.
+- Cách sửa (`autopilot.py`, mọi app): thêm `_all_slots_completed` (mọi slot hoạt động của workflow đã có
+  bước hoàn thành trong `_done`); trong `_pick`, khi gặp màn thuộc workflow không còn bước chạy tiếp (`not edges`
+  hoặc `all(e.id in _done)` — không có `commitment_stop` hay `provisional`) mà `_all_slots_completed()` đúng,
+  coi luồng đã xong (`_finished = True`) để `Autopilot.run()` chạy `_verify_end_screen` và `FlashWorkflowHook`
+  nạp chốt chặn bước đầu `arm_workflow_end_guard` như khi chạm `end_nodes`.
+- Test: `test_l042_verifies_on_revisit_when_slots_done_even_if_end_node_is_search_screen`.
+
+### [L-043] Gõ nhiều ô trong một chuỗi: ô sau bị bàn phím che → bị từ chối, tốn lượt — ĐÃ SỬA (27/11)
+- Triệu chứng (Gemini, Danh bạ tắt workflow, trace 2051ab38): gõ "Son" xong, bàn phím bật + form cuộn, trên màn chỉ
+  còn ô First name; `input_text(target=12)` (Last name, toạ độ cũ nằm dưới bàn phím) bị chốt L-029 từ chối ĐÚNG.
+  Tương tự ô Phone. AI mất thêm lượt ẩn bàn phím / bấm Next (15 lượt so với 10).
+- Cách sửa (`visualization.py`, `action_executor.py`, `runner.py`, mọi app có form), trước khi từ chối `input_text(target=<index>)`:
+  (1) `_intended_field_descriptor`: lấy định danh phần tử trong `index_elements` cũ — chỉ tin `resource_id` nếu xuất hiện
+      duy nhất 1 lần trong danh sách cũ, nếu trùng nhiều ô thì dùng `hint` (gắn kèm từ `format_minimal_list_with_elements`) hoặc `text`;
+  (2) `_recover_keyboard_hidden_field`: tìm trên màn live đúng 1 `EditText` cùng định danh và không bị che (`!is_occluded`,
+      `!covered_by_other_window`, `!keyboard_covers`) → gõ thẳng vào tâm mới;
+  (3) nếu chưa thấy và có bàn phím (`keyboard_box`), gọi `press_key(BACK)` đúng 1 lần (không bao giờ tự vuốt), `observe()` lại,
+      lặp bước (2); vẫn không thấy duy nhất 1 ô khớp → từ chối (gửi kèm màn mới đã tắt bàn phím);
+  (4) vẫn giữ nguyên chốt L-037 trước khi gõ; nếu đã bấm `BACK`, đặt `recovered_screen_changed=True` để `runner._process_tool_calls`
+      bật `has_waited=True` chặn thao tác index/toạ độ cũ còn lại trong chuỗi (`AGENTS 2.4`), và truyền `recovered_pre_observation`
+      (màn SAU `BACK`) làm `wf_pre` cho `wf_hook.after_action`.
+- Test: `test_l043_executor_recovers_keyboard_hidden_field_via_back_and_unique_hint`, `test_l043_burst_stops_and_recorder_gets_post_back_pre_screen`.
+
+### [L-044] Kiểm màn kết thúc có thể "CONFIRMED" sai khi giá trị chỉ nằm trong ô nhập chưa lưu — ĐÃ SỬA (27/11)
+- Nguyên nhân gốc: `_values_on_screen` (`autopilot.py`) đếm cả chữ trong ô nhập (`EditText`). L-042 cho `_finished=True`
+  cả ở nhánh "màn khớp workflow nhưng không còn bước chạy tiếp" khi các slot đã gõ xong. Nếu lúc đó màn vẫn là form
+  chưa bấm Lưu (vd node chỉ còn cạnh bị disabled/provisional — Danh bạ có 1 cạnh nav disabled), giá trị đang nằm
+  trong ô nhập → báo "CONFIRMED" + nạp chốt chặn bước đầu → AI có thể dừng khi chưa lưu.
+- Cách sửa (`autopilot.py`): (1) `_values_on_screen` lọc `not is_editable(n)`, bỏ qua mọi ô nhập khi tự kiểm L-039;
+  (2) thêm `_form_still_open(norm)` (`bool(typed_slots(norm, self.slot_values))`) và yêu cầu `not self._form_still_open(norm)`
+  ở cả hai nhánh `_finished=True` của L-042 (`not edges` và `all(e.id in _done for e in edges)`).
+- Test: `test_l044_unsaved_form_with_typed_fields_does_not_confirm_completion`.

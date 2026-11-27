@@ -32,6 +32,7 @@ through ``ToolFailure`` or an explicit status.
 
 import ast
 import asyncio
+import difflib
 import hashlib
 import inspect
 import json
@@ -148,6 +149,8 @@ class McpActionExecutor:
         # Values typed by input_text in this run: never overwritten by a typing
         # aimed at a point that is not a field (L-029).
         self._typed_values: list[str] = []
+        # One-shot guard armed after workflow reaches end screen (L-039).
+        self._workflow_end_guard: dict[str, Any] | None = None
         self._last_elements_signature: str | None = None
         self._last_image_hash: str | None = None
         # dHash distance at or below which two screenshots count as the same
@@ -333,6 +336,8 @@ class McpActionExecutor:
         observe_detail: list[dict[str, Any]] = []
         device_offline = False
         ineffective_tap = False
+        recovered_screen_changed = False
+        recovered_pre_observation: dict[str, Any] | None = None
         with span:
             try:
                 session = await self._session_or_start()
@@ -395,11 +400,14 @@ class McpActionExecutor:
                 wire_name, wire_args, finalize, target_semantics = self._translate(
                     raw_name, args, state, index_elements=index_elements
                 )
+                target_coordinates = wire_args.get("target") if raw_name in _POINT_TARGET_ACTIONS else None
+                self._check_workflow_end_guard(
+                    raw_name, wire_args, target_semantics, target_coordinates
+                )
                 if raw_name in _POINT_TARGET_ACTIONS:
                     # The normalized point the action was sent to: the recorded
                     # coordinates of an index target (the model named an index,
                     # not a point).
-                    target_coordinates = wire_args.get("target")
                     if (
                         raw_name == "input_text"
                         and target_coordinates
@@ -407,12 +415,48 @@ class McpActionExecutor:
                     ):
                         other = self._input_would_go_elsewhere(target_coordinates)
                         if other is not None:
+                            recovery = await self._recover_keyboard_hidden_field(
+                                args, session, state, index_elements=index_elements
+                            )
+                            if recovery is not None:
+                                recovered_screen_changed = bool(recovery.get("screen_changed"))
+                                rec_obs = recovery.get("obs")
+                                if rec_obs is not None and getattr(rec_obs, "ok", False):
+                                    shot_path = getattr(rec_obs, "screenshot_path", None) or shot_path
+                                    xml_list = getattr(rec_obs, "elements_text", None) or xml_list
+                                    if recovery.get("obs_bytes") is not None:
+                                        img_bytes = recovery["obs_bytes"]
+                                if recovery.get("recovered"):
+                                    target_coordinates = recovery["point"]
+                                    wire_args["target"] = target_coordinates
+                                    target_semantics = recovery["semantics"]
+                                    recovered_pre_observation = recovery.get("pre_observation")
+                                else:
+                                    desc_hint = recovery.get("hint_or_label") or recovery.get("unique_rid") or "the target field"
+                                    raise _ArgError(
+                                        f"input_text refused: hid the keyboard with BACK, but field"
+                                        f" {desc_hint!r} is still not uniquely visible on the current"
+                                        f" screen (typing would go into focused field {other!r})."
+                                        f" Scroll to reveal the field and use its new index."
+                                    )
+                            else:
+                                raise _ArgError(
+                                    f"input_text refused: {target_coordinates} is not on an input field of"
+                                    f" the current screen (it may be hidden by the keyboard or come from an"
+                                    f" older element list), so the text would go into the focused field"
+                                    f" {other!r} and could overwrite it. Use the index of the field from the"
+                                    f" current list, or hide the keyboard / scroll to show the field first."
+                                )
+                        clash = self._input_overwrites_typed_field(
+                            target_coordinates, str(args.get("text") or "")
+                        )
+                        if clash is not None:
+                            field_name, prev_val = clash
                             raise _ArgError(
-                                f"input_text refused: {target_coordinates} is not on an input field of"
-                                f" the current screen (it may be hidden by the keyboard or come from an"
-                                f" older element list), so the text would go into the focused field"
-                                f" {other!r} and could overwrite it. Use the index of the field from the"
-                                f" current list, or hide the keyboard / scroll to show the field first."
+                                f"input_text refused: field {field_name!r} already holds {prev_val!r}"
+                                " typed earlier in this run, and the new text is not editing that value."
+                                " To fill a different field, pass that field's index from the element list"
+                                " (hide the keyboard or scroll first if it is not shown)."
                             )
                     if raw_name == "input_text" and not target_coordinates and self.agent_name == "flash":
                         other = self._input_would_go_elsewhere(None)
@@ -690,8 +734,99 @@ class McpActionExecutor:
                 "observe_s": round(observe_s, 3) if observe_s is not None else None,
                 # Per-capture phase timings (debug turn log only).
                 "observe_detail": observe_detail or None,
+                **({"recovered_screen_changed": True} if recovered_screen_changed else {}),
+                **({"recovered_pre_observation": recovered_pre_observation} if recovered_pre_observation else {}),
             },
         )
+
+    def arm_workflow_end_guard(self, targets: list[dict[str, Any]], summary: str) -> None:
+        """Arms a one-shot block for entry/restart steps after a workflow reaches
+        its recorded end screen (L-039)."""
+        if targets:
+            self._workflow_end_guard = {"targets": list(targets), "summary": str(summary or "").strip()}
+
+    def _check_workflow_end_guard(
+        self,
+        raw_name: str,
+        wire_args: dict[str, Any],
+        target_semantics: dict[str, Any],
+        target_coordinates: Any,
+    ) -> None:
+        guard = getattr(self, "_workflow_end_guard", None)
+        if not guard:
+            return
+        targets = guard.get("targets") or []
+        matched = False
+        if raw_name in ("click", "tap", "long_press"):
+            from artemis.workflow.targets import fold
+
+            rid = str((target_semantics or {}).get("target_resource_id") or "").strip()
+            txt = str((target_semantics or {}).get("target_text") or "").strip()
+            tclass = str((target_semantics or {}).get("target_class") or "").strip()
+            for gt in targets:
+                if gt.get("tool") not in ("click", "tap", "long_press"):
+                    continue
+                g_rid = str(gt.get("resource_id") or "").strip()
+                g_txt = str(gt.get("text") or "").strip()
+                g_box = gt.get("bounds")
+                if g_rid and rid == g_rid:
+                    if not g_txt or not txt or fold(txt) == fold(g_txt):
+                        matched = True
+                        break
+                if g_txt and txt and fold(txt) == fold(g_txt):
+                    matched = True
+                    break
+                if (
+                    isinstance(target_coordinates, (list, tuple))
+                    and len(target_coordinates) == 2
+                    and isinstance(g_box, (list, tuple))
+                    and len(g_box) == 4
+                ):
+                    px, py = int(target_coordinates[0]), int(target_coordinates[1])
+                    if g_box[0] - 15 <= px <= g_box[2] + 15 and g_box[1] - 15 <= py <= g_box[3] + 15:
+                        matched = True
+                        break
+                if gt.get("class_name") and tclass == gt["class_name"] and isinstance(gt.get("grid"), (list, tuple)):
+                    tbounds = (target_semantics or {}).get("target_bounds")
+                    if isinstance(tbounds, (list, tuple)) and len(tbounds) == 4:
+                        cx = (int(tbounds[0]) + int(tbounds[2])) // 2
+                        cy = (int(tbounds[1]) + int(tbounds[3])) // 2
+                        if (min(9, max(0, cx // 100)), min(9, max(0, cy // 100))) == tuple(gt["grid"]):
+                            matched = True
+                            break
+        elif raw_name == "press_key":
+            k = str(wire_args.get("key") or "").strip().upper()
+            matched = any(gt.get("tool") == "press_key" and str(gt.get("key") or "").upper() == k for gt in targets)
+        if matched:
+            self._workflow_end_guard = None  # one-shot: a genuine retry passes next time
+            summary = guard.get("summary") or "Workflow already reached its recorded end screen."
+            raise _ArgError(
+                f"Action refused once: {summary} Check the current screen first — if you truly need"
+                " to repeat the workflow or add another item, retry this action."
+            )
+
+    def _matching_typed_value(self, held: str) -> str | None:
+        """Returns the session-typed value (len >= 2) held by a field, else None."""
+        if not held:
+            return None
+        typed = [v for v in getattr(self, "_typed_values", []) if len(v) >= 2]
+        for v in typed:
+            if held == v or bool(re.search(r"(?<!\w)" + re.escape(v) + r"(?!\w)", held)):
+                return v
+        return None
+
+    def _normalized_fields(self) -> list[dict[str, Any]]:
+        raw = getattr(self.ctx, "last_raw_observation", None)
+        if not isinstance(raw, dict) or not raw.get("elements"):
+            return []
+        try:
+            from artemis.workflow.fingerprint import normalize
+            from artemis.workflow.targets import is_editable, visible_app_nodes
+
+            norm = normalize(raw["elements"], width=raw.get("width"), height=raw.get("height"))
+        except Exception:
+            return []
+        return [n for n in visible_app_nodes(norm) if is_editable(n)]
 
     def _input_would_go_elsewhere(self, target_point: list[int] | tuple[int, int] | None) -> str | None:
         """Before ``input_text`` aimed at ``target_point`` (0-1000), on the screen
@@ -702,18 +837,11 @@ class McpActionExecutor:
         and would overwrite it (L-029). Empty fields and content this run did not
         type (a URL to replace) are allowed. None otherwise.
         """
-        raw = getattr(self.ctx, "last_raw_observation", None)
-        if not isinstance(raw, dict) or not raw.get("elements"):
+        fields = self._normalized_fields()
+        if not fields:
             return None
-        try:
-            from artemis.workflow.fingerprint import normalize
-            from artemis.workflow.targets import is_editable, node_label, visible_app_nodes
+        from artemis.workflow.targets import node_label
 
-            norm = normalize(raw["elements"], width=raw.get("width"), height=raw.get("height"))
-        except Exception:
-            return None
-        visible = visible_app_nodes(norm)
-        fields = [n for n in visible if is_editable(n)]
         focused = [n for n in fields if n.get("focused")]
         if len(focused) != 1:
             return None
@@ -727,12 +855,290 @@ class McpActionExecutor:
         # target_point None: input_text with no target types into the focused field
         f = focused[0]
         held = str(f.get("text") or "").strip().casefold()
-        typed = [v for v in getattr(self, "_typed_values", []) if v]
-        if not held or not any(v in held for v in typed):
+        if self._matching_typed_value(held) is None:
             # Empty, or content this run did not type (a URL, an old query): the
             # model means to replace it; only our own earlier input is protected.
             return None
         return str(f.get("hint") or node_label(f) or f.get("resource-id") or "the focused field")
+
+    @staticmethod
+    def _intended_field_descriptor(
+        index: int, elements_list: list[dict[str, Any]]
+    ) -> tuple[str, str] | None:
+        """Identifies an index-targeted field from its pre-keyboard list (L-043).
+
+        ``resource_id`` is only trusted when it appears once in ``elements_list``;
+        form inputs commonly share a generic resource-id, in which case we rely
+        on the field's hint or text label instead.
+        """
+        if not 1 <= index <= len(elements_list):
+            return None
+        el = elements_list[index - 1]
+        rid = str(el.get("resource_id") or el.get("resource-id") or "").strip()
+        unique_rid = ""
+        if rid:
+            rid_count = sum(
+                1
+                for item in elements_list
+                if str(item.get("resource_id") or item.get("resource-id") or "").strip() == rid
+            )
+            if rid_count == 1:
+                unique_rid = rid
+        hint_or_label = str(el.get("hint") or el.get("text") or "").strip()
+        if not unique_rid and not hint_or_label:
+            return None
+        return unique_rid, hint_or_label
+
+    async def _recover_keyboard_hidden_field(
+        self,
+        args: dict[str, Any],
+        session: Any,
+        state: Any,
+        *,
+        index_elements: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Dismisses the soft keyboard once via BACK when an indexed input field
+        disappeared off-screen, then re-locates the field on the live screen (L-043).
+
+        Never swipes. Only acts when the target was an element index and a soft
+        keyboard is currently open; otherwise returns ``None`` so L-029 refuses
+        immediately.
+        """
+        if args.get("target_text"):
+            return None
+        raw_target = args.get("target") or args.get("coordinates")
+        norm_target = normalize_coordinate_target(raw_target)
+        if isinstance(norm_target, bool) or not isinstance(norm_target, (int, float)):
+            return None
+        elements_list = self._index_elements(state, index_elements)
+        ident = self._intended_field_descriptor(int(norm_target), elements_list)
+        if ident is None:
+            return None
+        unique_rid, hint_or_label = ident
+
+        raw_before = getattr(self.ctx, "last_raw_observation", None)
+        if not isinstance(raw_before, dict) or not raw_before.get("elements"):
+            return None
+
+        from artemis.workflow.fingerprint import normalize
+        from artemis.workflow.targets import (
+            center,
+            covered_by_other_window,
+            fold,
+            is_editable,
+            is_occluded,
+            keyboard_box,
+            keyboard_covers,
+            node_label,
+            visible_app_nodes,
+        )
+
+        def _find_unique_field(norm_screen: list[dict[str, Any]]) -> dict[str, Any] | None:
+            visible = visible_app_nodes(norm_screen)
+            candidates = [
+                n
+                for n in visible
+                if is_editable(n)
+                and not is_occluded(n, visible)
+                and not covered_by_other_window(n, norm_screen)
+                and not keyboard_covers(n, norm_screen)
+            ]
+            matches: list[dict[str, Any]] = []
+            if unique_rid:
+                matches = [
+                    n
+                    for n in candidates
+                    if str(n.get("resource-id") or "").strip() == unique_rid
+                ]
+            if not matches and hint_or_label:
+                want = fold(hint_or_label)
+                matches = [
+                    n
+                    for n in candidates
+                    if fold(str(n.get("hint") or "")) == want or fold(node_label(n)) == want
+                ]
+            return matches[0] if len(matches) == 1 else None
+
+        def _recovered_payload(
+            node: dict[str, Any],
+            *,
+            screen_changed: bool,
+            pre_obs: dict[str, Any] | None = None,
+            obs: Any = None,
+            obs_bytes: bytes | None = None,
+        ) -> dict[str, Any]:
+            b = [int(v) for v in node["bounds"]]
+            cx, cy = center((b[0], b[1], b[2], b[3]))
+            semantics = {
+                "target_text": str(node.get("text") or node.get("hint") or ""),
+                "target_bounds": b,
+                "target_resource_id": node.get("resource-id"),
+                "target_class": node.get("class"),
+            }
+            return {
+                "recovered": True,
+                "point": [cx, cy],
+                "semantics": semantics,
+                "pre_observation": pre_obs,
+                "obs": obs,
+                "obs_bytes": obs_bytes,
+                "screen_changed": screen_changed,
+            }
+
+        try:
+            norm_before = normalize(
+                raw_before["elements"],
+                width=raw_before.get("width"),
+                height=raw_before.get("height"),
+            )
+        except Exception:
+            return None
+
+        # Step (2): Try finding the unique unoccluded field on the current screen first
+        # (e.g., when auto-scroll shifted it without hiding it under the keyboard).
+        direct = _find_unique_field(norm_before)
+        if direct is not None:
+            return _recovered_payload(direct, screen_changed=False)
+
+        if keyboard_box(norm_before) is None:
+            return None
+        if session is None or not hasattr(session, "call") or not hasattr(session, "observe"):
+            return None
+
+        logger.info(
+            "L-043: pressing BACK once to hide keyboard and re-locate input field "
+            f"(unique_rid={unique_rid!r}, label={hint_or_label!r})"
+        )
+        back_res = await session.call("press_key", {"key": "BACK"})
+        if not getattr(back_res, "ok", False):
+            return None
+        obs = await session.observe(settle_ms=300)
+        if is_device_offline_result(obs):
+            raise DeviceOfflineError(obs.message)
+
+        obs_bytes: bytes | None = None
+        if getattr(obs, "ok", False):
+            shot_path = getattr(obs, "screenshot_path", None)
+            if shot_path:
+                try:
+                    obs_bytes = Path(shot_path).read_bytes()
+                except Exception as read_err:
+                    logger.debug(f"L-043 post-BACK screenshot read skipped: {read_err}")
+            if getattr(obs, "hierarchy_ok", False):
+                if state is not None:
+                    state.indexed_points = [el["center"] for el in obs.elements]
+                    state.indexed_elements = obs.elements
+                    state.screen_scrollable = obs.scrollable
+                self.record_observation(obs.elements, obs_bytes)
+
+        raw_after = getattr(self.ctx, "last_raw_observation", None)
+        if not isinstance(raw_after, dict) or not raw_after.get("elements"):
+            if getattr(obs, "hierarchy_ok", False) and getattr(obs, "elements", None):
+                raw_after = {
+                    "elements": obs.elements,
+                    "width": getattr(obs, "width", None),
+                    "height": getattr(obs, "height", None),
+                }
+            else:
+                return {
+                    "recovered": False,
+                    "obs": obs,
+                    "obs_bytes": obs_bytes,
+                    "screen_changed": True,
+                    "unique_rid": unique_rid,
+                    "hint_or_label": hint_or_label,
+                }
+
+        try:
+            norm_after = normalize(
+                raw_after["elements"],
+                width=raw_after.get("width"),
+                height=raw_after.get("height"),
+            )
+        except Exception:
+            return {
+                "recovered": False,
+                "obs": obs,
+                "obs_bytes": obs_bytes,
+                "screen_changed": True,
+                "unique_rid": unique_rid,
+                "hint_or_label": hint_or_label,
+            }
+
+        node = _find_unique_field(norm_after)
+        if node is None:
+            return {
+                "recovered": False,
+                "obs": obs,
+                "obs_bytes": obs_bytes,
+                "screen_changed": True,
+                "unique_rid": unique_rid,
+                "hint_or_label": hint_or_label,
+            }
+
+        pre_observation = {
+            "elements": list(raw_after.get("elements") or []),
+            "width": raw_after.get("width"),
+            "height": raw_after.get("height"),
+            "seq": raw_after.get("seq"),
+        }
+        return _recovered_payload(
+            node,
+            screen_changed=True,
+            pre_obs=pre_observation,
+            obs=obs,
+            obs_bytes=obs_bytes,
+        )
+
+    def _input_overwrites_typed_field(
+        self, target_point: list[int] | tuple[int, int], new_text: str
+    ) -> tuple[str, str] | None:
+        """Before ``input_text`` aimed at a real input field: refuses when that
+        field already holds a value ``V`` typed earlier in this run and ``new_text``
+        is unrelated to ``V`` (neither contains/is contained by ``V``, nor edits it
+        with similarity >= 0.5) (L-037)."""
+        nt = str(new_text or "").strip().casefold()
+        if not nt:
+            return None
+        fields = self._normalized_fields()
+        if not fields:
+            return None
+        from artemis.workflow.targets import fold, node_label
+
+        x, y = int(target_point[0]), int(target_point[1])
+        margin = 10
+        hits = [
+            f
+            for f in fields
+            if f["bounds"][0] - margin <= x <= f["bounds"][2] + margin
+            and f["bounds"][1] - margin <= y <= f["bounds"][3] + margin
+        ]
+        if not hits:
+            return None
+        target_field = min(
+            hits,
+            key=lambda f: (f["bounds"][2] - f["bounds"][0]) * (f["bounds"][3] - f["bounds"][1]),
+        )
+        held_raw = str(target_field.get("text") or "").strip()
+        hint_raw = str(target_field.get("hint") or "").strip()
+        if not held_raw or (hint_raw and fold(held_raw) == fold(hint_raw)):
+            return None
+        matched = self._matching_typed_value(held_raw.casefold())
+        if matched is None:
+            return None
+        v_fold = fold(matched)
+        nt_fold = fold(nt)
+        if not nt_fold or v_fold in nt_fold or nt_fold in v_fold:
+            return None
+        if difflib.SequenceMatcher(None, v_fold, nt_fold).ratio() >= 0.5:
+            return None
+        held_fold = fold(held_raw)
+        if held_fold in nt_fold or nt_fold in held_fold:
+            return None
+        if difflib.SequenceMatcher(None, held_fold, nt_fold).ratio() >= 0.5:
+            return None
+        label = str(target_field.get("hint") or node_label(target_field) or target_field.get("resource-id") or "this field")
+        return label, (held_raw if fold(held_raw) == v_fold else matched)
 
     # --- Wait for the UI to settle (Flash) ---------------------------------------------
     # Measured on an emulator (dHash, 64 bits): consecutive frames of a still

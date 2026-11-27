@@ -103,6 +103,7 @@ class Edge:
     anchors: list[dict[str, str]] = field(default_factory=list)
     label: str = ""
     description: str = ""
+    empty_on_record: bool = False  # True when an input target was empty when recorded (L-034)
     ok: int = 0
     fail: int = 0
     consec_fail: int = 0
@@ -145,6 +146,8 @@ class Edge:
             d["label"] = self.label
         if self.description:
             d["description"] = self.description
+        if self.empty_on_record:
+            d["empty_on_record"] = True
         return d
 
     @classmethod
@@ -163,6 +166,7 @@ class Edge:
             anchors=list(d.get("anchors") or []),
             label=str(d.get("label") or ""),
             description=str(d.get("description") or ""),
+            empty_on_record=bool(d.get("empty_on_record", False)),
             ok=int(st.get("ok", 0)),
             fail=int(st.get("fail", 0)),
             consec_fail=int(st.get("consec_fail", 0)),

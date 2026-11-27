@@ -230,6 +230,7 @@ class _TurnRecord:
     backtrack_called: bool = False
     had_no_effect: bool = False
     had_ineffective_tap: bool = False
+    last_recovered_screen_changed: bool = False
 
     def result(self) -> dict | None:
         """The turn's execution result in the validator-report shape.
@@ -1207,6 +1208,9 @@ class FlashRunner:
                 name, args, tc_id, state, index_elements=index_elements, skip_observe=skip_observe,
                 verify_live_target=verify_live_target,
             )
+            turn.last_recovered_screen_changed = bool(
+                (getattr(exec_result, "metadata", None) or {}).get("recovered_screen_changed")
+            )
             self._raise_if_device_offline(exec_result=exec_result)
 
             post_img_bytes = None
@@ -1224,6 +1228,16 @@ class FlashRunner:
                 if getattr(wf_hook, "workflow", None) is not None:
                     action_dict["workflow_id"] = wf_hook.workflow.workflow_id
             if wf_hook is not None and wf_hook.enabled and name in action_names:
+                rec_pre = (getattr(exec_result, "metadata", None) or {}).get("recovered_pre_observation")
+                if isinstance(rec_pre, dict) and rec_pre.get("elements"):
+                    from artemis.workflow.recorder import RawScreen
+
+                    wf_pre = RawScreen(
+                        rec_pre.get("elements"),
+                        rec_pre.get("width"),
+                        rec_pre.get("height"),
+                        rec_pre.get("seq"),
+                    )
                 wf_hook.after_action(name, args, action_dict, exec_result, wf_pre)
             if loop_guard is not None and name in action_names:
                 loop_guard.note(
@@ -1710,9 +1724,9 @@ class FlashRunner:
                     break
             elif name in action_names:
                 actions_executed_in_burst += 1
-                if args.get("target_text"):
-                    # An action targeting target_text may have altered the screen; mark has_waited
-                    # so subsequent actions with stale index/coordinates are safely stopped.
+                if args.get("target_text") or getattr(turn, "last_recovered_screen_changed", False):
+                    # target_text or L-043 keyboard dismissal altered the screen;
+                    # mark has_waited so subsequent actions with stale indices/coords stop.
                     has_waited = True
                     index_elements = getattr(state, "indexed_elements", None) or index_elements
             elif name not in action_names:

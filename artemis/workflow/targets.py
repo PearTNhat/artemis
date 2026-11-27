@@ -426,6 +426,53 @@ def typed_slots(norm: list[dict[str, Any]], slot_values: dict[str, str]) -> set[
     return {name for name, value in slot_values.items() if value and any(fold(value) in f for f in fields)}
 
 
+def field_has_value(node: dict[str, Any], target_hint: str = "") -> bool:
+    """True when an editable node currently holds user/existing content rather than
+    being empty or only displaying its placeholder hint (L-034)."""
+    text = str(node.get("text") or "").strip()
+    if not text:
+        return False
+    hint = str(node.get("hint") or target_hint or "").strip()
+    if hint and fold(text) == fold(hint):
+        return False
+    return True
+
+
+def editable_field_keys(norm: Iterable[dict[str, Any]]) -> set[tuple[str, str]]:
+    """Identifying (resource_id, hint) pairs of visible foreground editable fields."""
+    nodes = list(norm)
+    fg = foreground_package(nodes)
+    keys: set[tuple[str, str]] = set()
+    for n in visible_app_nodes(nodes):
+        if fg and n.get("package") != fg:
+            continue
+        if not is_editable(n):
+            continue
+        rid = str(n.get("resource-id") or "").strip()
+        hint = str(n.get("hint") or "").strip()
+        if rid or hint:
+            keys.add((rid, hint))
+    return keys
+
+
+def field_target_matches(target: TargetDescriptor | None, field_keys: set[tuple[str, str]]) -> bool:
+    """True when ``target``'s resource-id or hint matches a field in ``field_keys``."""
+    if target is None or not field_keys:
+        return False
+    rid = target.resource_id.strip()
+    hint = target.hint.strip()
+    if not (rid or hint):
+        return False
+    for k_rid, k_hint in field_keys:
+        if rid and k_rid and k_rid != rid:
+            continue
+        if hint and k_hint and k_hint != hint:
+            continue
+        if (rid and k_rid == rid) or (hint and k_hint == hint):
+            return True
+    return False
+
+
 def is_list_item(node: dict[str, Any], norm: list[dict[str, Any]]) -> bool:
     """A repeated entry of list/scrolling content (a result, a product, a contact),
     not a control that merely floats over the list (FAB, sticky button).
